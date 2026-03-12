@@ -36,6 +36,7 @@ __pypackages__/
 .env
 .env.local
 .env.*
+!.env.example
 *.pem
 secrets.json
 
