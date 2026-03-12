@@ -1,0 +1,1 @@
+"""Bundled MCP server scripts."""

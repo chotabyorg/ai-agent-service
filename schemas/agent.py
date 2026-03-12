@@ -1,0 +1,61 @@
+"""Pydantic schemas for agent management."""
+
+from typing import Any
+from uuid import UUID
+
+from pydantic import BaseModel, ConfigDict, Field
+
+
+class AgentCreate(BaseModel):
+    """Payload for creating a new agent template."""
+
+    user_id: UUID
+    name: str = Field(min_length=1, max_length=255)
+    system_prompt: str = Field(min_length=1)
+    llm_provider: str = Field(min_length=1, max_length=64)
+    model_name: str = Field(min_length=1, max_length=255)
+    temperature: float = Field(default=0.7, ge=0.0, le=2.0)
+    is_active: bool = True
+
+
+class AgentUpdate(BaseModel):
+    """Payload for partially updating an agent template."""
+
+    name: str | None = Field(default=None, min_length=1, max_length=255)
+    system_prompt: str | None = Field(default=None, min_length=1)
+    llm_provider: str | None = Field(default=None, min_length=1, max_length=64)
+    model_name: str | None = Field(default=None, min_length=1, max_length=255)
+    temperature: float | None = Field(default=None, ge=0.0, le=2.0)
+    is_active: bool | None = None
+
+
+class AgentResponse(BaseModel):
+    """Serialized agent template."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    user_id: UUID
+    name: str
+    system_prompt: str
+    llm_provider: str
+    model_name: str
+    temperature: float
+    is_active: bool
+
+
+class AgentCredentialsCreate(BaseModel):
+    """Payload for creating or updating MCP credentials."""
+
+    service_name: str = Field(min_length=1, max_length=100)
+    credentials: dict[str, Any]
+
+
+class AgentCredentialsResponse(BaseModel):
+    """Serialized agent credentials."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    agent_id: UUID
+    service_name: str
+    credentials: dict[str, Any]
