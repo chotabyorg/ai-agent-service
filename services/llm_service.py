@@ -3,6 +3,7 @@
 import json
 import re
 from contextlib import AsyncExitStack
+from dataclasses import dataclass
 from uuid import UUID
 
 from openai import AsyncOpenAI
@@ -26,8 +27,10 @@ class AgentInactiveError(ChatProcessingError):
     """Raised when the target agent is disabled."""
 
 
-class SessionNotFoundError(ChatProcessingError):
-    """Raised when the conversation session does not exist or mismatches the agent."""
+@dataclass
+class ChatProcessingResult:
+    session_id: UUID
+    answer: str
 
 
 class LLMService:
@@ -112,18 +115,23 @@ class LLMService:
         self,
         db_session: AsyncSession,
         agent_id: UUID,
-        session_id: UUID,
+        external_client_id: str,
+        channel: str,
         user_message: str,
-    ) -> str:
+    ) -> ChatProcessingResult:
         agent = await self.agent_service.get_agent_by_id(db_session, agent_id)
         if agent is None:
             raise AgentNotFoundError("Agent not found.")
         if not agent.is_active:
             raise AgentInactiveError("Agent is inactive.")
 
-        conversation_session = await self.session_service.get_session_by_id(db_session, session_id)
-        if conversation_session is None or conversation_session.agent_id != agent_id:
-            raise SessionNotFoundError("Session not found for the specified agent.")
+        conversation_session = await self.session_service.get_or_create_session(
+            db_session,
+            agent_id=agent_id,
+            external_client_id=external_client_id,
+            channel=channel,
+        )
+        session_id = conversation_session.id
 
         credentials_records = await self.agent_service.get_credentials(db_session, agent_id)
         history = await self.history_service.load_history(session_id)
@@ -178,7 +186,7 @@ class LLMService:
                         {"role": "assistant", "content": clean_answer},
                     ]
                     await self.history_service.save_history(session_id, updated_history)
-                    return clean_answer
+                    return ChatProcessingResult(session_id=session_id, answer=clean_answer)
 
                 messages.append(self._assistant_message_to_dict(message))
 

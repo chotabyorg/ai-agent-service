@@ -12,7 +12,6 @@ from services.llm_service import (
     AgentNotFoundError,
     ChatProcessingError,
     LLMService,
-    SessionNotFoundError,
 )
 
 
@@ -24,18 +23,14 @@ DbSession = Annotated[AsyncSession, Depends(get_db)]
 @router.post("/completions", response_model=ChatResponse)
 async def create_chat_completion(payload: ChatRequest, db: DbSession) -> ChatResponse:
     try:
-        answer = await llm_service.process_chat_message(
+        result = await llm_service.process_chat_message(
             db_session=db,
             agent_id=payload.agent_id,
-            session_id=payload.session_id,
+            external_client_id=payload.external_client_id,
+            channel=payload.channel,
             user_message=payload.message,
         )
     except AgentNotFoundError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=str(exc),
-        ) from exc
-    except SessionNotFoundError as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=str(exc),
@@ -51,4 +46,4 @@ async def create_chat_completion(payload: ChatRequest, db: DbSession) -> ChatRes
             detail=str(exc),
         ) from exc
 
-    return ChatResponse(answer=answer)
+    return ChatResponse(session_id=result.session_id, answer=result.answer)

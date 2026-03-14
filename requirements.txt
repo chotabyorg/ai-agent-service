@@ -11,3 +11,5 @@ redis
 openai
 mcp
 fast-bitrix24
+pytest
+pytest-asyncio

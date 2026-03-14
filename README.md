@@ -283,8 +283,9 @@ curl -X PUT http://localhost:8000/v1/agents/11111111-1111-1111-1111-111111111111
 curl -X POST http://localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "session_id": "22222222-2222-2222-2222-222222222222",
     "agent_id": "11111111-1111-1111-1111-111111111111",
+    "external_client_id": "telegram:123456",
+    "channel": "telegram",
     "message": "Найди контакт Иван Петров в Bitrix"
   }'
 ```
