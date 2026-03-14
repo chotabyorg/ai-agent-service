@@ -13,3 +13,6 @@ mcp
 fast-bitrix24
 pytest
 pytest-asyncio
+httpx
+fakeredis
+testcontainers[postgresql]

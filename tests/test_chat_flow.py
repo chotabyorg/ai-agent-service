@@ -1,217 +1,730 @@
-from dataclasses import dataclass
-from types import SimpleNamespace
+import asyncio
+import json
 from uuid import UUID, uuid4
 
-from fastapi.testclient import TestClient
+import pytest
+from sqlalchemy import func, select
 
-import main
-from api.dependencies import get_db
-from api.v1 import agents as agents_api
 from api.v1 import chat as chat_api
+import services.llm_service as llm_service_module
+from models.agent import AgentCredentials
+from models.session import ConversationSession
+from tests.fakes import (
+    FakeMCPController,
+    ScriptedLLMClient,
+    build_llm_response,
+    build_tool_call,
+    build_tool_result,
+)
 
 
-@dataclass
-class FakeAgent:
-    id: UUID
-    user_id: UUID
-    name: str
-    system_prompt: str
-    llm_provider: str
-    model_name: str
-    temperature: float
-    is_active: bool
+def build_agent_payload() -> dict[str, object]:
+    return {
+        "user_id": str(uuid4()),
+        "name": "Support agent",
+        "system_prompt": "Be concise and helpful.",
+        "llm_provider": "openrouter",
+        "model_name": "google/gemini-2.5-flash",
+        "temperature": 0.4,
+        "is_active": True,
+    }
 
 
-@dataclass
-class FakeConversationSession:
-    id: UUID
-    agent_id: UUID
-    external_client_id: str
-    channel: str
+async def create_agent(api_client, **overrides) -> dict[str, object]:
+    payload = build_agent_payload()
+    payload.update(overrides)
+    response = await api_client.post("/v1/agents/", json=payload)
+    assert response.status_code == 201
+    return response.json()
 
 
-class InMemoryAgentService:
-    def __init__(self) -> None:
-        self.agents: dict[UUID, FakeAgent] = {}
-
-    async def create_agent(self, session: object, payload: object) -> FakeAgent:
-        agent = FakeAgent(id=uuid4(), **payload.model_dump())
-        self.agents[agent.id] = agent
-        return agent
-
-    async def get_agent_by_id(self, session: object, agent_id: UUID) -> FakeAgent | None:
-        return self.agents.get(agent_id)
-
-    async def get_credentials(self, session: object, agent_id: UUID) -> list[object]:
-        return []
+async def store_credentials(api_client, agent_id: str, service_name: str, credentials: dict[str, object]) -> None:
+    response = await api_client.put(
+        f"/v1/agents/{agent_id}/credentials",
+        json={"service_name": service_name, "credentials": credentials},
+    )
+    assert response.status_code == 200
 
 
-class InMemorySessionService:
-    def __init__(self) -> None:
-        self.sessions: dict[tuple[UUID, str, str], FakeConversationSession] = {}
-
-    async def get_or_create_session(
-        self,
-        session: object,
-        agent_id: UUID,
-        external_client_id: str,
-        channel: str,
-    ) -> FakeConversationSession:
-        key = (agent_id, external_client_id, channel)
-        if key not in self.sessions:
-            self.sessions[key] = FakeConversationSession(
-                id=uuid4(),
-                agent_id=agent_id,
-                external_client_id=external_client_id,
-                channel=channel,
-            )
-        return self.sessions[key]
+@pytest.fixture
+def llm_controller(monkeypatch: pytest.MonkeyPatch) -> ScriptedLLMClient:
+    controller = ScriptedLLMClient()
+    monkeypatch.setattr(chat_api.llm_service, "llm", controller)
+    return controller
 
 
-class InMemoryHistoryService:
-    def __init__(self) -> None:
-        self.history_by_session: dict[UUID, list[dict[str, str]]] = {}
-
-    async def load_history(self, session_id: UUID) -> list[dict[str, str]]:
-        return list(self.history_by_session.get(session_id, []))
-
-    async def save_history(self, session_id: UUID, history: list[dict[str, str]]) -> None:
-        self.history_by_session[session_id] = [dict(item) for item in history]
+@pytest.fixture
+def mcp_controller(monkeypatch: pytest.MonkeyPatch) -> FakeMCPController:
+    controller = FakeMCPController()
+    monkeypatch.setattr(llm_service_module, "MCPManager", controller.make_manager_class())
+    return controller
 
 
-class FakeCompletions:
-    def __init__(self) -> None:
-        self.calls: list[dict[str, object]] = []
+@pytest.mark.integration
+async def test_chat_creates_and_reuses_session_key(api_client, db_session, llm_controller, fake_redis) -> None:
+    llm_controller.chat.completions.queue(
+        build_llm_response(content="Echo: Hello"),
+        build_llm_response(content="Echo: How are you?"),
+    )
+    agent = await create_agent(api_client)
 
-    async def create(self, **kwargs: object) -> object:
-        self.calls.append(kwargs)
-        messages = kwargs["messages"]
-        user_messages = [message for message in messages if message["role"] == "user"]
-        last_user_message = user_messages[-1]["content"]
-        return SimpleNamespace(
-            choices=[
-                SimpleNamespace(
-                    message=SimpleNamespace(
-                        content=f"Echo: {last_user_message}",
-                        tool_calls=None,
-                    )
-                )
+    first = await api_client.post(
+        "/v1/chat/completions",
+        json={
+            "agent_id": agent["id"],
+            "external_client_id": "telegram:42",
+            "channel": "telegram",
+            "message": "Hello",
+        },
+    )
+    second = await api_client.post(
+        "/v1/chat/completions",
+        json={
+            "agent_id": agent["id"],
+            "external_client_id": "telegram:42",
+            "channel": "telegram",
+            "message": "How are you?",
+        },
+    )
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert first.json()["session_id"] == second.json()["session_id"]
+
+    async with db_session() as session:
+        sessions = await session.execute(select(ConversationSession))
+        stored_sessions = sessions.scalars().all()
+    assert len(stored_sessions) == 1
+    history = json.loads(await fake_redis.get(f"chat_history:{first.json()['session_id']}"))
+    assert history == [
+        {"role": "user", "content": "Hello"},
+        {"role": "assistant", "content": "Echo: Hello"},
+        {"role": "user", "content": "How are you?"},
+        {"role": "assistant", "content": "Echo: How are you?"},
+    ]
+
+
+@pytest.mark.integration
+async def test_chat_creates_distinct_sessions_for_different_channel_and_agent(
+    api_client,
+    db_session,
+    llm_controller,
+) -> None:
+    llm_controller.chat.completions.queue(
+        build_llm_response(content="telegram"),
+        build_llm_response(content="instagram"),
+        build_llm_response(content="other-agent"),
+    )
+    first_agent = await create_agent(api_client)
+    second_agent = await create_agent(api_client, name="Backup agent")
+
+    first = await api_client.post(
+        "/v1/chat/completions",
+        json={
+            "agent_id": first_agent["id"],
+            "external_client_id": "user-1",
+            "channel": "telegram",
+            "message": "Hello",
+        },
+    )
+    second = await api_client.post(
+        "/v1/chat/completions",
+        json={
+            "agent_id": first_agent["id"],
+            "external_client_id": "user-1",
+            "channel": "instagram",
+            "message": "Hello",
+        },
+    )
+    third = await api_client.post(
+        "/v1/chat/completions",
+        json={
+            "agent_id": second_agent["id"],
+            "external_client_id": "user-1",
+            "channel": "telegram",
+            "message": "Hello",
+        },
+    )
+
+    assert len({first.json()["session_id"], second.json()["session_id"], third.json()["session_id"]}) == 3
+
+    async with db_session() as session:
+        count_result = await session.execute(select(func.count()).select_from(ConversationSession))
+        assert count_result.scalar_one() == 3
+
+
+@pytest.mark.integration
+async def test_chat_uses_existing_redis_history_and_strips_thinking_tags(
+    api_client,
+    llm_controller,
+    fake_redis,
+) -> None:
+    llm_controller.chat.completions.queue(build_llm_response(content="Visible answer"))
+    agent = await create_agent(api_client)
+    first = await api_client.post(
+        "/v1/chat/completions",
+        json={
+            "agent_id": agent["id"],
+            "external_client_id": "existing-user",
+            "channel": "telegram",
+            "message": "Initial message",
+        },
+    )
+    session_id = first.json()["session_id"]
+    await fake_redis.set(
+        f"chat_history:{session_id}",
+        json.dumps(
+            [
+                {"role": "user", "content": "Prev user"},
+                {"role": "assistant", "content": "Prev assistant"},
             ]
+        ),
+    )
+    llm_controller.chat.completions.queue(
+        build_llm_response(content="<thinking>draft</thinking>Final answer"),
+    )
+
+    second = await api_client.post(
+        "/v1/chat/completions",
+        json={
+            "agent_id": agent["id"],
+            "external_client_id": "existing-user",
+            "channel": "telegram",
+            "message": "New question",
+        },
+    )
+
+    assert second.status_code == 200
+    assert second.json()["answer"] == "Final answer"
+    messages = llm_controller.chat.completions.calls[-1]["messages"]
+    assert messages == [
+        {"role": "system", "content": "Be concise and helpful."},
+        {"role": "user", "content": "Prev user"},
+        {"role": "assistant", "content": "Prev assistant"},
+        {"role": "user", "content": "New question"},
+    ]
+
+
+@pytest.mark.integration
+async def test_chat_falls_back_to_default_answer_when_model_returns_empty_content(
+    api_client,
+    llm_controller,
+) -> None:
+    llm_controller.chat.completions.queue(build_llm_response(content=""))
+    agent = await create_agent(api_client)
+
+    response = await api_client.post(
+        "/v1/chat/completions",
+        json={
+            "agent_id": agent["id"],
+            "external_client_id": "user-1",
+            "channel": "telegram",
+            "message": "Hello",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["answer"] == "I processed your request."
+
+
+@pytest.mark.integration
+async def test_chat_with_tool_call_executes_mcp_and_saves_only_user_and_assistant_turns(
+    api_client,
+    llm_controller,
+    mcp_controller,
+    fake_redis,
+) -> None:
+    mcp_controller.tools_by_service["bitrix"] = [
+        {
+            "type": "function",
+            "function": {
+                "name": "find_contact",
+                "description": "Find a contact",
+                "parameters": {"type": "object", "properties": {"phone": {"type": "string"}}},
+            },
+        }
+    ]
+    mcp_controller.tool_results["find_contact"] = build_tool_result('{"contact_id": 42}')
+    llm_controller.chat.completions.queue(
+        build_llm_response(
+            tool_calls=[build_tool_call("tool-1", "find_contact", '{"phone":"+123"}')]
+        ),
+        build_llm_response(content="Contact found"),
+    )
+    agent = await create_agent(api_client)
+    await store_credentials(
+        api_client,
+        agent["id"],
+        "bitrix",
+        {"webhook_url": "https://example.bitrix/rest"},
+    )
+
+    response = await api_client.post(
+        "/v1/chat/completions",
+        json={
+            "agent_id": agent["id"],
+            "external_client_id": "user-42",
+            "channel": "telegram",
+            "message": "Find this contact",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["answer"] == "Contact found"
+    assert mcp_controller.tool_calls == [
+        {
+            "service_name": "bitrix",
+            "tool_name": "find_contact",
+            "tool_args": {"phone": "+123"},
+        }
+    ]
+    first_call = llm_controller.chat.completions.calls[0]
+    second_call = llm_controller.chat.completions.calls[1]
+    assert first_call["tools"] == mcp_controller.tools_by_service["bitrix"]
+    assert second_call["messages"][-1] == {
+        "role": "tool",
+        "tool_call_id": "tool-1",
+        "name": "find_contact",
+        "content": '{"contact_id": 42}',
+    }
+    history = json.loads(await fake_redis.get(f"chat_history:{response.json()['session_id']}"))
+    assert history == [
+        {"role": "user", "content": "Find this contact"},
+        {"role": "assistant", "content": "Contact found"},
+    ]
+
+
+@pytest.mark.integration
+async def test_chat_continues_after_tool_execution_failure(api_client, llm_controller, mcp_controller) -> None:
+    mcp_controller.tools_by_service["bitrix"] = [
+        {
+            "type": "function",
+            "function": {
+                "name": "find_contact",
+                "description": "Find a contact",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }
+    ]
+    mcp_controller.call_errors["find_contact"] = RuntimeError("bitrix unavailable")
+    llm_controller.chat.completions.queue(
+        build_llm_response(tool_calls=[build_tool_call("tool-1", "find_contact", "{}")]),
+        build_llm_response(content="Fallback answer"),
+    )
+    agent = await create_agent(api_client)
+    await store_credentials(
+        api_client,
+        agent["id"],
+        "bitrix",
+        {"webhook_url": "https://example.bitrix/rest"},
+    )
+
+    response = await api_client.post(
+        "/v1/chat/completions",
+        json={
+            "agent_id": agent["id"],
+            "external_client_id": "user-42",
+            "channel": "telegram",
+            "message": "Find this contact",
+        },
+    )
+
+    assert response.status_code == 200
+    tool_message = llm_controller.chat.completions.calls[1]["messages"][-1]
+    assert tool_message["role"] == "tool"
+    assert "Tool execution failed: bitrix unavailable" in tool_message["content"]
+
+
+@pytest.mark.integration
+async def test_chat_passes_empty_dict_when_tool_arguments_are_invalid_json(
+    api_client,
+    llm_controller,
+    mcp_controller,
+) -> None:
+    mcp_controller.tools_by_service["bitrix"] = [
+        {
+            "type": "function",
+            "function": {
+                "name": "find_contact",
+                "description": "Find a contact",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }
+    ]
+    llm_controller.chat.completions.queue(
+        build_llm_response(tool_calls=[build_tool_call("tool-1", "find_contact", "{not-json}")]),
+        build_llm_response(content="Handled invalid args"),
+    )
+    agent = await create_agent(api_client)
+    await store_credentials(
+        api_client,
+        agent["id"],
+        "bitrix",
+        {"webhook_url": "https://example.bitrix/rest"},
+    )
+
+    response = await api_client.post(
+        "/v1/chat/completions",
+        json={
+            "agent_id": agent["id"],
+            "external_client_id": "user-99",
+            "channel": "telegram",
+            "message": "Call tool",
+        },
+    )
+
+    assert response.status_code == 200
+    assert mcp_controller.tool_calls[0]["tool_args"] == {}
+
+
+@pytest.mark.integration
+async def test_chat_skips_unsupported_service_credentials_when_mcp_raises_value_error(
+    api_client,
+    llm_controller,
+    mcp_controller,
+) -> None:
+    mcp_controller.enter_errors["custom"] = ValueError("Unsupported MCP service: custom")
+    llm_controller.chat.completions.queue(build_llm_response(content="No tools needed"))
+    agent = await create_agent(api_client)
+    await store_credentials(api_client, agent["id"], "custom", {"token": "tenant-secret"})
+
+    response = await api_client.post(
+        "/v1/chat/completions",
+        json={
+            "agent_id": agent["id"],
+            "external_client_id": "user-1",
+            "channel": "telegram",
+            "message": "Hello",
+        },
+    )
+
+    assert response.status_code == 200
+    assert llm_controller.chat.completions.calls[0]["tools"] is None
+
+
+@pytest.mark.integration
+async def test_chat_skips_bitrix_credentials_without_webhook_url(
+    api_client,
+    llm_controller,
+    mcp_controller,
+) -> None:
+    mcp_controller.enter_errors["bitrix"] = ValueError("Bitrix credentials must contain 'webhook_url'.")
+    llm_controller.chat.completions.queue(build_llm_response(content="Proceed without tools"))
+    agent = await create_agent(api_client)
+    await store_credentials(api_client, agent["id"], "bitrix", {"token": "incomplete"})
+
+    response = await api_client.post(
+        "/v1/chat/completions",
+        json={
+            "agent_id": agent["id"],
+            "external_client_id": "user-2",
+            "channel": "telegram",
+            "message": "Hello",
+        },
+    )
+
+    assert response.status_code == 200
+    assert llm_controller.chat.completions.calls[0]["tools"] is None
+
+
+@pytest.mark.integration
+async def test_chat_returns_404_for_missing_agent(api_client, llm_controller) -> None:
+    llm_controller.chat.completions.queue(build_llm_response(content="unused"))
+
+    response = await api_client.post(
+        "/v1/chat/completions",
+        json={
+            "agent_id": str(uuid4()),
+            "external_client_id": "user-404",
+            "channel": "telegram",
+            "message": "Hello",
+        },
+    )
+
+    assert response.status_code == 404
+    assert response.json() == {"detail": "Agent not found."}
+
+
+@pytest.mark.integration
+async def test_chat_returns_409_for_inactive_agent(api_client, llm_controller) -> None:
+    llm_controller.chat.completions.queue(build_llm_response(content="unused"))
+    agent = await create_agent(api_client, is_active=False)
+
+    response = await api_client.post(
+        "/v1/chat/completions",
+        json={
+            "agent_id": agent["id"],
+            "external_client_id": "user-409",
+            "channel": "telegram",
+            "message": "Hello",
+        },
+    )
+
+    assert response.status_code == 409
+    assert response.json() == {"detail": "Agent is inactive."}
+
+
+@pytest.mark.integration
+async def test_chat_ignores_redis_load_failures(api_client, llm_controller, fake_redis, monkeypatch) -> None:
+    from redis.exceptions import RedisError
+
+    llm_controller.chat.completions.queue(build_llm_response(content="No history loaded"))
+    agent = await create_agent(api_client)
+
+    async def broken_get(*args, **kwargs):
+        raise RedisError("read failure")
+
+    monkeypatch.setattr(fake_redis, "get", broken_get)
+    response = await api_client.post(
+        "/v1/chat/completions",
+        json={
+            "agent_id": agent["id"],
+            "external_client_id": "user-redis-load",
+            "channel": "telegram",
+            "message": "Hello",
+        },
+    )
+
+    assert response.status_code == 200
+    assert llm_controller.chat.completions.calls[0]["messages"] == [
+        {"role": "system", "content": "Be concise and helpful."},
+        {"role": "user", "content": "Hello"},
+    ]
+
+
+@pytest.mark.integration
+async def test_chat_ignores_redis_save_failures(api_client, llm_controller, fake_redis, monkeypatch) -> None:
+    from redis.exceptions import RedisError
+
+    llm_controller.chat.completions.queue(build_llm_response(content="History save failed"))
+    agent = await create_agent(api_client)
+
+    async def broken_set(*args, **kwargs):
+        raise RedisError("write failure")
+
+    monkeypatch.setattr(fake_redis, "set", broken_set)
+    response = await api_client.post(
+        "/v1/chat/completions",
+        json={
+            "agent_id": agent["id"],
+            "external_client_id": "user-redis-save",
+            "channel": "telegram",
+            "message": "Hello",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["answer"] == "History save failed"
+    assert await fake_redis.keys("chat_history:*") == []
+
+
+@pytest.mark.integration
+async def test_identical_tool_call_is_blocked_to_prevent_infinite_loop(
+    api_client,
+    llm_controller,
+    mcp_controller,
+) -> None:
+    mcp_controller.tools_by_service["bitrix"] = [
+        {
+            "type": "function",
+            "function": {
+                "name": "find_contact",
+                "description": "Find a contact",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }
+    ]
+    mcp_controller.tool_results["find_contact"] = build_tool_result('{"contact_id": 42}')
+    llm_controller.chat.completions.queue(
+        build_llm_response(
+            tool_calls=[build_tool_call("tool-1", "find_contact", '{"phone":"+123"}')]
+        ),
+        build_llm_response(
+            tool_calls=[build_tool_call("tool-2", "find_contact", '{"phone":"+123"}')]
+        ),
+        build_llm_response(content="Stopped looping"),
+    )
+    agent = await create_agent(api_client)
+    await store_credentials(
+        api_client,
+        agent["id"],
+        "bitrix",
+        {"webhook_url": "https://example.bitrix/rest"},
+    )
+
+    response = await api_client.post(
+        "/v1/chat/completions",
+        json={
+            "agent_id": agent["id"],
+            "external_client_id": "loop-user",
+            "channel": "telegram",
+            "message": "Repeat tool",
+        },
+    )
+
+    assert response.status_code == 200
+    blocked_message = llm_controller.chat.completions.calls[2]["messages"][-1]
+    assert blocked_message["role"] == "tool"
+    assert "identical tool call blocked to prevent an infinite loop" in blocked_message["content"]
+
+
+@pytest.mark.integration
+async def test_loop_exhaustion_returns_422_when_tool_calls_never_finish(
+    api_client,
+    llm_controller,
+    mcp_controller,
+) -> None:
+    mcp_controller.tools_by_service["bitrix"] = [
+        {
+            "type": "function",
+            "function": {
+                "name": "find_contact",
+                "description": "Find a contact",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }
+    ]
+    for index in range(20):
+        llm_controller.chat.completions.queue(
+            build_llm_response(
+                tool_calls=[
+                    build_tool_call(
+                        f"tool-{index}",
+                        "find_contact",
+                        json.dumps({"iteration": index}),
+                    )
+                ]
+            )
+        )
+    agent = await create_agent(api_client)
+    await store_credentials(
+        api_client,
+        agent["id"],
+        "bitrix",
+        {"webhook_url": "https://example.bitrix/rest"},
+    )
+
+    response = await api_client.post(
+        "/v1/chat/completions",
+        json={
+            "agent_id": agent["id"],
+            "external_client_id": "loop-user",
+            "channel": "telegram",
+            "message": "Never stop",
+        },
+    )
+
+    assert response.status_code == 422
+    assert response.json() == {"detail": "Maximum number of LLM tool steps reached."}
+    assert len(mcp_controller.tool_calls) == 20
+
+
+@pytest.mark.diagnostic
+async def test_concurrent_first_messages_can_create_duplicate_sessions(
+    api_client,
+    db_session,
+    llm_controller,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    llm_controller.chat.completions.queue(
+        build_llm_response(content="First"),
+        build_llm_response(content="Second"),
+    )
+    agent = await create_agent(api_client)
+    gate = asyncio.Event()
+    state = {"seen": 0}
+
+    async def racing_get_or_create(self, session, agent_id, external_client_id, channel):
+        result = await session.execute(
+            select(ConversationSession).where(
+                ConversationSession.agent_id == agent_id,
+                ConversationSession.external_client_id == external_client_id,
+                ConversationSession.channel == channel,
+            )
+        )
+        conversation_session = result.scalar_one_or_none()
+        if conversation_session is not None:
+            return conversation_session
+
+        state["seen"] += 1
+        if state["seen"] == 2:
+            gate.set()
+        await gate.wait()
+
+        duplicate_session = ConversationSession(
+            agent_id=agent_id,
+            external_client_id=external_client_id,
+            channel=channel,
+        )
+        session.add(duplicate_session)
+        await session.commit()
+        await session.refresh(duplicate_session)
+        return duplicate_session
+
+    monkeypatch.setattr(
+        llm_service_module.SessionService,
+        "get_or_create_session",
+        racing_get_or_create,
+    )
+
+    async def send_message(text: str):
+        return await api_client.post(
+            "/v1/chat/completions",
+            json={
+                "agent_id": agent["id"],
+                "external_client_id": "racy-user",
+                "channel": "telegram",
+                "message": text,
+            },
         )
 
+    first, second = await asyncio.gather(send_message("Hello"), send_message("Hi"))
 
-class FakeLLMClient:
-    def __init__(self) -> None:
-        self.chat = SimpleNamespace(completions=FakeCompletions())
+    assert first.status_code == 200
+    assert second.status_code == 200
+    async with db_session() as session:
+        count_result = await session.execute(select(func.count()).select_from(ConversationSession))
+        assert count_result.scalar_one() == 2
 
 
-def test_chat_completion_auto_creates_and_reuses_session(monkeypatch) -> None:
-    fake_agent_service = InMemoryAgentService()
-    fake_session_service = InMemorySessionService()
-    fake_history_service = InMemoryHistoryService()
-    fake_llm_client = FakeLLMClient()
+@pytest.mark.integration
+async def test_multiple_credentials_are_loaded_for_chat_flow(
+    api_client,
+    db_session,
+    llm_controller,
+    mcp_controller,
+) -> None:
+    mcp_controller.tools_by_service["bitrix"] = []
+    mcp_controller.tools_by_service["custom"] = []
+    llm_controller.chat.completions.queue(build_llm_response(content="No tools used"))
+    agent = await create_agent(api_client)
+    await store_credentials(
+        api_client,
+        agent["id"],
+        "bitrix",
+        {"webhook_url": "https://example.bitrix/rest"},
+    )
+    await store_credentials(
+        api_client,
+        agent["id"],
+        "custom",
+        {"token": "tenant-secret"},
+    )
 
-    async def noop() -> None:
-        return None
+    response = await api_client.post(
+        "/v1/chat/completions",
+        json={
+            "agent_id": agent["id"],
+            "external_client_id": "user-3",
+            "channel": "telegram",
+            "message": "Hello",
+        },
+    )
 
-    monkeypatch.setattr(main, "init_redis", noop)
-    monkeypatch.setattr(main, "close_redis", noop)
-
-    dummy_db_session = object()
-
-    async def override_get_db():
-        yield dummy_db_session
-
-    main.app.dependency_overrides[get_db] = override_get_db
-
-    original_agent_service = agents_api.agent_service
-    original_llm_agent_service = chat_api.llm_service.agent_service
-    original_llm_session_service = chat_api.llm_service.session_service
-    original_llm_history_service = chat_api.llm_service.history_service
-    original_llm_client = chat_api.llm_service.llm
-
-    agents_api.agent_service = fake_agent_service
-    chat_api.llm_service.agent_service = fake_agent_service
-    chat_api.llm_service.session_service = fake_session_service
-    chat_api.llm_service.history_service = fake_history_service
-    chat_api.llm_service.llm = fake_llm_client
-
-    try:
-        with TestClient(main.app) as client:
-            agent_response = client.post(
-                "/v1/agents/",
-                json={
-                    "user_id": str(uuid4()),
-                    "name": "Support agent",
-                    "system_prompt": "Be helpful.",
-                    "llm_provider": "openrouter",
-                    "model_name": "fake-model",
-                    "temperature": 0.3,
-                    "is_active": True,
-                },
-            )
-
-            assert agent_response.status_code == 201
-            agent_id = UUID(agent_response.json()["id"])
-
-            first_response = client.post(
-                "/v1/chat/completions",
-                json={
-                    "agent_id": str(agent_id),
-                    "external_client_id": "telegram:42",
-                    "channel": "telegram",
-                    "message": "Hello there",
-                },
-            )
-
-            assert first_response.status_code == 200
-            assert len(fake_session_service.sessions) == 1
-
-            created_session = next(iter(fake_session_service.sessions.values()))
-            assert first_response.json() == {
-                "session_id": str(created_session.id),
-                "answer": "Echo: Hello there",
-            }
-            assert created_session.agent_id == agent_id
-            assert fake_history_service.history_by_session[created_session.id] == [
-                {"role": "user", "content": "Hello there"},
-                {"role": "assistant", "content": "Echo: Hello there"},
-            ]
-
-            second_response = client.post(
-                "/v1/chat/completions",
-                json={
-                    "agent_id": str(agent_id),
-                    "external_client_id": "telegram:42",
-                    "channel": "telegram",
-                    "message": "How are you?",
-                },
-            )
-
-            assert second_response.status_code == 200
-            assert second_response.json() == {
-                "session_id": str(created_session.id),
-                "answer": "Echo: How are you?",
-            }
-            assert len(fake_session_service.sessions) == 1
-            assert set(fake_history_service.history_by_session) == {created_session.id}
-            assert fake_history_service.history_by_session[created_session.id] == [
-                {"role": "user", "content": "Hello there"},
-                {"role": "assistant", "content": "Echo: Hello there"},
-                {"role": "user", "content": "How are you?"},
-                {"role": "assistant", "content": "Echo: How are you?"},
-            ]
-
-            second_call_messages = fake_llm_client.chat.completions.calls[1]["messages"]
-            assert second_call_messages[1:] == [
-                {"role": "user", "content": "Hello there"},
-                {"role": "assistant", "content": "Echo: Hello there"},
-                {"role": "user", "content": "How are you?"},
-            ]
-    finally:
-        agents_api.agent_service = original_agent_service
-        chat_api.llm_service.agent_service = original_llm_agent_service
-        chat_api.llm_service.session_service = original_llm_session_service
-        chat_api.llm_service.history_service = original_llm_history_service
-        chat_api.llm_service.llm = original_llm_client
-        main.app.dependency_overrides.clear()
+    assert response.status_code == 200
+    async with db_session() as session:
+        credentials = await session.execute(
+            select(AgentCredentials).where(AgentCredentials.agent_id == UUID(agent["id"]))
+        )
+        assert {item.service_name for item in credentials.scalars().all()} == {"bitrix", "custom"}
+    assert [call["service_name"] for call in mcp_controller.init_calls] == ["bitrix", "custom"]
