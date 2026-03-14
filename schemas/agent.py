@@ -9,10 +9,9 @@ from pydantic import BaseModel, ConfigDict, Field
 class AgentCreate(BaseModel):
     """Payload for creating a new agent template."""
 
-    user_id: UUID
     name: str = Field(min_length=1, max_length=255)
     system_prompt: str = Field(min_length=1)
-    llm_provider: str = Field(min_length=1, max_length=64)
+    llm_provider: str = Field(default="openrouter", min_length=1, max_length=64)
     model_name: str = Field(min_length=1, max_length=255)
     temperature: float = Field(default=0.7, ge=0.0, le=2.0)
     is_active: bool = True

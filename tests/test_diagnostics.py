@@ -12,7 +12,6 @@ from tests.fakes import FakeMCPController, ScriptedLLMClient, build_llm_response
 
 def build_agent_payload() -> dict[str, object]:
     return {
-        "user_id": str(uuid4()),
         "name": "Support agent",
         "system_prompt": "Be concise and helpful.",
         "llm_provider": "openrouter",
@@ -22,8 +21,16 @@ def build_agent_payload() -> dict[str, object]:
     }
 
 
-async def create_agent(api_client) -> dict[str, object]:
-    response = await api_client.post("/v1/agents/", json=build_agent_payload())
+def build_headers(user_id=None) -> dict[str, str]:
+    return {"x-user-id": str(user_id or uuid4())}
+
+
+async def create_agent(api_client, owner_id=None) -> dict[str, object]:
+    response = await api_client.post(
+        "/v1/agents/",
+        json=build_agent_payload(),
+        headers=build_headers(owner_id),
+    )
     assert response.status_code == 201
     return response.json()
 
@@ -65,13 +72,15 @@ async def test_mcp_init_generic_exception_results_in_http_500(
     )
     monkeypatch.setattr(llm_service_module, "MCPManager", mcp_controller.make_manager_class())
 
-    agent = await create_agent(api_client_no_raise)
+    owner_id = uuid4()
+    agent = await create_agent(api_client_no_raise, owner_id=owner_id)
     credentials_response = await api_client_no_raise.put(
         f"/v1/agents/{agent['id']}/credentials",
         json={
             "service_name": "bitrix",
             "credentials": {"webhook_url": "https://example.bitrix/rest"},
         },
+        headers=build_headers(owner_id),
     )
     assert credentials_response.status_code == 200
 

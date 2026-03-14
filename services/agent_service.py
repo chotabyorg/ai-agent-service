@@ -13,23 +13,53 @@ from schemas.agent import AgentCreate, AgentCredentialsCreate, AgentUpdate
 class AgentService:
     """CRUD operations for agent templates and their credentials."""
 
-    async def create_agent(self, session: AsyncSession, payload: AgentCreate) -> AgentTemplate:
-        agent = AgentTemplate(**payload.model_dump())
+    async def create_agent(
+        self,
+        session: AsyncSession,
+        user_id: UUID,
+        payload: AgentCreate,
+    ) -> AgentTemplate:
+        agent = AgentTemplate(user_id=user_id, **payload.model_dump())
         session.add(agent)
         await session.commit()
         await session.refresh(agent)
         return agent
 
-    async def get_agent_by_id(self, session: AsyncSession, agent_id: UUID) -> AgentTemplate | None:
-        return await session.get(AgentTemplate, agent_id)
+    async def list_agents(
+        self,
+        session: AsyncSession,
+        user_id: UUID,
+    ) -> Sequence[AgentTemplate]:
+        result = await session.execute(
+            select(AgentTemplate).where(AgentTemplate.user_id == user_id)
+        )
+        return result.scalars().all()
+
+    async def get_agent_by_id(
+        self,
+        session: AsyncSession,
+        agent_id: UUID,
+        user_id: UUID | None = None,
+    ) -> AgentTemplate | None:
+        if user_id is None:
+            return await session.get(AgentTemplate, agent_id)
+
+        result = await session.execute(
+            select(AgentTemplate).where(
+                AgentTemplate.id == agent_id,
+                AgentTemplate.user_id == user_id,
+            )
+        )
+        return result.scalar_one_or_none()
 
     async def update_agent(
         self,
         session: AsyncSession,
+        user_id: UUID,
         agent_id: UUID,
         payload: AgentUpdate,
     ) -> AgentTemplate | None:
-        agent = await self.get_agent_by_id(session, agent_id)
+        agent = await self.get_agent_by_id(session, agent_id, user_id=user_id)
         if agent is None:
             return None
 
@@ -43,10 +73,11 @@ class AgentService:
     async def upsert_credentials(
         self,
         session: AsyncSession,
+        user_id: UUID,
         agent_id: UUID,
         payload: AgentCredentialsCreate,
     ) -> AgentCredentials | None:
-        agent = await self.get_agent_by_id(session, agent_id)
+        agent = await self.get_agent_by_id(session, agent_id, user_id=user_id)
         if agent is None:
             return None
 

@@ -3,7 +3,7 @@
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, Header, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.dependencies import get_db
@@ -20,17 +20,24 @@ from services.agent_service import AgentService
 router = APIRouter()
 agent_service = AgentService()
 DbSession = Annotated[AsyncSession, Depends(get_db)]
+UserIdHeader = Annotated[UUID, Header(alias="x-user-id")]
 
 
 @router.post("/", response_model=AgentResponse, status_code=status.HTTP_201_CREATED)
-async def create_agent(payload: AgentCreate, db: DbSession) -> AgentResponse:
-    agent = await agent_service.create_agent(db, payload)
+async def create_agent(payload: AgentCreate, db: DbSession, user_id: UserIdHeader) -> AgentResponse:
+    agent = await agent_service.create_agent(db, user_id, payload)
     return AgentResponse.model_validate(agent)
 
 
+@router.get("/", response_model=list[AgentResponse])
+async def list_agents(db: DbSession, user_id: UserIdHeader) -> list[AgentResponse]:
+    agents = await agent_service.list_agents(db, user_id)
+    return [AgentResponse.model_validate(agent) for agent in agents]
+
+
 @router.get("/{agent_id}", response_model=AgentResponse)
-async def get_agent(agent_id: UUID, db: DbSession) -> AgentResponse:
-    agent = await agent_service.get_agent_by_id(db, agent_id)
+async def get_agent(agent_id: UUID, db: DbSession, user_id: UserIdHeader) -> AgentResponse:
+    agent = await agent_service.get_agent_by_id(db, agent_id, user_id=user_id)
     if agent is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -44,8 +51,9 @@ async def update_agent(
     agent_id: UUID,
     payload: AgentUpdate,
     db: DbSession,
+    user_id: UserIdHeader,
 ) -> AgentResponse:
-    agent = await agent_service.update_agent(db, agent_id, payload)
+    agent = await agent_service.update_agent(db, user_id, agent_id, payload)
     if agent is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -62,8 +70,9 @@ async def upsert_agent_credentials(
     agent_id: UUID,
     payload: AgentCredentialsCreate,
     db: DbSession,
+    user_id: UserIdHeader,
 ) -> AgentCredentialsResponse:
-    credentials = await agent_service.upsert_credentials(db, agent_id, payload)
+    credentials = await agent_service.upsert_credentials(db, user_id, agent_id, payload)
     if credentials is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,

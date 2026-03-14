@@ -8,6 +8,7 @@ from schemas.agent import (
     AgentUpdate,
 )
 from schemas.chat import ChatRequest, ChatResponse
+from schemas.mcp import MCPServiceResponse
 from schemas.session import SessionCreate, SessionResponse
 
 __all__ = [
@@ -18,6 +19,7 @@ __all__ = [
     "AgentUpdate",
     "ChatRequest",
     "ChatResponse",
+    "MCPServiceResponse",
     "SessionCreate",
     "SessionResponse",
 ]

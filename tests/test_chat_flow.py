@@ -20,7 +20,6 @@ from tests.fakes import (
 
 def build_agent_payload() -> dict[str, object]:
     return {
-        "user_id": str(uuid4()),
         "name": "Support agent",
         "system_prompt": "Be concise and helpful.",
         "llm_provider": "openrouter",
@@ -30,18 +29,30 @@ def build_agent_payload() -> dict[str, object]:
     }
 
 
+def build_headers(user_id: UUID | None = None) -> dict[str, str]:
+    return {"x-user-id": str(user_id or uuid4())}
+
+
 async def create_agent(api_client, **overrides) -> dict[str, object]:
+    owner_id = overrides.pop("owner_id", uuid4())
     payload = build_agent_payload()
     payload.update(overrides)
-    response = await api_client.post("/v1/agents/", json=payload)
+    response = await api_client.post("/v1/agents/", json=payload, headers=build_headers(owner_id))
     assert response.status_code == 201
     return response.json()
 
 
-async def store_credentials(api_client, agent_id: str, service_name: str, credentials: dict[str, object]) -> None:
+async def store_credentials(
+    api_client,
+    agent_id: str,
+    service_name: str,
+    credentials: dict[str, object],
+    owner_id: UUID | None = None,
+) -> None:
     response = await api_client.put(
         f"/v1/agents/{agent_id}/credentials",
         json={"service_name": service_name, "credentials": credentials},
+        headers=build_headers(owner_id),
     )
     assert response.status_code == 200
 
@@ -257,6 +268,7 @@ async def test_chat_with_tool_call_executes_mcp_and_saves_only_user_and_assistan
         agent["id"],
         "bitrix",
         {"webhook_url": "https://example.bitrix/rest"},
+        owner_id=UUID(agent["user_id"]),
     )
 
     response = await api_client.post(
@@ -317,6 +329,7 @@ async def test_chat_continues_after_tool_execution_failure(api_client, llm_contr
         agent["id"],
         "bitrix",
         {"webhook_url": "https://example.bitrix/rest"},
+        owner_id=UUID(agent["user_id"]),
     )
 
     response = await api_client.post(
@@ -361,6 +374,7 @@ async def test_chat_passes_empty_dict_when_tool_arguments_are_invalid_json(
         agent["id"],
         "bitrix",
         {"webhook_url": "https://example.bitrix/rest"},
+        owner_id=UUID(agent["user_id"]),
     )
 
     response = await api_client.post(
@@ -386,7 +400,13 @@ async def test_chat_skips_unsupported_service_credentials_when_mcp_raises_value_
     mcp_controller.enter_errors["custom"] = ValueError("Unsupported MCP service: custom")
     llm_controller.chat.completions.queue(build_llm_response(content="No tools needed"))
     agent = await create_agent(api_client)
-    await store_credentials(api_client, agent["id"], "custom", {"token": "tenant-secret"})
+    await store_credentials(
+        api_client,
+        agent["id"],
+        "custom",
+        {"token": "tenant-secret"},
+        owner_id=UUID(agent["user_id"]),
+    )
 
     response = await api_client.post(
         "/v1/chat/completions",
@@ -411,7 +431,13 @@ async def test_chat_skips_bitrix_credentials_without_webhook_url(
     mcp_controller.enter_errors["bitrix"] = ValueError("Bitrix credentials must contain 'webhook_url'.")
     llm_controller.chat.completions.queue(build_llm_response(content="Proceed without tools"))
     agent = await create_agent(api_client)
-    await store_credentials(api_client, agent["id"], "bitrix", {"token": "incomplete"})
+    await store_credentials(
+        api_client,
+        agent["id"],
+        "bitrix",
+        {"token": "incomplete"},
+        owner_id=UUID(agent["user_id"]),
+    )
 
     response = await api_client.post(
         "/v1/chat/completions",
@@ -550,6 +576,7 @@ async def test_identical_tool_call_is_blocked_to_prevent_infinite_loop(
         agent["id"],
         "bitrix",
         {"webhook_url": "https://example.bitrix/rest"},
+        owner_id=UUID(agent["user_id"]),
     )
 
     response = await api_client.post(
@@ -602,6 +629,7 @@ async def test_loop_exhaustion_returns_422_when_tool_calls_never_finish(
         agent["id"],
         "bitrix",
         {"webhook_url": "https://example.bitrix/rest"},
+        owner_id=UUID(agent["user_id"]),
     )
 
     response = await api_client.post(
@@ -703,12 +731,14 @@ async def test_multiple_credentials_are_loaded_for_chat_flow(
         agent["id"],
         "bitrix",
         {"webhook_url": "https://example.bitrix/rest"},
+        owner_id=UUID(agent["user_id"]),
     )
     await store_credentials(
         api_client,
         agent["id"],
         "custom",
         {"token": "tenant-secret"},
+        owner_id=UUID(agent["user_id"]),
     )
 
     response = await api_client.post(

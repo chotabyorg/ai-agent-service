@@ -6,6 +6,7 @@ from fastapi import FastAPI
 
 from api.v1.agents import router as agents_router
 from api.v1.chat import router as chat_router
+from api.v1.mcp_services import router as mcp_services_router
 from core.config import get_settings
 from core.redis import close_redis, init_redis
 
@@ -37,6 +38,11 @@ app.include_router(
     chat_router,
     prefix=f"{settings.api_v1_prefix}/chat",
     tags=["chat"],
+)
+app.include_router(
+    mcp_services_router,
+    prefix=settings.api_v1_prefix,
+    tags=["mcp-services"],
 )
 
 

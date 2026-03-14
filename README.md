@@ -239,21 +239,23 @@ docker-compose up --build -d
 
 ### Agents API
 
+- Все endpoints управления агентами ожидают заголовок `X-User-Id`, который прокидывается API Gateway после валидации JWT.
 - `POST /v1/agents/` — создать агента.
+- `GET /v1/agents/` — получить список агентов текущего пользователя.
 - `GET /v1/agents/{agent_id}` — получить конфигурацию агента.
 - `PUT /v1/agents/{agent_id}` — обновить настройки агента.
 - `PUT /v1/agents/{agent_id}/credentials` — добавить или обновить credentials для MCP.
+- `GET /v1/mcp-services` — получить список доступных MCP-интеграций.
 
 Пример создания агента:
 
 ```bash
 curl -X POST http://localhost:8000/v1/agents/ \
   -H "Content-Type: application/json" \
+  -H "X-User-Id: 11111111-1111-1111-1111-111111111111" \
   -d '{
-    "user_id": "11111111-1111-1111-1111-111111111111",
     "name": "Sales Agent",
     "system_prompt": "You are a helpful sales assistant.",
-    "llm_provider": "openrouter",
     "model_name": "google/gemini-2.5-flash",
     "temperature": 0.7,
     "is_active": true
@@ -265,12 +267,30 @@ curl -X POST http://localhost:8000/v1/agents/ \
 ```bash
 curl -X PUT http://localhost:8000/v1/agents/11111111-1111-1111-1111-111111111111/credentials \
   -H "Content-Type: application/json" \
+  -H "X-User-Id: 11111111-1111-1111-1111-111111111111" \
   -d '{
     "service_name": "bitrix",
     "credentials": {
       "webhook_url": "https://your-domain.bitrix24.by/rest/1/secret/"
     }
   }'
+```
+
+Минимальный JSON payload для Bitrix credentials:
+
+```json
+{
+  "service_name": "bitrix",
+  "credentials": {
+    "webhook_url": "https://your-domain.bitrix24.by/rest/1/secret/"
+  }
+}
+```
+
+Пример discovery-запроса доступных интеграций:
+
+```bash
+curl http://localhost:8000/v1/mcp-services
 ```
 
 ### Chat API
