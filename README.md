@@ -174,10 +174,30 @@ pip install -r requirements.txt
 
 Создай `.env` рядом с `main.py` и укажи значения для PostgreSQL, Redis и LLM.
 
+Для запуска через Docker Compose используй сервисные хосты:
+
+```env
+POSTGRES_HOST=postgres
+REDIS_HOST=redis
+```
+
+Если запускаешь приложение вне Docker, обычно нужны:
+
+```env
+POSTGRES_HOST=localhost
+REDIS_HOST=localhost
+```
+
 ### 4. Запустить сервис
 
 ```bash
 uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+```
+
+То же самое через `make`:
+
+```bash
+make run
 ```
 
 После старта:
@@ -185,6 +205,31 @@ uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 - healthcheck: `GET http://localhost:8000/health`
 - Swagger UI: `http://localhost:8000/docs`
 - ReDoc: `http://localhost:8000/redoc`
+
+## Управление базой данных
+
+Для работы с Alembic используйте команды из `Makefile`:
+
+```bash
+make revision msg="Initial setup"
+make upgrade
+make downgrade
+```
+
+- `make run` — запускает FastAPI-приложение через `uvicorn` с `--reload`.
+- `make revision msg="message"` — создает новую Alembic-миграцию через `--autogenerate`.
+- `make upgrade` — применяет все миграции до `head`.
+- `make downgrade` — откатывает базу на одну ревизию назад.
+
+## Запуск через Docker
+
+Для локального запуска сервиса вместе с PostgreSQL и Redis используйте:
+
+```bash
+docker-compose up --build -d
+```
+
+Контейнер приложения при старте сначала выполняет `alembic upgrade head`, а затем поднимает `uvicorn` на `0.0.0.0:8000`.
 
 ## API Endpoints
 
@@ -256,7 +301,7 @@ curl -X POST http://localhost:8000/v1/chat/completions \
 
 - SSE streaming пока не реализован.
 - Встроенный MCP manager сейчас настроен прежде всего под Bitrix24.
-- Автоматическая миграция схемы БД не добавлена.
+- Автоматическое применение миграций при старте сервиса не добавлено.
 - Авторизация внутренних сервисов пока не реализована.
 
 ## Полезные файлы
