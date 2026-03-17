@@ -21,7 +21,7 @@ router = APIRouter()
 agent_service = AgentService()
 DbSession = Annotated[AsyncSession, Depends(get_db)]
 UserIdHeader = Annotated[UUID, Header(alias="x-user-id")]
-UserRoleHeader = Annotated[str | None, Header(alias="x-user-role", default=None)]
+UserRoleHeader = Annotated[str | None, Header(alias="x-user-role")]
 
 
 @router.post("/", response_model=AgentResponse, status_code=status.HTTP_201_CREATED)
@@ -68,7 +68,7 @@ async def delete_agent(
     agent_id: UUID,
     db: DbSession,
     user_id: UserIdHeader,
-    user_role: UserRoleHeader,
+    user_role: UserRoleHeader = None,
 ) -> None:
     result = await agent_service.delete_agent(db, agent_id, user_id, user_role)
     if result is None:
