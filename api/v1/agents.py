@@ -21,6 +21,7 @@ router = APIRouter()
 agent_service = AgentService()
 DbSession = Annotated[AsyncSession, Depends(get_db)]
 UserIdHeader = Annotated[UUID, Header(alias="x-user-id")]
+UserRoleHeader = Annotated[str | None, Header(alias="x-user-role", default=None)]
 
 
 @router.post("/", response_model=AgentResponse, status_code=status.HTTP_201_CREATED)
@@ -60,6 +61,26 @@ async def update_agent(
             detail="Agent not found",
         )
     return AgentResponse.model_validate(agent)
+
+
+@router.delete("/{agent_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_agent(
+    agent_id: UUID,
+    db: DbSession,
+    user_id: UserIdHeader,
+    user_role: UserRoleHeader,
+) -> None:
+    result = await agent_service.delete_agent(db, agent_id, user_id, user_role)
+    if result is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Agent not found",
+        )
+    if result is False:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Forbidden",
+        )
 
 
 @router.put(

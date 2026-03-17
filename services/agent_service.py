@@ -96,6 +96,23 @@ class AgentService:
         await session.refresh(credentials)
         return credentials
 
+    async def delete_agent(
+        self,
+        session: AsyncSession,
+        agent_id: UUID,
+        user_id: UUID,
+        user_role: str | None = None,
+    ) -> bool | None:
+        """Delete agent. Returns None if not found, False if forbidden, True on success."""
+        agent = await session.get(AgentTemplate, agent_id)
+        if agent is None:
+            return None
+        if agent.user_id != user_id and user_role != "admin":
+            return False
+        await session.delete(agent)
+        await session.commit()
+        return True
+
     async def get_credentials(
         self,
         session: AsyncSession,
