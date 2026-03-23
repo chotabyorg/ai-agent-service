@@ -1,5 +1,6 @@
 """Available LLM models served via OpenRouter."""
 
+# Первая модель в списке считается моделью по умолчанию для новых агентов.
 AVAILABLE_MODELS = [
     {"display_name": "Gemini 2.5 Flash", "model_id": "google/gemini-2.5-flash"},
     {"display_name": "Gemini 2.5 Pro", "model_id": "google/gemini-2.5-pro"},

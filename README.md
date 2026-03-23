@@ -244,7 +244,10 @@ docker-compose up --build -d
 - `GET /v1/agents/` — получить список агентов текущего пользователя.
 - `GET /v1/agents/{agent_id}` — получить конфигурацию агента.
 - `PUT /v1/agents/{agent_id}` — обновить настройки агента.
+- `DELETE /v1/agents/{agent_id}` — удалить агента.
 - `PUT /v1/agents/{agent_id}/credentials` — добавить или обновить credentials для MCP.
+- `GET /v1/agents/{agent_id}/credentials` — получить список подключённых credentials агента.
+- `DELETE /v1/agents/{agent_id}/credentials/{service_name}` — удалить credentials агента по имени сервиса.
 - `GET /v1/mcp-services` — получить список доступных MCP-интеграций.
 
 Пример создания агента:
@@ -292,6 +295,10 @@ curl -X PUT http://localhost:8000/v1/agents/11111111-1111-1111-1111-111111111111
 ```bash
 curl http://localhost:8000/v1/mcp-services
 ```
+
+### Models API
+
+- `GET /v1/models` — получить список доступных LLM-моделей.
 
 ### Chat API
 
