@@ -335,3 +335,120 @@ async def test_mcp_service_discovery_returns_supported_integrations(api_client) 
             "required_keys": ["webhook_url"],
         }
     ]
+
+
+@pytest.mark.integration
+async def test_list_credentials_returns_summary_without_secrets(api_client) -> None:
+    owner_id = uuid4()
+    create_resp = await api_client.post(
+        "/v1/agents/", json=build_agent_payload(), headers=build_headers(owner_id)
+    )
+    agent_id = create_resp.json()["id"]
+
+    await api_client.put(
+        f"/v1/agents/{agent_id}/credentials",
+        json={"service_name": "bitrix", "credentials": {"webhook_url": "https://secret.bitrix/rest"}},
+        headers=build_headers(owner_id),
+    )
+    await api_client.put(
+        f"/v1/agents/{agent_id}/credentials",
+        json={"service_name": "amocrm", "credentials": {"token": "secret-token"}},
+        headers=build_headers(owner_id),
+    )
+
+    response = await api_client.get(
+        f"/v1/agents/{agent_id}/credentials", headers=build_headers(owner_id)
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert len(data) == 2
+    service_names = {item["service_name"] for item in data}
+    assert service_names == {"bitrix", "amocrm"}
+    for item in data:
+        assert item["agent_id"] == agent_id
+        assert item["has_credentials"] is True
+        assert "credentials" not in item
+
+
+@pytest.mark.integration
+async def test_list_credentials_returns_404_for_foreign_agent(api_client) -> None:
+    owner_id = uuid4()
+    create_resp = await api_client.post(
+        "/v1/agents/", json=build_agent_payload(), headers=build_headers(owner_id)
+    )
+    agent_id = create_resp.json()["id"]
+
+    stranger_id = uuid4()
+    response = await api_client.get(
+        f"/v1/agents/{agent_id}/credentials", headers=build_headers(stranger_id)
+    )
+    assert response.status_code == 404
+
+
+@pytest.mark.integration
+async def test_list_credentials_returns_empty_list_for_agent_without_credentials(api_client) -> None:
+    owner_id = uuid4()
+    create_resp = await api_client.post(
+        "/v1/agents/", json=build_agent_payload(), headers=build_headers(owner_id)
+    )
+    agent_id = create_resp.json()["id"]
+
+    response = await api_client.get(
+        f"/v1/agents/{agent_id}/credentials", headers=build_headers(owner_id)
+    )
+    assert response.status_code == 200
+    assert response.json() == []
+
+
+@pytest.mark.integration
+async def test_delete_credentials_removes_record(api_client, db_session) -> None:
+    owner_id = uuid4()
+    create_resp = await api_client.post(
+        "/v1/agents/", json=build_agent_payload(), headers=build_headers(owner_id)
+    )
+    agent_id = create_resp.json()["id"]
+
+    await api_client.put(
+        f"/v1/agents/{agent_id}/credentials",
+        json={"service_name": "bitrix", "credentials": {"webhook_url": "https://example.bitrix/rest"}},
+        headers=build_headers(owner_id),
+    )
+
+    delete_response = await api_client.delete(
+        f"/v1/agents/{agent_id}/credentials/bitrix", headers=build_headers(owner_id)
+    )
+    assert delete_response.status_code == 204
+
+    async with db_session() as session:
+        record = await session.get(AgentCredentials, {"agent_id": UUID(agent_id), "service_name": "bitrix"})
+    assert record is None
+
+
+@pytest.mark.integration
+async def test_delete_credentials_returns_404_for_missing(api_client) -> None:
+    owner_id = uuid4()
+    create_resp = await api_client.post(
+        "/v1/agents/", json=build_agent_payload(), headers=build_headers(owner_id)
+    )
+    agent_id = create_resp.json()["id"]
+
+    response = await api_client.delete(
+        f"/v1/agents/{agent_id}/credentials/nonexistent", headers=build_headers(owner_id)
+    )
+    assert response.status_code == 404
+
+
+@pytest.mark.integration
+async def test_delete_credentials_returns_404_for_foreign_agent(api_client) -> None:
+    owner_id = uuid4()
+    create_resp = await api_client.post(
+        "/v1/agents/", json=build_agent_payload(), headers=build_headers(owner_id)
+    )
+    agent_id = create_resp.json()["id"]
+
+    stranger_id = uuid4()
+    response = await api_client.delete(
+        f"/v1/agents/{agent_id}/credentials/bitrix", headers=build_headers(stranger_id)
+    )
+    assert response.status_code == 404

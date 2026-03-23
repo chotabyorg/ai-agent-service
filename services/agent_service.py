@@ -113,6 +113,42 @@ class AgentService:
         await session.commit()
         return True
 
+    async def list_credentials(
+        self,
+        session: AsyncSession,
+        user_id: UUID,
+        agent_id: UUID,
+    ) -> Sequence[AgentCredentials] | None:
+        """List all credentials for an agent owned by user. Returns None if agent not found."""
+        agent = await self.get_agent_by_id(session, agent_id, user_id=user_id)
+        if agent is None:
+            return None
+        result = await session.execute(
+            select(AgentCredentials).where(AgentCredentials.agent_id == agent_id)
+        )
+        return result.scalars().all()
+
+    async def delete_credentials(
+        self,
+        session: AsyncSession,
+        user_id: UUID,
+        agent_id: UUID,
+        service_name: str,
+    ) -> bool | None:
+        """Delete credentials. Returns None if not found, True on success."""
+        agent = await self.get_agent_by_id(session, agent_id, user_id=user_id)
+        if agent is None:
+            return None
+        credentials = await session.get(
+            AgentCredentials,
+            {"agent_id": agent_id, "service_name": service_name},
+        )
+        if credentials is None:
+            return None
+        await session.delete(credentials)
+        await session.commit()
+        return True
+
     async def get_credentials(
         self,
         session: AsyncSession,

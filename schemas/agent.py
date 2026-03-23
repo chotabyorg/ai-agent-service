@@ -50,6 +50,16 @@ class AgentCredentialsCreate(BaseModel):
     credentials: dict[str, Any]
 
 
+class AgentCredentialsSummary(BaseModel):
+    """Safe summary of agent credentials — no secrets exposed."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    agent_id: UUID
+    service_name: str
+    has_credentials: bool = True
+
+
 class AgentCredentialsResponse(BaseModel):
     """Serialized agent credentials."""
 

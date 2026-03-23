@@ -11,6 +11,7 @@ from schemas.agent import (
     AgentCreate,
     AgentCredentialsCreate,
     AgentCredentialsResponse,
+    AgentCredentialsSummary,
     AgentResponse,
     AgentUpdate,
 )
@@ -80,6 +81,42 @@ async def delete_agent(
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Forbidden",
+        )
+
+
+@router.get("/{agent_id}/credentials", response_model=list[AgentCredentialsSummary])
+async def list_agent_credentials(
+    agent_id: UUID,
+    db: DbSession,
+    user_id: UserIdHeader,
+) -> list[AgentCredentialsSummary]:
+    credentials = await agent_service.list_credentials(db, user_id, agent_id)
+    if credentials is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Agent not found",
+        )
+    return [
+        AgentCredentialsSummary(agent_id=c.agent_id, service_name=c.service_name)
+        for c in credentials
+    ]
+
+
+@router.delete(
+    "/{agent_id}/credentials/{service_name}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def delete_agent_credentials(
+    agent_id: UUID,
+    service_name: str,
+    db: DbSession,
+    user_id: UserIdHeader,
+) -> None:
+    result = await agent_service.delete_credentials(db, user_id, agent_id, service_name)
+    if result is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Credentials not found",
         )
 
 
