@@ -3,18 +3,26 @@
 from typing import Any
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class AgentCreate(BaseModel):
     """Payload for creating a new agent template."""
 
     name: str = Field(min_length=1, max_length=255)
-    system_prompt: str = Field(min_length=1)
+    system_prompt: str | None = Field(default=None, min_length=1)
+    prompt_config: dict | None = None
     llm_provider: str = Field(default="openrouter", min_length=1, max_length=64)
     model_name: str = Field(min_length=1, max_length=255)
     temperature: float = Field(default=0.7, ge=0.0, le=2.0)
     is_active: bool = True
+    timezone: str = "Europe/Minsk"
+
+    @model_validator(mode="after")
+    def require_prompt_source(self) -> "AgentCreate":
+        if not self.prompt_config and not self.system_prompt:
+            raise ValueError("Either prompt_config or system_prompt must be provided.")
+        return self
 
 
 class AgentUpdate(BaseModel):
@@ -22,10 +30,12 @@ class AgentUpdate(BaseModel):
 
     name: str | None = Field(default=None, min_length=1, max_length=255)
     system_prompt: str | None = Field(default=None, min_length=1)
+    prompt_config: dict | None = None
     llm_provider: str | None = Field(default=None, min_length=1, max_length=64)
     model_name: str | None = Field(default=None, min_length=1, max_length=255)
     temperature: float | None = Field(default=None, ge=0.0, le=2.0)
     is_active: bool | None = None
+    timezone: str | None = None
 
 
 class AgentResponse(BaseModel):
@@ -37,10 +47,12 @@ class AgentResponse(BaseModel):
     user_id: UUID
     name: str
     system_prompt: str
+    prompt_config: dict | None = None
     llm_provider: str
     model_name: str
     temperature: float
     is_active: bool
+    timezone: str
 
 
 class AgentCredentialsCreate(BaseModel):

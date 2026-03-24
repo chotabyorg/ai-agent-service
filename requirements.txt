@@ -16,3 +16,4 @@ pytest-asyncio
 httpx
 fakeredis
 testcontainers[postgresql]
+pytz

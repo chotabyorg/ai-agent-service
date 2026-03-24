@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from mcp_clients.manager import MCPManager
 from services.agent_service import AgentService
 from services.history_service import HistoryService
+from services.prompt_builder import ChatContext, PromptBuilder
 from services.session_service import SessionService
 
 
@@ -50,6 +51,7 @@ class LLMService:
         self.history_service = history_service or HistoryService()
         self.agent_service = agent_service or AgentService()
         self.session_service = session_service or SessionService()
+        self.prompt_builder = PromptBuilder()
         self.llm = AsyncOpenAI(
             base_url=self.settings.llm_base_url,
             api_key=self.settings.llm_api_key,
@@ -135,8 +137,12 @@ class LLMService:
 
         credentials_records = await self.agent_service.get_credentials(db_session, agent_id)
         history = await self.history_service.load_history(session_id)
+
+        chat_context = ChatContext(channel=channel, external_client_id=external_client_id)
+        system_prompt = self.prompt_builder.build(agent, chat_context)
+
         messages: list[dict[str, object]] = [
-            {"role": "system", "content": agent.system_prompt},
+            {"role": "system", "content": system_prompt},
             *history,
             {"role": "user", "content": user_message},
         ]

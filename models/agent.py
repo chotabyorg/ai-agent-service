@@ -28,6 +28,8 @@ class AgentTemplate(Base):
         default=True,
         server_default=text("true"),
     )
+    prompt_config: Mapped[dict | None] = mapped_column(JSONB, nullable=True, default=None)
+    timezone: Mapped[str] = mapped_column(String(50), nullable=False, default="Europe/Minsk")
 
     credentials: Mapped[list["AgentCredentials"]] = relationship(
         back_populates="agent",
