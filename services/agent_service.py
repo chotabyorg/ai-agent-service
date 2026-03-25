@@ -8,10 +8,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.agent import AgentCredentials, AgentTemplate
 from schemas.agent import AgentCreate, AgentCredentialsCreate, AgentUpdate
+from services.prompt_builder import PromptBuilder
 
 
 class AgentService:
     """CRUD operations for agent templates and their credentials."""
+
+    def __init__(self) -> None:
+        self.prompt_builder = PromptBuilder()
 
     async def create_agent(
         self,
@@ -19,7 +23,13 @@ class AgentService:
         user_id: UUID,
         payload: AgentCreate,
     ) -> AgentTemplate:
-        agent = AgentTemplate(user_id=user_id, **payload.model_dump())
+        data = payload.model_dump()
+        if payload.prompt_config:
+            data.setdefault("system_prompt", "")
+            agent = AgentTemplate(user_id=user_id, **data)
+            agent.system_prompt = self.prompt_builder.build_static(agent)
+        else:
+            agent = AgentTemplate(user_id=user_id, **data)
         session.add(agent)
         await session.commit()
         await session.refresh(agent)
@@ -63,9 +73,29 @@ class AgentService:
         if agent is None:
             return None
 
-        for field_name, value in payload.model_dump(exclude_unset=True).items():
+        updates = payload.model_dump(exclude_unset=True)
+        for field_name, value in updates.items():
             setattr(agent, field_name, value)
 
+        if "prompt_config" in updates and updates["prompt_config"] is not None:
+            agent.system_prompt = self.prompt_builder.build_static(agent)
+
+        await session.commit()
+        await session.refresh(agent)
+        return agent
+
+    async def update_prompt_config(
+        self,
+        session: AsyncSession,
+        user_id: UUID,
+        agent_id: UUID,
+        config_dict: dict,
+    ) -> AgentTemplate | None:
+        agent = await self.get_agent_by_id(session, agent_id, user_id=user_id)
+        if agent is None:
+            return None
+        agent.prompt_config = config_dict
+        agent.system_prompt = self.prompt_builder.build_static(agent)
         await session.commit()
         await session.refresh(agent)
         return agent
