@@ -163,9 +163,12 @@ class LLMService:
                 except ValueError:
                     continue
 
+                enabled = credentials_record.enabled_tools
                 for tool in manager.get_openai_tools():
                     tool_name = tool["function"]["name"]
                     if tool_name in tool_registry:
+                        continue
+                    if enabled is not None and tool_name not in enabled:
                         continue
                     tool_registry[tool_name] = manager
                     openai_tools.append(tool)
