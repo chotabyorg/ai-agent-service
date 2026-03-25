@@ -84,6 +84,22 @@ class AgentService:
         await session.refresh(agent)
         return agent
 
+    async def update_prompt_config(
+        self,
+        session: AsyncSession,
+        user_id: UUID,
+        agent_id: UUID,
+        config_dict: dict,
+    ) -> AgentTemplate | None:
+        agent = await self.get_agent_by_id(session, agent_id, user_id=user_id)
+        if agent is None:
+            return None
+        agent.prompt_config = config_dict
+        agent.system_prompt = self.prompt_builder.build_static(agent)
+        await session.commit()
+        await session.refresh(agent)
+        return agent
+
     async def upsert_credentials(
         self,
         session: AsyncSession,

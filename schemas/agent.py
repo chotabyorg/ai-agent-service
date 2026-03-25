@@ -55,6 +55,19 @@ class AgentResponse(BaseModel):
     timezone: str
 
 
+class PromptConfigResponse(BaseModel):
+    """Serialized prompt_config of an agent."""
+
+    prompt_config: dict | None = None
+
+
+class PromptPreviewResponse(BaseModel):
+    """Rendered system prompt preview."""
+
+    rendered_prompt: str
+    channel: str
+
+
 class AgentCredentialsCreate(BaseModel):
     """Payload for creating or updating MCP credentials."""
 

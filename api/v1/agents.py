@@ -3,7 +3,8 @@
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Header, HTTPException, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
+from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.dependencies import get_db
@@ -14,8 +15,12 @@ from schemas.agent import (
     AgentCredentialsSummary,
     AgentResponse,
     AgentUpdate,
+    PromptConfigResponse,
+    PromptPreviewResponse,
 )
+from schemas.prompt_config import PromptConfig
 from services.agent_service import AgentService
+from services.prompt_builder import ChatContext, PromptBuilder
 
 
 router = APIRouter()
@@ -82,6 +87,64 @@ async def delete_agent(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Forbidden",
         )
+
+
+@router.get("/{agent_id}/prompt-config", response_model=PromptConfigResponse)
+async def get_prompt_config(
+    agent_id: UUID,
+    db: DbSession,
+    user_id: UserIdHeader,
+) -> PromptConfigResponse:
+    agent = await agent_service.get_agent_by_id(db, agent_id, user_id=user_id)
+    if agent is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Agent not found",
+        )
+    return PromptConfigResponse(prompt_config=agent.prompt_config)
+
+
+@router.put("/{agent_id}/prompt-config", response_model=PromptConfigResponse)
+async def update_prompt_config(
+    agent_id: UUID,
+    payload: dict,
+    db: DbSession,
+    user_id: UserIdHeader,
+) -> PromptConfigResponse:
+    try:
+        PromptConfig(**payload)
+    except ValidationError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail=exc.errors(),
+        ) from exc
+
+    agent = await agent_service.update_prompt_config(db, user_id, agent_id, payload)
+    if agent is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Agent not found",
+        )
+    return PromptConfigResponse(prompt_config=agent.prompt_config)
+
+
+@router.get("/{agent_id}/prompt-preview", response_model=PromptPreviewResponse)
+async def get_prompt_preview(
+    agent_id: UUID,
+    db: DbSession,
+    user_id: UserIdHeader,
+    channel: str = Query(default="telegram"),
+) -> PromptPreviewResponse:
+    agent = await agent_service.get_agent_by_id(db, agent_id, user_id=user_id)
+    if agent is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Agent not found",
+        )
+    prompt_builder = PromptBuilder()
+    context = ChatContext(channel=channel, external_client_id="preview")
+    rendered = prompt_builder.build(agent, context)
+    return PromptPreviewResponse(rendered_prompt=rendered, channel=channel)
 
 
 @router.get("/{agent_id}/credentials", response_model=list[AgentCredentialsSummary])
