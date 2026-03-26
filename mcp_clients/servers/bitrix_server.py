@@ -298,6 +298,22 @@ async def set_deal_products(deal_id: int, products: list[dict]) -> dict:
     return {"success": True, "message": "Товары сделки успешно обновлены"}
 
 @mcp.tool()
+async def list_catalog_sections(iblock_id: int = None) -> list:
+    """Получить разделы каталога товаров."""
+    params = {"select": ["id", "name", "sort"]}
+    if iblock_id is not None:
+        params["filter"] = {"iblockId": iblock_id}
+    return await safe_call("catalog.section.list", params)
+
+@mcp.tool()
+async def list_catalog_products(section_id: int = None) -> list:
+    """Получить товары каталога. Опционально фильтрует по разделу."""
+    params = {"select": ["id", "name", "price", "iblockSectionId", "active"]}
+    if section_id is not None:
+        params["filter"] = {"sectionId": section_id}
+    return await safe_call("catalog.product.list", params)
+
+@mcp.tool()
 async def sync_deal_payment_date(deal_id: int, date_field_label: str = "Дата оплаты") -> dict:
     """Перенести дату успешной оплаты в пользовательское поле сделки."""
     fields = await safe_call("crm.deal.userfield.list", {"filter": {"LANG": "ru", "USER_TYPE_ID": "date"}})
@@ -319,7 +335,7 @@ async def sync_deal_payment_date(deal_id: int, date_field_label: str = "Дата
 @mcp.tool()
 async def get_crm_stages(entity_id: str) -> list:
     """Получить список стадий с семантикой для объектов CRM (например: 'DEAL_STAGE')."""
-    return await safe_call("crm.status.list", {"filter": {"ENTITY_ID": entity_id}, "order": {"SORT": "ASC"}})
+    return await safe_call("crm.status.list", {"filter": {"ENTITY_ID": entity_id}})
 
 @mcp.tool()
 async def get_deal_funnels_and_stages() -> dict:
@@ -327,9 +343,15 @@ async def get_deal_funnels_and_stages() -> dict:
     categories = await safe_call("crm.dealcategory.list")
     if not isinstance(categories, list): categories =[]
 
-    default_cat = await safe_call("crm.dealcategory.default.get")
-    if isinstance(default_cat, dict) and "error" not in default_cat:
-        categories.append(default_cat)
+    try:
+        default_cat = await safe_call("crm.dealcategory.default.get")
+        if isinstance(default_cat, dict) and "error" not in default_cat:
+            categories.append(default_cat)
+    except Exception:
+        pass
+    # Всегда добавляем дефолтную воронку (ID=0), если её ещё нет
+    if not any(str(c.get("ID")) == "0" for c in categories):
+        categories.append({"ID": "0", "NAME": "Общая"})
 
     result = {}
     for cat in categories:
