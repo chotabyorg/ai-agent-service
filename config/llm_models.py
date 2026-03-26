@@ -8,4 +8,5 @@ AVAILABLE_MODELS = [
     {"display_name": "Gemini 3.1 Flash Lite Preview", "model_id": "google/gemini-3.1-flash-lite-preview"},
     {"display_name": "Kimi K2.5", "model_id": "moonshotai/kimi-k2.5"},
     {"display_name": "Qwen 3.5 35B A3B", "model_id": "qwen/qwen3.5-35b-a3b"},
+    {"display_name": "Qwen 3.5 397B A17B", "model_id": "qwen/qwen3.5-397b-a17b"},
 ]
