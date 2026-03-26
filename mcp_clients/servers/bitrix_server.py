@@ -298,19 +298,23 @@ async def set_deal_products(deal_id: int, products: list[dict]) -> dict:
     return {"success": True, "message": "Товары сделки успешно обновлены"}
 
 @mcp.tool()
-async def list_catalog_sections(iblock_id: int = None) -> list:
-    """Получить разделы каталога товаров."""
-    params = {"select": ["id", "name", "sort"]}
-    if iblock_id is not None:
-        params["filter"] = {"iblockId": iblock_id}
+async def list_catalogs() -> list:
+    """Получить список каталогов товаров. Используй для получения iblockId перед вызовом секций и товаров."""
+    return await safe_call("catalog.catalog.list", {"select": ["id", "iblockId", "name", "iblockTypeId"]})
+
+@mcp.tool()
+async def list_catalog_sections(iblock_id: int) -> list:
+    """Получить разделы каталога товаров. Сначала вызови list_catalogs() чтобы получить iblockId."""
+    params = {"select": ["id", "name", "sort", "iblockId"], "filter": {"iblockId": iblock_id}}
     return await safe_call("catalog.section.list", params)
 
 @mcp.tool()
-async def list_catalog_products(section_id: int = None) -> list:
-    """Получить товары каталога. Опционально фильтрует по разделу."""
-    params = {"select": ["id", "name", "price", "iblockSectionId", "active"]}
+async def list_catalog_products(iblock_id: int, section_id: int = None) -> list:
+    """Получить товары каталога. Сначала вызови list_catalogs() чтобы получить iblockId."""
+    filter_params = {"iblockId": iblock_id}
     if section_id is not None:
-        params["filter"] = {"sectionId": section_id}
+        filter_params["sectionId"] = section_id
+    params = {"select": ["id", "name", "price", "iblockSectionId", "active", "iblockId"], "filter": filter_params}
     return await safe_call("catalog.product.list", params)
 
 @mcp.tool()
