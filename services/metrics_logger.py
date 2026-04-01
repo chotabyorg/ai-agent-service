@@ -15,6 +15,7 @@ from typing import Optional
 METRICS_LOG_LEVEL = os.getenv("METRICS_LOG_LEVEL", "normal")  # detailed | normal | minimal
 
 logger = logging.getLogger("chota.metrics")
+logger.propagate = False  # prevent parent logger from reformatting the message
 if not logger.handlers:
     _handler = logging.StreamHandler()  # → stderr → docker logs
     _handler.setFormatter(logging.Formatter("%(message)s"))  # clean JSON, no prefix
