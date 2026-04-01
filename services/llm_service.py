@@ -139,6 +139,7 @@ class LLMService:
             )
         except Exception as exc:
             metrics.mark_error(str(exc))
+            print("METRICS_DEBUG:", metrics.request_id, flush=True)
             metrics.emit()
             raise
 
@@ -236,6 +237,7 @@ class LLMService:
                     await self.history_service.save_history(session_id, updated_history)
                     metrics.action_taken = "mcp_action" if metrics.mcp_calls_count > 0 else "auto_reply"
                     metrics.mark_response_sent()
+                    print("METRICS_DEBUG:", metrics.request_id, flush=True)
                     metrics.emit()
                     return ChatProcessingResult(session_id=session_id, answer=clean_answer)
 
