@@ -16,11 +16,11 @@ METRICS_LOG_LEVEL = os.getenv("METRICS_LOG_LEVEL", "normal")  # detailed | norma
 
 logger = logging.getLogger("chota.metrics")
 logger.propagate = False  # prevent parent logger from reformatting the message
-if not logger.handlers:
-    _handler = logging.StreamHandler()  # → stderr → docker logs
-    _handler.setFormatter(logging.Formatter("%(message)s"))  # clean JSON, no prefix
-    logger.addHandler(_handler)
-    logger.setLevel(logging.INFO)
+logger.handlers.clear()  # evict any handlers uvicorn may have added before this import
+_handler = logging.StreamHandler()  # → stderr → docker logs
+_handler.setFormatter(logging.Formatter("%(message)s"))  # clean JSON, no prefix
+logger.addHandler(_handler)
+logger.setLevel(logging.INFO)
 
 
 @dataclass
