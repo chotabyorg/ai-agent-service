@@ -47,6 +47,8 @@ class Settings(BaseSettings):
     mcp_bitrix_path: str = Field(default="mcp_clients/servers/bitrix_server.py")
     mcp_google_path: str = Field(default="mcp_service/google_server.py")
 
+    metrics_log_level: str = Field(default="normal")  # detailed | normal | minimal
+
     @property
     def postgres_dsn(self) -> str:
         return (
