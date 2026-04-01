@@ -2,7 +2,7 @@
 
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.dependencies import get_db
@@ -21,7 +21,10 @@ DbSession = Annotated[AsyncSession, Depends(get_db)]
 
 
 @router.post("/completions", response_model=ChatResponse)
-async def create_chat_completion(payload: ChatRequest, db: DbSession) -> ChatResponse:
+async def create_chat_completion(
+    payload: ChatRequest, request: Request, db: DbSession
+) -> ChatResponse:
+    request_id = request.headers.get("X-Request-Id")
     try:
         result = await llm_service.process_chat_message(
             db_session=db,
@@ -29,6 +32,7 @@ async def create_chat_completion(payload: ChatRequest, db: DbSession) -> ChatRes
             external_client_id=payload.external_client_id,
             channel=payload.channel,
             user_message=payload.message,
+            request_id=request_id,
         )
     except AgentNotFoundError as exc:
         raise HTTPException(

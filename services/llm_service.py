@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from mcp_clients.manager import MCPManager
 from services.agent_service import AgentService
 from services.history_service import HistoryService
+from services.metrics_logger import PipelineMetrics
 from services.prompt_builder import ChatContext, PromptBuilder
 from services.session_service import SessionService
 
@@ -120,12 +121,43 @@ class LLMService:
         external_client_id: str,
         channel: str,
         user_message: str,
+        request_id: str | None = None,
+    ) -> ChatProcessingResult:
+        metrics = PipelineMetrics()
+        if request_id:
+            metrics.request_id = request_id
+        metrics.mark_received()
+
+        try:
+            return await self._process_chat_message_inner(
+                db_session=db_session,
+                agent_id=agent_id,
+                external_client_id=external_client_id,
+                channel=channel,
+                user_message=user_message,
+                metrics=metrics,
+            )
+        except Exception as exc:
+            metrics.mark_error(str(exc))
+            metrics.emit()
+            raise
+
+    async def _process_chat_message_inner(
+        self,
+        db_session: AsyncSession,
+        agent_id: UUID,
+        external_client_id: str,
+        channel: str,
+        user_message: str,
+        metrics: PipelineMetrics,
     ) -> ChatProcessingResult:
         agent = await self.agent_service.get_agent_by_id(db_session, agent_id)
         if agent is None:
             raise AgentNotFoundError("Agent not found.")
         if not agent.is_active:
             raise AgentInactiveError("Agent is inactive.")
+
+        metrics.agent_id = str(agent_id)
 
         conversation_session = await self.session_service.get_or_create_session(
             db_session,
@@ -134,6 +166,7 @@ class LLMService:
             channel=channel,
         )
         session_id = conversation_session.id
+        metrics.session_id = str(session_id)
 
         credentials_records = await self.agent_service.get_credentials(db_session, agent_id)
         history = await self.history_service.load_history(session_id)
@@ -174,6 +207,7 @@ class LLMService:
                     openai_tools.append(tool)
 
             for _ in range(self.MAX_TOOL_STEPS):
+                metrics.mark_llm_start()
                 response = await self.llm.chat.completions.create(
                     model=agent.model_name or self.settings.llm_default_model,
                     temperature=agent.temperature,
@@ -181,6 +215,11 @@ class LLMService:
                     tools=openai_tools or None,
                     parallel_tool_calls=False,
                     extra_headers=self._build_extra_headers(),
+                )
+                metrics.mark_llm_end(
+                    model=response.model,
+                    tokens_in=response.usage.prompt_tokens if response.usage else None,
+                    tokens_out=response.usage.completion_tokens if response.usage else None,
                 )
 
                 message = response.choices[0].message
@@ -195,6 +234,9 @@ class LLMService:
                         {"role": "assistant", "content": clean_answer},
                     ]
                     await self.history_service.save_history(session_id, updated_history)
+                    metrics.action_taken = "mcp_action" if metrics.mcp_calls_count > 0 else "auto_reply"
+                    metrics.mark_response_sent()
+                    metrics.emit()
                     return ChatProcessingResult(session_id=session_id, answer=clean_answer)
 
                 messages.append(self._assistant_message_to_dict(message))
@@ -236,15 +278,20 @@ class LLMService:
                             {"error": f"Tool '{func_name}' is not available."},
                             ensure_ascii=False,
                         )
+                        metrics.mark_mcp_start()
+                        metrics.mark_mcp_end(action=func_name, result="skipped")
                     else:
+                        metrics.mark_mcp_start(service=manager.service_name)
                         try:
                             tool_result = await manager.call_tool(func_name, func_args)
                             tool_result_text = self._extract_tool_result_content(tool_result)
+                            metrics.mark_mcp_end(action=func_name, result="success")
                         except Exception as exc:
                             tool_result_text = json.dumps(
                                 {"error": f"Tool execution failed: {exc}"},
                                 ensure_ascii=False,
                             )
+                            metrics.mark_mcp_end(action=func_name, result="error")
 
                     messages.append(
                         {
