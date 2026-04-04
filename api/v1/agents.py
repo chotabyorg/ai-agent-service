@@ -19,8 +19,27 @@ from schemas.agent import (
     PromptPreviewResponse,
 )
 from schemas.prompt_config import PromptConfig
+from models.agent import AgentTemplate
 from services.agent_service import AgentService
 from services.prompt_builder import ChatContext, PromptBuilder
+
+
+def _build_agent_response(agent: AgentTemplate) -> AgentResponse:
+    """Build AgentResponse with computed key fields."""
+    has_key = agent.encrypted_openrouter_key is not None
+    preview = None
+    if has_key:
+        try:
+            from services.encryption_service import EncryptionService, mask_api_key
+
+            enc = EncryptionService()
+            preview = mask_api_key(enc.decrypt(agent.encrypted_openrouter_key))
+        except Exception:
+            preview = None
+    response = AgentResponse.model_validate(agent)
+    response.has_openrouter_key = has_key
+    response.openrouter_key_preview = preview
+    return response
 
 
 router = APIRouter()
@@ -33,13 +52,13 @@ UserRoleHeader = Annotated[str | None, Header(alias="x-user-role")]
 @router.post("/", response_model=AgentResponse, status_code=status.HTTP_201_CREATED)
 async def create_agent(payload: AgentCreate, db: DbSession, user_id: UserIdHeader) -> AgentResponse:
     agent = await agent_service.create_agent(db, user_id, payload)
-    return AgentResponse.model_validate(agent)
+    return _build_agent_response(agent)
 
 
 @router.get("/", response_model=list[AgentResponse])
 async def list_agents(db: DbSession, user_id: UserIdHeader) -> list[AgentResponse]:
     agents = await agent_service.list_agents(db, user_id)
-    return [AgentResponse.model_validate(agent) for agent in agents]
+    return [_build_agent_response(agent) for agent in agents]
 
 
 @router.get("/{agent_id}", response_model=AgentResponse)
@@ -50,7 +69,7 @@ async def get_agent(agent_id: UUID, db: DbSession, user_id: UserIdHeader) -> Age
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Agent not found",
         )
-    return AgentResponse.model_validate(agent)
+    return _build_agent_response(agent)
 
 
 @router.put("/{agent_id}", response_model=AgentResponse)
@@ -60,13 +79,25 @@ async def update_agent(
     db: DbSession,
     user_id: UserIdHeader,
 ) -> AgentResponse:
+    if payload.is_active is True:
+        agent_check = await agent_service.get_agent_by_id(db, agent_id, user_id=user_id)
+        if agent_check is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Agent not found",
+            )
+        if not agent_check.encrypted_openrouter_key:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Cannot activate agent without OpenRouter API key.",
+            )
     agent = await agent_service.update_agent(db, user_id, agent_id, payload)
     if agent is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Agent not found",
         )
-    return AgentResponse.model_validate(agent)
+    return _build_agent_response(agent)
 
 
 @router.delete("/{agent_id}", status_code=status.HTTP_204_NO_CONTENT)

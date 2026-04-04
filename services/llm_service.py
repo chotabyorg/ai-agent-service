@@ -1,19 +1,30 @@
 """LLM orchestration service with DB, Redis and MCP integration."""
 
 import json
+import logging
 import re
 from contextlib import AsyncExitStack
 from dataclasses import dataclass
 from uuid import UUID
 
-from openai import AsyncOpenAI
+from openai import (
+    APIConnectionError,
+    APIError,
+    APITimeoutError,
+    AsyncOpenAI,
+    AuthenticationError,
+    RateLimitError,
+)
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from mcp_clients.manager import MCPManager
 from services.agent_service import AgentService
+from services.encryption_service import EncryptionService
 from services.history_service import HistoryService
 from services.prompt_builder import ChatContext, PromptBuilder
 from services.session_service import SessionService
+
+logger = logging.getLogger(__name__)
 
 
 class ChatProcessingError(Exception):
@@ -26,6 +37,26 @@ class AgentNotFoundError(ChatProcessingError):
 
 class AgentInactiveError(ChatProcessingError):
     """Raised when the target agent is disabled."""
+
+
+class AgentKeyError(Exception):
+    """Base error for agent API key issues (separate from ChatProcessingError)."""
+
+
+class AgentNoApiKeyError(AgentKeyError):
+    """Agent has no OpenRouter API key configured."""
+
+
+class AgentApiKeyInvalidError(AgentKeyError):
+    """OpenRouter API key is invalid or revoked."""
+
+
+class AgentInsufficientFundsError(AgentKeyError):
+    """Insufficient funds on the OpenRouter key."""
+
+
+class AgentRateLimitError(AgentKeyError):
+    """Rate limit exceeded on the OpenRouter key."""
 
 
 @dataclass
@@ -52,10 +83,22 @@ class LLMService:
         self.agent_service = agent_service or AgentService()
         self.session_service = session_service or SessionService()
         self.prompt_builder = PromptBuilder()
-        self.llm = AsyncOpenAI(
-            base_url=self.settings.llm_base_url,
-            api_key=self.settings.llm_api_key,
-        )
+        self.encryption_service = EncryptionService()
+
+    def _get_agent_api_key(self, agent: object) -> str | None:
+        """Decrypt and return the agent's OpenRouter API key."""
+        encrypted = getattr(agent, "encrypted_openrouter_key", None)
+        if not encrypted:
+            return None
+        return self.encryption_service.decrypt(encrypted)
+
+    async def _deactivate_agent(
+        self, agent: object, db_session: AsyncSession, reason: str
+    ) -> None:
+        """Deactivate an agent due to key problems."""
+        agent.is_active = False  # type: ignore[attr-defined]
+        await db_session.commit()
+        logger.warning("Agent %s deactivated: %s", getattr(agent, "id", "?"), reason)
 
     @staticmethod
     def _strip_thinking_tags(raw_answer: str) -> str:
@@ -127,6 +170,15 @@ class LLMService:
         if not agent.is_active:
             raise AgentInactiveError("Agent is inactive.")
 
+        agent_api_key = self._get_agent_api_key(agent)
+        if not agent_api_key:
+            raise AgentNoApiKeyError("Agent has no OpenRouter API key configured.")
+
+        llm_client = AsyncOpenAI(
+            base_url=self.settings.llm_base_url,
+            api_key=agent_api_key,
+        )
+
         conversation_session = await self.session_service.get_or_create_session(
             db_session,
             agent_id=agent_id,
@@ -174,14 +226,31 @@ class LLMService:
                     openai_tools.append(tool)
 
             for _ in range(self.MAX_TOOL_STEPS):
-                response = await self.llm.chat.completions.create(
-                    model=agent.model_name or self.settings.llm_default_model,
-                    temperature=agent.temperature,
-                    messages=messages,
-                    tools=openai_tools or None,
-                    parallel_tool_calls=False,
-                    extra_headers=self._build_extra_headers(),
-                )
+                try:
+                    response = await llm_client.chat.completions.create(
+                        model=agent.model_name or self.settings.llm_default_model,
+                        temperature=agent.temperature,
+                        messages=messages,
+                        tools=openai_tools or None,
+                        parallel_tool_calls=False,
+                        extra_headers=self._build_extra_headers(),
+                    )
+                except AuthenticationError:
+                    await self._deactivate_agent(agent, db_session, "OpenRouter API key invalid or revoked")
+                    raise AgentApiKeyInvalidError("OpenRouter key is invalid. Agent deactivated.")
+                except RateLimitError as exc:
+                    error_str = str(exc).lower()
+                    if "402" in error_str or "insufficient" in error_str or "credits" in error_str:
+                        await self._deactivate_agent(agent, db_session, "Insufficient funds on OpenRouter")
+                        raise AgentInsufficientFundsError("No funds on OpenRouter. Agent deactivated.")
+                    raise AgentRateLimitError("Rate limit exceeded. Try again later.")
+                except APITimeoutError:
+                    raise ChatProcessingError("LLM request timed out.")
+                except APIConnectionError:
+                    raise ChatProcessingError("Cannot connect to OpenRouter.")
+                except APIError as exc:
+                    logger.error("OpenRouter error for agent %s: %s", agent.id, exc)
+                    raise ChatProcessingError(f"LLM error: {exc.message}")
 
                 message = response.choices[0].message
                 if not message.tool_calls:

@@ -5,10 +5,10 @@ from uuid import UUID, uuid4
 import pytest
 from sqlalchemy import func, select
 
-from api.v1 import chat as chat_api
 import services.llm_service as llm_service_module
-from models.agent import AgentCredentials
+from models.agent import AgentCredentials, AgentTemplate
 from models.session import ConversationSession
+from services.encryption_service import EncryptionService
 from tests.fakes import (
     FakeMCPController,
     ScriptedLLMClient,
@@ -16,6 +16,9 @@ from tests.fakes import (
     build_tool_call,
     build_tool_result,
 )
+
+
+FAKE_OPENROUTER_KEY = "sk-or-v1-test-key-for-unit-tests"
 
 
 def build_agent_payload() -> dict[str, object]:
@@ -33,13 +36,21 @@ def build_headers(user_id: UUID | None = None) -> dict[str, str]:
     return {"x-user-id": str(user_id or uuid4())}
 
 
-async def create_agent(api_client, **overrides) -> dict[str, object]:
+async def create_agent(api_client, db_session_factory=None, **overrides) -> dict[str, object]:
     owner_id = overrides.pop("owner_id", uuid4())
     payload = build_agent_payload()
     payload.update(overrides)
     response = await api_client.post("/v1/agents/", json=payload, headers=build_headers(owner_id))
     assert response.status_code == 201
-    return response.json()
+    agent_data = response.json()
+    # Set encrypted OpenRouter key directly in DB so chat works
+    if db_session_factory is not None:
+        enc = EncryptionService()
+        async with db_session_factory() as session:
+            agent = await session.get(AgentTemplate, UUID(agent_data["id"]))
+            agent.encrypted_openrouter_key = enc.encrypt(FAKE_OPENROUTER_KEY)
+            await session.commit()
+    return agent_data
 
 
 async def store_credentials(
@@ -60,7 +71,9 @@ async def store_credentials(
 @pytest.fixture
 def llm_controller(monkeypatch: pytest.MonkeyPatch) -> ScriptedLLMClient:
     controller = ScriptedLLMClient()
-    monkeypatch.setattr(chat_api.llm_service, "llm", controller)
+    monkeypatch.setattr(
+        llm_service_module, "AsyncOpenAI", lambda **kwargs: controller
+    )
     return controller
 
 
@@ -77,7 +90,7 @@ async def test_chat_creates_and_reuses_session_key(api_client, db_session, llm_c
         build_llm_response(content="Echo: Hello"),
         build_llm_response(content="Echo: How are you?"),
     )
-    agent = await create_agent(api_client)
+    agent = await create_agent(api_client, db_session_factory=db_session)
 
     first = await api_client.post(
         "/v1/chat/completions",
@@ -126,8 +139,8 @@ async def test_chat_creates_distinct_sessions_for_different_channel_and_agent(
         build_llm_response(content="instagram"),
         build_llm_response(content="other-agent"),
     )
-    first_agent = await create_agent(api_client)
-    second_agent = await create_agent(api_client, name="Backup agent")
+    first_agent = await create_agent(api_client, db_session_factory=db_session)
+    second_agent = await create_agent(api_client, db_session_factory=db_session, name="Backup agent")
 
     first = await api_client.post(
         "/v1/chat/completions",
@@ -167,11 +180,12 @@ async def test_chat_creates_distinct_sessions_for_different_channel_and_agent(
 @pytest.mark.integration
 async def test_chat_uses_existing_redis_history_and_strips_thinking_tags(
     api_client,
+    db_session,
     llm_controller,
     fake_redis,
 ) -> None:
     llm_controller.chat.completions.queue(build_llm_response(content="Visible answer"))
-    agent = await create_agent(api_client)
+    agent = await create_agent(api_client, db_session_factory=db_session)
     first = await api_client.post(
         "/v1/chat/completions",
         json={
@@ -219,10 +233,11 @@ async def test_chat_uses_existing_redis_history_and_strips_thinking_tags(
 @pytest.mark.integration
 async def test_chat_falls_back_to_default_answer_when_model_returns_empty_content(
     api_client,
+    db_session,
     llm_controller,
 ) -> None:
     llm_controller.chat.completions.queue(build_llm_response(content=""))
-    agent = await create_agent(api_client)
+    agent = await create_agent(api_client, db_session_factory=db_session)
 
     response = await api_client.post(
         "/v1/chat/completions",
@@ -241,6 +256,7 @@ async def test_chat_falls_back_to_default_answer_when_model_returns_empty_conten
 @pytest.mark.integration
 async def test_chat_with_tool_call_executes_mcp_and_saves_only_user_and_assistant_turns(
     api_client,
+    db_session,
     llm_controller,
     mcp_controller,
     fake_redis,
@@ -262,7 +278,7 @@ async def test_chat_with_tool_call_executes_mcp_and_saves_only_user_and_assistan
         ),
         build_llm_response(content="Contact found"),
     )
-    agent = await create_agent(api_client)
+    agent = await create_agent(api_client, db_session_factory=db_session)
     await store_credentials(
         api_client,
         agent["id"],
@@ -307,7 +323,7 @@ async def test_chat_with_tool_call_executes_mcp_and_saves_only_user_and_assistan
 
 
 @pytest.mark.integration
-async def test_chat_continues_after_tool_execution_failure(api_client, llm_controller, mcp_controller) -> None:
+async def test_chat_continues_after_tool_execution_failure(api_client, db_session, llm_controller, mcp_controller) -> None:
     mcp_controller.tools_by_service["bitrix"] = [
         {
             "type": "function",
@@ -323,7 +339,7 @@ async def test_chat_continues_after_tool_execution_failure(api_client, llm_contr
         build_llm_response(tool_calls=[build_tool_call("tool-1", "find_contact", "{}")]),
         build_llm_response(content="Fallback answer"),
     )
-    agent = await create_agent(api_client)
+    agent = await create_agent(api_client, db_session_factory=db_session)
     await store_credentials(
         api_client,
         agent["id"],
@@ -351,6 +367,7 @@ async def test_chat_continues_after_tool_execution_failure(api_client, llm_contr
 @pytest.mark.integration
 async def test_chat_passes_empty_dict_when_tool_arguments_are_invalid_json(
     api_client,
+    db_session,
     llm_controller,
     mcp_controller,
 ) -> None:
@@ -368,7 +385,7 @@ async def test_chat_passes_empty_dict_when_tool_arguments_are_invalid_json(
         build_llm_response(tool_calls=[build_tool_call("tool-1", "find_contact", "{not-json}")]),
         build_llm_response(content="Handled invalid args"),
     )
-    agent = await create_agent(api_client)
+    agent = await create_agent(api_client, db_session_factory=db_session)
     await store_credentials(
         api_client,
         agent["id"],
@@ -394,12 +411,13 @@ async def test_chat_passes_empty_dict_when_tool_arguments_are_invalid_json(
 @pytest.mark.integration
 async def test_chat_skips_unsupported_service_credentials_when_mcp_raises_value_error(
     api_client,
+    db_session,
     llm_controller,
     mcp_controller,
 ) -> None:
     mcp_controller.enter_errors["custom"] = ValueError("Unsupported MCP service: custom")
     llm_controller.chat.completions.queue(build_llm_response(content="No tools needed"))
-    agent = await create_agent(api_client)
+    agent = await create_agent(api_client, db_session_factory=db_session)
     await store_credentials(
         api_client,
         agent["id"],
@@ -425,12 +443,13 @@ async def test_chat_skips_unsupported_service_credentials_when_mcp_raises_value_
 @pytest.mark.integration
 async def test_chat_skips_bitrix_credentials_without_webhook_url(
     api_client,
+    db_session,
     llm_controller,
     mcp_controller,
 ) -> None:
     mcp_controller.enter_errors["bitrix"] = ValueError("Bitrix credentials must contain 'webhook_url'.")
     llm_controller.chat.completions.queue(build_llm_response(content="Proceed without tools"))
-    agent = await create_agent(api_client)
+    agent = await create_agent(api_client, db_session_factory=db_session)
     await store_credentials(
         api_client,
         agent["id"],
@@ -491,11 +510,11 @@ async def test_chat_returns_409_for_inactive_agent(api_client, llm_controller) -
 
 
 @pytest.mark.integration
-async def test_chat_ignores_redis_load_failures(api_client, llm_controller, fake_redis, monkeypatch) -> None:
+async def test_chat_ignores_redis_load_failures(api_client, db_session, llm_controller, fake_redis, monkeypatch) -> None:
     from redis.exceptions import RedisError
 
     llm_controller.chat.completions.queue(build_llm_response(content="No history loaded"))
-    agent = await create_agent(api_client)
+    agent = await create_agent(api_client, db_session_factory=db_session)
 
     async def broken_get(*args, **kwargs):
         raise RedisError("read failure")
@@ -519,11 +538,11 @@ async def test_chat_ignores_redis_load_failures(api_client, llm_controller, fake
 
 
 @pytest.mark.integration
-async def test_chat_ignores_redis_save_failures(api_client, llm_controller, fake_redis, monkeypatch) -> None:
+async def test_chat_ignores_redis_save_failures(api_client, db_session, llm_controller, fake_redis, monkeypatch) -> None:
     from redis.exceptions import RedisError
 
     llm_controller.chat.completions.queue(build_llm_response(content="History save failed"))
-    agent = await create_agent(api_client)
+    agent = await create_agent(api_client, db_session_factory=db_session)
 
     async def broken_set(*args, **kwargs):
         raise RedisError("write failure")
@@ -547,6 +566,7 @@ async def test_chat_ignores_redis_save_failures(api_client, llm_controller, fake
 @pytest.mark.integration
 async def test_identical_tool_call_is_blocked_to_prevent_infinite_loop(
     api_client,
+    db_session,
     llm_controller,
     mcp_controller,
 ) -> None:
@@ -570,7 +590,7 @@ async def test_identical_tool_call_is_blocked_to_prevent_infinite_loop(
         ),
         build_llm_response(content="Stopped looping"),
     )
-    agent = await create_agent(api_client)
+    agent = await create_agent(api_client, db_session_factory=db_session)
     await store_credentials(
         api_client,
         agent["id"],
@@ -598,6 +618,7 @@ async def test_identical_tool_call_is_blocked_to_prevent_infinite_loop(
 @pytest.mark.integration
 async def test_loop_exhaustion_returns_422_when_tool_calls_never_finish(
     api_client,
+    db_session,
     llm_controller,
     mcp_controller,
 ) -> None:
@@ -623,7 +644,7 @@ async def test_loop_exhaustion_returns_422_when_tool_calls_never_finish(
                 ]
             )
         )
-    agent = await create_agent(api_client)
+    agent = await create_agent(api_client, db_session_factory=db_session)
     await store_credentials(
         api_client,
         agent["id"],
@@ -658,7 +679,7 @@ async def test_concurrent_first_messages_can_create_duplicate_sessions(
         build_llm_response(content="First"),
         build_llm_response(content="Second"),
     )
-    agent = await create_agent(api_client)
+    agent = await create_agent(api_client, db_session_factory=db_session)
     gate = asyncio.Event()
     state = {"seen": 0}
 
@@ -725,7 +746,7 @@ async def test_multiple_credentials_are_loaded_for_chat_flow(
     mcp_controller.tools_by_service["bitrix"] = []
     mcp_controller.tools_by_service["custom"] = []
     llm_controller.chat.completions.queue(build_llm_response(content="No tools used"))
-    agent = await create_agent(api_client)
+    agent = await create_agent(api_client, db_session_factory=db_session)
     await store_credentials(
         api_client,
         agent["id"],
@@ -758,3 +779,164 @@ async def test_multiple_credentials_are_loaded_for_chat_flow(
         )
         assert {item.service_name for item in credentials.scalars().all()} == {"bitrix", "custom"}
     assert [call["service_name"] for call in mcp_controller.init_calls] == ["bitrix", "custom"]
+
+
+@pytest.mark.integration
+async def test_chat_without_key_returns_400(api_client, llm_controller) -> None:
+    """Agent with is_active=True but no key should get 400."""
+    # Create agent with is_active=True but no key in DB
+    owner_id = uuid4()
+    payload = build_agent_payload()
+    response = await api_client.post("/v1/agents/", json=payload, headers=build_headers(owner_id))
+    assert response.status_code == 201
+    agent = response.json()
+
+    chat_response = await api_client.post(
+        "/v1/chat/completions",
+        json={
+            "agent_id": agent["id"],
+            "external_client_id": "user-nokey",
+            "channel": "telegram",
+            "message": "Hello",
+        },
+    )
+
+    assert chat_response.status_code == 400
+    assert "OpenRouter API key" in chat_response.json()["detail"]
+
+
+@pytest.mark.integration
+async def test_chat_authentication_error_deactivates_agent_returns_403(
+    api_client, db_session, monkeypatch
+) -> None:
+    import httpx
+    from openai import AuthenticationError
+
+    mock_response = httpx.Response(401, request=httpx.Request("POST", "https://openrouter.ai"))
+    controller = ScriptedLLMClient()
+    controller.chat.completions.queue(
+        AuthenticationError(
+            message="Invalid API key",
+            response=mock_response,
+            body=None,
+        )
+    )
+    monkeypatch.setattr(llm_service_module, "AsyncOpenAI", lambda **kwargs: controller)
+    agent = await create_agent(api_client, db_session_factory=db_session)
+
+    response = await api_client.post(
+        "/v1/chat/completions",
+        json={
+            "agent_id": agent["id"],
+            "external_client_id": "user-auth-err",
+            "channel": "telegram",
+            "message": "Hello",
+        },
+    )
+
+    assert response.status_code == 403
+    assert "invalid" in response.json()["detail"].lower()
+
+    # Verify agent is deactivated
+    async with db_session() as session:
+        agent_db = await session.get(AgentTemplate, UUID(agent["id"]))
+    assert agent_db.is_active is False
+
+
+@pytest.mark.integration
+async def test_chat_rate_limit_with_402_deactivates_agent(
+    api_client, db_session, monkeypatch
+) -> None:
+    import httpx
+    from openai import RateLimitError
+
+    mock_response = httpx.Response(402, request=httpx.Request("POST", "https://openrouter.ai"))
+    controller = ScriptedLLMClient()
+    controller.chat.completions.queue(
+        RateLimitError(
+            message="402 insufficient credits",
+            response=mock_response,
+            body=None,
+        )
+    )
+    monkeypatch.setattr(llm_service_module, "AsyncOpenAI", lambda **kwargs: controller)
+    agent = await create_agent(api_client, db_session_factory=db_session)
+
+    response = await api_client.post(
+        "/v1/chat/completions",
+        json={
+            "agent_id": agent["id"],
+            "external_client_id": "user-402",
+            "channel": "telegram",
+            "message": "Hello",
+        },
+    )
+
+    assert response.status_code == 402
+
+    async with db_session() as session:
+        agent_db = await session.get(AgentTemplate, UUID(agent["id"]))
+    assert agent_db.is_active is False
+
+
+@pytest.mark.integration
+async def test_chat_rate_limit_normal_returns_429_without_deactivation(
+    api_client, db_session, monkeypatch
+) -> None:
+    import httpx
+    from openai import RateLimitError
+
+    mock_response = httpx.Response(429, request=httpx.Request("POST", "https://openrouter.ai"))
+    controller = ScriptedLLMClient()
+    controller.chat.completions.queue(
+        RateLimitError(
+            message="Rate limit exceeded",
+            response=mock_response,
+            body=None,
+        )
+    )
+    monkeypatch.setattr(llm_service_module, "AsyncOpenAI", lambda **kwargs: controller)
+    agent = await create_agent(api_client, db_session_factory=db_session)
+
+    response = await api_client.post(
+        "/v1/chat/completions",
+        json={
+            "agent_id": agent["id"],
+            "external_client_id": "user-429",
+            "channel": "telegram",
+            "message": "Hello",
+        },
+    )
+
+    assert response.status_code == 429
+
+    # Agent should NOT be deactivated
+    async with db_session() as session:
+        agent_db = await session.get(AgentTemplate, UUID(agent["id"]))
+    assert agent_db.is_active is True
+
+
+@pytest.mark.integration
+async def test_chat_timeout_error_returns_422(
+    api_client, db_session, monkeypatch
+) -> None:
+    from openai import APITimeoutError
+
+    controller = ScriptedLLMClient()
+    controller.chat.completions.queue(
+        APITimeoutError(request=None)
+    )
+    monkeypatch.setattr(llm_service_module, "AsyncOpenAI", lambda **kwargs: controller)
+    agent = await create_agent(api_client, db_session_factory=db_session)
+
+    response = await api_client.post(
+        "/v1/chat/completions",
+        json={
+            "agent_id": agent["id"],
+            "external_client_id": "user-timeout",
+            "channel": "telegram",
+            "message": "Hello",
+        },
+    )
+
+    assert response.status_code == 422

@@ -25,11 +25,12 @@ class AgentTemplate(Base):
     is_active: Mapped[bool] = mapped_column(
         Boolean,
         nullable=False,
-        default=True,
-        server_default=text("true"),
+        default=False,
+        server_default=text("false"),
     )
     prompt_config: Mapped[dict | None] = mapped_column(JSONB, nullable=True, default=None)
     timezone: Mapped[str] = mapped_column(String(50), nullable=False, default="Europe/Minsk")
+    encrypted_openrouter_key: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
 
     credentials: Mapped[list["AgentCredentials"]] = relationship(
         back_populates="agent",

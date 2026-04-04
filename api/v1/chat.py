@@ -8,8 +8,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from api.dependencies import get_db
 from schemas.chat import ChatRequest, ChatResponse
 from services.llm_service import (
+    AgentApiKeyInvalidError,
     AgentInactiveError,
+    AgentInsufficientFundsError,
+    AgentNoApiKeyError,
     AgentNotFoundError,
+    AgentRateLimitError,
     ChatProcessingError,
     LLMService,
 )
@@ -38,6 +42,26 @@ async def create_chat_completion(payload: ChatRequest, db: DbSession) -> ChatRes
     except AgentInactiveError as exc:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
+        ) from exc
+    except AgentNoApiKeyError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+    except AgentApiKeyInvalidError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=str(exc),
+        ) from exc
+    except AgentInsufficientFundsError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_402_PAYMENT_REQUIRED,
+            detail=str(exc),
+        ) from exc
+    except AgentRateLimitError as exc:
+        raise HTTPException(
+            status_code=429,
             detail=str(exc),
         ) from exc
     except ChatProcessingError as exc:

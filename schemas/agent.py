@@ -15,7 +15,7 @@ class AgentCreate(BaseModel):
     llm_provider: str = Field(default="openrouter", min_length=1, max_length=64)
     model_name: str = Field(min_length=1, max_length=255)
     temperature: float = Field(default=0.7, ge=0.0, le=2.0)
-    is_active: bool = True
+    is_active: bool = False
     timezone: str = "Europe/Minsk"
 
     @model_validator(mode="after")
@@ -53,6 +53,28 @@ class AgentResponse(BaseModel):
     temperature: float
     is_active: bool
     timezone: str
+    has_openrouter_key: bool = False
+    openrouter_key_preview: str | None = None
+
+
+class SetOpenRouterKeyRequest(BaseModel):
+    """Payload for setting an agent's OpenRouter API key."""
+
+    api_key: str = Field(min_length=1)
+
+
+class OpenRouterKeyInfo(BaseModel):
+    """Info about an agent's OpenRouter key (no secrets)."""
+
+    has_key: bool
+    key_preview: str | None = None
+
+
+class SetOpenRouterKeyResponse(BaseModel):
+    """Response after successfully setting a key."""
+
+    valid: bool
+    key_preview: str
 
 
 class PromptConfigResponse(BaseModel):

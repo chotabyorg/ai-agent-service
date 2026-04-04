@@ -2,7 +2,7 @@
 
 from functools import lru_cache
 
-from pydantic import Field
+from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -42,6 +42,8 @@ class Settings(BaseSettings):
     llm_default_temperature: float = Field(default=0.7)
     llm_http_referer: str | None = Field(default=None)
     llm_app_title: str | None = Field(default=None)
+
+    encryption_key: SecretStr = Field(default="")
 
     mcp_server_path: str = Field(default="mcp_service/mcp_server.py")
     mcp_bitrix_path: str = Field(default="mcp_clients/servers/bitrix_server.py")
