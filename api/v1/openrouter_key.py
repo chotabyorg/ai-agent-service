@@ -37,7 +37,7 @@ async def set_openrouter_key(
     result = await validate_openrouter_key(payload.api_key)
 
     if result == KeyValidationResult.INVALID:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid OpenRouter API key.")
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="OpenRouter API key is invalid. Please check your key and try again.")
     if result == KeyValidationResult.INSUFFICIENT_FUNDS:
         raise HTTPException(status_code=status.HTTP_402_PAYMENT_REQUIRED, detail="Insufficient funds on OpenRouter key.")
     if result in (KeyValidationResult.RATE_LIMITED, KeyValidationResult.ERROR):

@@ -63,7 +63,7 @@ async def test_put_key_with_valid_key_returns_200_and_preview(
 
 
 @pytest.mark.integration
-async def test_put_key_with_invalid_key_returns_401(
+async def test_put_key_with_invalid_key_returns_422(
     api_client, db_session, monkeypatch
 ) -> None:
     import api.v1.openrouter_key as key_module
@@ -85,7 +85,7 @@ async def test_put_key_with_invalid_key_returns_401(
         headers=build_headers(owner_id),
     )
 
-    assert response.status_code == 401
+    assert response.status_code == 422
 
 
 @pytest.mark.integration
