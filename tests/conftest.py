@@ -3,6 +3,13 @@ import sys
 from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
 
+# Ensure a valid Fernet key is available BEFORE importing the app.
+# LLMService (and its EncryptionService) is instantiated at module level
+# during `import main`, so the key must already be in os.environ.
+from cryptography.fernet import Fernet
+
+os.environ["ENCRYPTION_KEY"] = Fernet.generate_key().decode()
+
 import httpx
 import pytest
 import pytest_asyncio
@@ -22,14 +29,6 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
-
-# Ensure a valid Fernet key is available for EncryptionService during tests.
-if "ENCRYPTION_KEY" not in os.environ:
-    os.environ["ENCRYPTION_KEY"] = "dGVzdC1lbmNyeXB0aW9uLWtleS0xMjM0NTY3OA=="
-    # Generate a proper Fernet key at import time
-    from cryptography.fernet import Fernet
-
-    os.environ["ENCRYPTION_KEY"] = Fernet.generate_key().decode()
 
 
 def _set_postgres_env(url: str) -> dict[str, str | None]:

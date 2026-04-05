@@ -1,4 +1,4 @@
-"""Validate OpenRouter API keys by probing the models endpoint."""
+"""Validate OpenRouter API keys via the /auth/key endpoint."""
 
 from enum import Enum
 
@@ -14,11 +14,14 @@ class KeyValidationResult(Enum):
 
 
 async def validate_openrouter_key(api_key: str) -> KeyValidationResult:
-    """Check a key against GET /api/v1/models on OpenRouter."""
+    """Check a key against GET /api/v1/auth/key on OpenRouter."""
+    if not api_key or len(api_key) < 20:
+        return KeyValidationResult.INVALID
+
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
             response = await client.get(
-                "https://openrouter.ai/api/v1/models",
+                "https://openrouter.ai/api/v1/auth/key",
                 headers={"Authorization": f"Bearer {api_key}"},
             )
             if response.status_code == 200:
