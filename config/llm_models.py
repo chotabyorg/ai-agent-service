@@ -10,4 +10,5 @@ AVAILABLE_MODELS = [
     {"display_name": "Qwen 3.5 35B A3B", "model_id": "qwen/qwen3.5-35b-a3b"},
     {"display_name": "Qwen 3.5 397B A17B", "model_id": "qwen/qwen3.5-397b-a17b"},
     {"display_name": "Qwen 3.6 Plus (free)", "model_id": "qwen/qwen3.6-plus:free"},
+    {"display_name": "GLM 5.1", "model_id": "z-ai/glm-5.1"},
 ]
