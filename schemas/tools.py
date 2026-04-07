@@ -7,6 +7,8 @@ class ToolInfo(BaseModel):
     name: str
     description: str
     enabled: bool
+    category: str = "other"
+    tier: str = "core"
 
 
 class UpdateEnabledToolsRequest(BaseModel):

@@ -61,17 +61,17 @@ ai-agent-service/
 
 1. Credentials агента хранятся в PostgreSQL в таблице `AgentCredentials`.
 2. При обработке чата `LLMService` загружает credentials конкретного агента.
-3. Для каждого поддерживаемого сервиса создается `MCPManager`.
-4. `MCPManager` делает `env = os.environ.copy()`, затем добавляет только tenant-specific переменные.
+3. Для каждого поддерживаемого сервиса создается `MCPManager` (реестр сервисов в `core/config.py` → `mcp_services`).
+4. `MCPManager` читает конфиг сервиса из реестра, маппит credentials в env-переменные через `env_mapping`.
 5. После этого поднимается отдельный MCP subprocess через `StdioServerParameters`.
 6. По завершении ответа subprocess закрывается через `AsyncExitStack`.
 
-Для Bitrix24 это выглядит так:
+Каждый MCP-инструмент имеет метаданные `category` и `tier` (core/extended), доступные через ресурс `tools://metadata`.
 
-```python
-env = os.environ.copy()
-env["B24_WEBHOOK_URL"] = credentials["webhook_url"]
-```
+**Семантика `enabled_tools`:**
+- `null` — включены только core-инструменты (базовые).
+- `["*"]` — включены все инструменты.
+- `["tool1", "tool2"]` — включены только перечисленные.
 
 Итог:
 

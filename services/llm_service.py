@@ -216,11 +216,16 @@ class LLMService:
                     continue
 
                 enabled = credentials_record.enabled_tools
+                metadata = await manager.get_tools_metadata()
                 for tool in manager.get_openai_tools():
                     tool_name = tool["function"]["name"]
                     if tool_name in tool_registry:
                         continue
-                    if enabled is not None and tool_name not in enabled:
+                    tier = metadata.get(tool_name, {}).get("tier", "core")
+                    if enabled is None:
+                        if tier != "core":
+                            continue
+                    elif "*" not in enabled and tool_name not in enabled:
                         continue
                     tool_registry[tool_name] = manager
                     openai_tools.append(tool)

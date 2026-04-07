@@ -42,16 +42,31 @@ async def _build_tool_list(credentials: AgentCredentials) -> list[ToolInfo]:
         credentials=credentials.credentials,
     ) as manager:
         openai_tools = manager.get_openai_tools()
+        metadata = await manager.get_tools_metadata()
 
-    enabled_set = set(credentials.enabled_tools) if credentials.enabled_tools is not None else None
-    return [
-        ToolInfo(
-            name=tool["function"]["name"],
-            description=tool["function"].get("description", ""),
-            enabled=enabled_set is None or tool["function"]["name"] in enabled_set,
-        )
-        for tool in openai_tools
-    ]
+    enabled_tools = credentials.enabled_tools
+    result: list[ToolInfo] = []
+    for t in openai_tools:
+        name = t["function"]["name"]
+        meta = metadata.get(name, {})
+        cat = meta.get("category", "other")
+        tier = meta.get("tier", "core")
+
+        if enabled_tools is None:
+            enabled = tier == "core"
+        elif "*" in enabled_tools:
+            enabled = True
+        else:
+            enabled = name in enabled_tools
+
+        result.append(ToolInfo(
+            name=name,
+            description=t["function"].get("description", ""),
+            enabled=enabled,
+            category=cat,
+            tier=tier,
+        ))
+    return result
 
 
 @router.get(

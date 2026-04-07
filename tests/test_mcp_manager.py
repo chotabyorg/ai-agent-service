@@ -46,6 +46,11 @@ class FakeClientSession:
             ]
         )
 
+    async def read_resource(self, uri):
+        return SimpleNamespace(
+            contents=[SimpleNamespace(text='{"find_contact": {"category": "contacts", "tier": "core"}}')]
+        )
+
     async def call_tool(self, tool_name: str, tool_args: dict[str, object]):
         self.calls.append((tool_name, tool_args))
         return SimpleNamespace(content=[SimpleNamespace(type="text", text='{"ok": true}')])
