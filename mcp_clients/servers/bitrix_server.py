@@ -11,6 +11,18 @@ from fast_bitrix24 import Bitrix
 # Инициализируем сервер MCP
 mcp = FastMCP("bitrix24")
 
+# Метаданные инструментов: category и tier
+TOOLS_META: dict[str, dict] = {}
+
+
+def tool(category: str, tier: str = "core"):
+    """Декоратор: регистрирует MCP-tool с метаданными category и tier."""
+    def decorator(func):
+        TOOLS_META[func.__name__] = {"category": category, "tier": tier}
+        return mcp.tool()(func)
+    return decorator
+
+
 # Инициализируем клиент Bitrix24
 B24_WEBHOOK_URL = os.environ.get("B24_WEBHOOK_URL")
 if not B24_WEBHOOK_URL:
@@ -39,7 +51,7 @@ async def safe_call(method: str, params: Optional[Dict[str, Any]] = None) -> Any
 # ИНСТРУМЕНТЫ ДЛЯ РАБОТЫ С КОНТАКТАМИ
 # ==========================================
 
-@mcp.tool()
+@tool("contacts")
 async def get_contact(contact_id: int) -> dict:
     """Получение полной информации о контакте по ID."""
     result = await safe_call("crm.contact.get", {"ID": contact_id})
@@ -47,45 +59,43 @@ async def get_contact(contact_id: int) -> dict:
         return {"error": f"Контакт с ID={contact_id} не найден. Детали: {result['error']}"}
     return result
 
-@mcp.tool()
-async def search_contacts(query: str, search_type: str = "name", limit: int = 100) -> dict:
-    """Поиск контактов по имени, телефону или email. search_type: 'name', 'phone', 'email'"""
-    if search_type not in ["name", "phone", "email"]:
+@tool("contacts")
+async def search_contact(query: str, search_by: str = "name") -> dict:
+    """Поиск контактов по имени, телефону или email.
+
+    Когда использовать: для поиска существующих контактов в CRM по любому параметру.
+
+    Args:
+        query: Строка поиска (имя, телефон или email).
+        search_by: Поле для поиска — "name", "phone" или "email". По умолчанию "name".
+
+    Returns:
+        {"query": str, "search_by": str, "total": int, "contacts": list}
+    """
+    if search_by not in ("name", "phone", "email"):
         return {"error": "Недопустимый тип поиска. Используйте: name, phone или email"}
 
-    filter_params = {}
-    if search_type == "name":
-        filter_params["%NAME"] = query
-    elif search_type == "phone":
-        filter_params["%PHONE"] = query
-    elif search_type == "email":
-        filter_params["%EMAIL"] = query
+    filter_key = {
+        "name": "%NAME",
+        "phone": "%PHONE",
+        "email": "%EMAIL",
+    }[search_by]
 
-    contacts = await safe_call("crm.contact.list", {"filter": filter_params, "select": ["*"]})
-    if isinstance(contacts, dict) and "error" in contacts: return contacts
-    if isinstance(contacts, list) and limit > 0: contacts = contacts[:limit]
+    contacts = await safe_call("crm.contact.list", {
+        "filter": {filter_key: query},
+        "select": ["*"],
+    })
+    if isinstance(contacts, dict) and "error" in contacts:
+        return contacts
 
-    return {"query": query, "search_type": search_type, "total": len(contacts) if isinstance(contacts, list) else 0, "contacts": contacts}
+    return {
+        "query": query,
+        "search_by": search_by,
+        "total": len(contacts) if isinstance(contacts, list) else 0,
+        "contacts": contacts,
+    }
 
-@mcp.tool()
-async def find_contact(name: str = "", phone: str = "") -> list:
-    """Обычный поиск контакта по имени или телефону."""
-    filter_params = {}
-    if name: filter_params["%NAME"] = name
-    if phone: filter_params["%PHONE"] = phone
-    result = await safe_call("crm.contact.list", {"filter": filter_params, "select": ["ID", "NAME", "LAST_NAME", "PHONE"]})
-    return result if isinstance(result, list) else[]
-
-@mcp.tool()
-async def list_contacts(limit: int = 200, company_id: int = None) -> dict:
-    """Получение списка контактов с возможностью фильтрации по компании."""
-    filter_params = {}
-    if company_id: filter_params["COMPANY_ID"] = company_id
-    contacts = await safe_call("crm.contact.list", {"filter": filter_params, "select": ["*"]})
-    if isinstance(contacts, list) and limit > 0: contacts = contacts[:limit]
-    return {"total": len(contacts) if isinstance(contacts, list) else 0, "filters": {"company_id": company_id}, "contacts": contacts}
-
-@mcp.tool()
+@tool("contacts")
 async def add_contact(name: str, last_name: str = "", phone: str = "", email: str = "") -> dict:
     """Добавить новый контакт в CRM."""
     fields = {"NAME": name, "LAST_NAME": last_name}
@@ -96,7 +106,7 @@ async def add_contact(name: str, last_name: str = "", phone: str = "", email: st
     if isinstance(result, dict) and "error" in result: return result
     return {"success": True, "contact_id": result}
 
-@mcp.tool()
+@tool("contacts")
 async def update_contact_communication(contact_id: int, phones: list[dict] = None, emails: list[dict] = None) -> dict:
     """Обновить или удалить телефоны и email контакта."""
     fields = {}
@@ -111,14 +121,14 @@ async def update_contact_communication(contact_id: int, phones: list[dict] = Non
 # КОМПАНИИ И ЛИДЫ
 # ==========================================
 
-@mcp.tool()
+@tool("leads")
 async def get_lead(lead_id: int) -> dict:
     """Получение детальной информации о лиде по ID."""
     result = await safe_call("crm.lead.get", {"ID": lead_id})
     if isinstance(result, dict) and "error" in result: return {"error": f"Лид с ID={lead_id} не найден."}
     return result
 
-@mcp.tool()
+@tool("leads")
 async def add_lead(name: str, last_name: str = "", company_title: str = "", phone: str = "", email: str = "", comments: str = "") -> dict:
     """Создать новый лид (заявку)."""
     title = f"Заявка: {name} {last_name}".strip()
@@ -132,21 +142,21 @@ async def add_lead(name: str, last_name: str = "", company_title: str = "", phon
     if isinstance(result, dict) and "error" in result: return result
     return {"success": True, "lead_id": result}
 
-@mcp.tool()
+@tool("leads")
 async def update_lead_status(lead_id: int, status_id: str) -> dict:
     """Обновление статуса лида."""
     result = await safe_call("crm.lead.update", {"ID": lead_id, "fields": {"STATUS_ID": status_id}})
     if isinstance(result, dict) and "error" in result: return result
     return {"success": True, "message": f"Статус лида {lead_id} изменен на {status_id}"}
 
-@mcp.tool()
+@tool("companies")
 async def get_company(company_id: int) -> dict:
     """Получение данных компании по ID."""
     result = await safe_call("crm.company.get", {"ID": company_id})
     if isinstance(result, dict) and "error" in result: return {"error": f"Компания с ID={company_id} не найдена."}
     return result
 
-@mcp.tool()
+@tool("companies")
 async def add_company(title: str, phone: str = "", email: str = "") -> dict:
     """Создать новую компанию."""
     fields = {"TITLE": title, "COMPANY_TYPE": "CUSTOMER"}
@@ -161,13 +171,13 @@ async def add_company(title: str, phone: str = "", email: str = "") -> dict:
 # ПОСТАВЩИКИ И РЕКВИЗИТЫ
 # ==========================================
 
-@mcp.tool()
+@tool("suppliers", "extended")
 async def get_requisite_presets() -> list:
     """Получить шаблоны реквизитов."""
     result = await safe_call("crm.requisite.preset.list", {"select": ["ID", "NAME"]})
     return result if isinstance(result, list) else[]
 
-@mcp.tool()
+@tool("suppliers", "extended")
 async def add_company_with_requisites(title: str, preset_id: int, inn: str = "", phone: str = "", address: str = "") -> dict:
     """Создать компанию и сразу заполнить ее реквизиты (ИНН, Адрес)."""
     company_res = await add_company(title=title, phone=phone)
@@ -186,7 +196,7 @@ async def add_company_with_requisites(title: str, preset_id: int, inn: str = "",
 
     return {"success": True, "company_id": company_id, "requisite_id": requisite_id, "address_added": address_added}
 
-@mcp.tool()
+@tool("suppliers", "extended")
 async def get_client_addresses(entity_type_id: int, entity_id: int) -> list:
     """Получить адреса клиента из его реквизитов."""
     requisites = await safe_call("crm.requisite.list", {"filter": {"ENTITY_TYPE_ID": entity_type_id, "ENTITY_ID": entity_id}, "select": ["ID"]})
@@ -198,7 +208,7 @@ async def get_client_addresses(entity_type_id: int, entity_id: int) -> list:
         if isinstance(addr, list): addresses.extend(addr)
     return addresses
 
-@mcp.tool()
+@tool("suppliers", "extended")
 async def get_suppliers(entity_type: str = "CONTACT") -> list:
     """Получить список поставщиков (CONTACT или COMPANY)."""
     code = "CATALOG_CONTRACTOR_CONTACT" if entity_type.upper() == "CONTACT" else "CATALOG_CONTRACTOR_COMPANY"
@@ -212,7 +222,7 @@ async def get_suppliers(entity_type: str = "CONTACT") -> list:
     if isinstance(items, dict) and "items" in items: items = items["items"]
     return items if isinstance(items, list) else[]
 
-@mcp.tool()
+@tool("suppliers", "extended")
 async def add_supplier(entity_type: str, name_or_title: str, last_name: str = "", phone: str = "", email: str = "", comments: str = "") -> dict:
     """Создать поставщика (Контакт или Компания)."""
     entity_type_id = 3 if entity_type.upper() == "CONTACT" else 4
@@ -244,14 +254,14 @@ async def add_supplier(entity_type: str, name_or_title: str, last_name: str = ""
 # СДЕЛКИ И ТОВАРЫ
 # ==========================================
 
-@mcp.tool()
+@tool("deals")
 async def get_deal(deal_id: int) -> dict:
     """Получить информацию о сделке."""
     result = await safe_call("crm.deal.get", {"ID": deal_id})
     if isinstance(result, dict) and "error" in result: return {"error": f"Сделка с ID={deal_id} не найдена."}
     return result
 
-@mcp.tool()
+@tool("deals")
 async def list_deals(active_only: bool = False, contact_id: int = None, company_id: int = None, limit: int = -1) -> dict:
     """Получить список сделок по фильтрам."""
     filter_params = {}
@@ -263,7 +273,7 @@ async def list_deals(active_only: bool = False, contact_id: int = None, company_
     if isinstance(deals, list) and limit > 0: deals = deals[:limit]
     return {"total": len(deals) if isinstance(deals, list) else 0, "deals": deals}
 
-@mcp.tool()
+@tool("composite", "extended")
 async def add_deal_with_company(deal_title: str, company_title: str, preset_id: int, inn: str = "", phone: str = "") -> dict:
     """Создать компанию с реквизитами и сразу привязать к ней новую сделку."""
     company_res = await add_company_with_requisites(title=company_title, preset_id=preset_id, inn=inn, phone=phone)
@@ -273,20 +283,20 @@ async def add_deal_with_company(deal_title: str, company_title: str, preset_id: 
     deal_id = await safe_call("crm.deal.add", {"fields": deal_fields})
     return {"success": True, "deal_id": deal_id, "company_id": company_res.get("company_id")}
 
-@mcp.tool()
+@tool("deals")
 async def update_deal_stage(deal_id: int, stage_id: str) -> dict:
     """Обновить стадию сделки."""
     result = await safe_call("crm.deal.update", {"ID": deal_id, "fields": {"STAGE_ID": stage_id}})
     success = bool(result) and not (isinstance(result, dict) and "error" in result)
     return {"success": success, "message": f"Стадия сделки ID={deal_id} {'обновлена' if success else 'ошибка'} на {stage_id}"}
 
-@mcp.tool()
+@tool("deals")
 async def get_deal_products(deal_id: int) -> list:
     """Получение списка товаров/услуг (например, Мастер-классов), привязанных к сделке."""
     result = await safe_call("crm.deal.productrows.get", {"id": deal_id})
     return result if isinstance(result, list) else[]
 
-@mcp.tool()
+@tool("deals")
 async def set_deal_products(deal_id: int, products: list[dict]) -> dict:
     """
     Привязка списка товаров/услуг к сделке.
@@ -297,18 +307,18 @@ async def set_deal_products(deal_id: int, products: list[dict]) -> dict:
     if isinstance(result, dict) and "error" in result: return result
     return {"success": True, "message": "Товары сделки успешно обновлены"}
 
-@mcp.tool()
+@tool("catalogs", "extended")
 async def list_catalogs() -> list:
     """Получить список каталогов товаров. Используй для получения iblockId перед вызовом секций и товаров."""
     return await safe_call("catalog.catalog.list", {"select": ["id", "iblockId", "name", "iblockTypeId"]})
 
-@mcp.tool()
+@tool("catalogs", "extended")
 async def list_catalog_sections(iblock_id: int) -> list:
     """Получить разделы каталога товаров. Сначала вызови list_catalogs() чтобы получить iblockId."""
     params = {"select": ["id", "name", "sort", "iblockId"], "filter": {"iblockId": iblock_id}}
     return await safe_call("catalog.section.list", params)
 
-@mcp.tool()
+@tool("catalogs", "extended")
 async def list_catalog_products(iblock_id: int, section_id: int = None) -> list:
     """Получить товары каталога. Сначала вызови list_catalogs() чтобы получить iblockId."""
     filter_params = {"iblockId": iblock_id}
@@ -317,7 +327,7 @@ async def list_catalog_products(iblock_id: int, section_id: int = None) -> list:
     params = {"select": ["id", "name", "price", "iblockSectionId", "active", "iblockId"], "filter": filter_params}
     return await safe_call("catalog.product.list", params)
 
-@mcp.tool()
+@tool("analytics", "extended")
 async def sync_deal_payment_date(deal_id: int, date_field_label: str = "Дата оплаты") -> dict:
     """Перенести дату успешной оплаты в пользовательское поле сделки."""
     fields = await safe_call("crm.deal.userfield.list", {"filter": {"LANG": "ru", "USER_TYPE_ID": "date"}})
@@ -336,12 +346,12 @@ async def sync_deal_payment_date(deal_id: int, date_field_label: str = "Дата
     res = await safe_call("crm.deal.update", {"ID": deal_id, "fields": {target_field_name: date_paid}})
     return {"success": bool(res), "date_paid": date_paid}
 
-@mcp.tool()
+@tool("analytics", "extended")
 async def get_crm_stages(entity_id: str) -> list:
     """Получить список стадий с семантикой для объектов CRM (например: 'DEAL_STAGE')."""
     return await safe_call("crm.status.list", {"filter": {"ENTITY_ID": entity_id}})
 
-@mcp.tool()
+@tool("deals")
 async def get_deal_funnels_and_stages() -> dict:
     """Получить все воронки сделок и их стадии с семантикой."""
     categories = await safe_call("crm.dealcategory.list")
@@ -371,7 +381,7 @@ async def get_deal_funnels_and_stages() -> dict:
 # СЧЕТА И ФИНАНСЫ (Smart Invoices)
 # ==========================================
 
-@mcp.tool()
+@tool("invoices", "extended")
 async def create_smart_invoice(title: str, contact_id: int, opportunity: float, deal_id: int = None) -> dict:
     """
     Создание нового счета (Smart Invoice, entityTypeId=31).
@@ -388,7 +398,7 @@ async def create_smart_invoice(title: str, contact_id: int, opportunity: float, 
 # КАЛЕНДАРИ И БРОНИРОВАНИЕ РЕСУРСОВ
 # ==========================================
 
-@mcp.tool()
+@tool("calendar", "extended")
 async def check_calendar_availability(user_ids: list[int], date_from: str, date_to: str) -> dict:
     """
     Проверка занятости сотрудников или ресурсов (комнат/студий).
@@ -399,7 +409,7 @@ async def check_calendar_availability(user_ids: list[int], date_from: str, date_
     if isinstance(result, dict) and "error" in result: return result
     return {"success": True, "busy_slots": result}
 
-@mcp.tool()
+@tool("calendar", "extended")
 async def add_calendar_event(user_id: int, name: str, date_from: str, date_to: str, description: str = "") -> dict:
     """
     Создание события в основном календаре (бронирование времени/студии).
@@ -415,7 +425,7 @@ async def add_calendar_event(user_id: int, name: str, date_from: str, date_to: s
 # АКТИВНОСТИ И КОММУНИКАЦИИ
 # ==========================================
 
-@mcp.tool()
+@tool("activities", "extended")
 async def get_deal_activities(assigned_by_id: int = None) -> list:
     """Получить список незавершенных дел из сделок."""
     filter_params = {}
@@ -429,7 +439,7 @@ async def get_deal_activities(assigned_by_id: int = None) -> list:
     activities = await safe_call("crm.activity.list", {"filter": {"BINDINGS": bindings, "COMPLETED": "N"}, "select":["ID", "OWNER_ID", "SUBJECT", "DEADLINE", "RESPONSIBLE_ID"]})
     return activities if isinstance(activities, list) else[]
 
-@mcp.tool()
+@tool("utilities")
 async def add_todo_activity(owner_type_id: int, owner_id: int, title: str, description: str, deadline_hours: int = 1) -> dict:
     """Создать дело (звонок/напоминание) в CRM."""
     deadline = (datetime.now() + timedelta(hours=deadline_hours)).strftime("%Y-%m-%d %H:%M:%S")
@@ -438,7 +448,7 @@ async def add_todo_activity(owner_type_id: int, owner_id: int, title: str, descr
     if isinstance(result, dict) and "error" in result: return result
     return {"success": True, "activity_id": result}
 
-@mcp.tool()
+@tool("activities", "extended")
 async def move_activity(activity_id: int, source_type_id: int, source_id: int, target_type_id: int, target_id: int) -> dict:
     """Перенести дело из одной сущности CRM в другую."""
     if source_type_id == target_type_id:
@@ -450,7 +460,7 @@ async def move_activity(activity_id: int, source_type_id: int, source_id: int, t
         result = True
     return {"success": bool(result), "message": "Дело перенесено"}
 
-@mcp.tool()
+@tool("activities", "extended")
 async def send_contact_email(contact_id: int, subject: str, message: str) -> dict:
     """Отправить Email клиенту прямо из CRM."""
     contact = await safe_call("crm.contact.get", {"ID": contact_id})
@@ -475,7 +485,7 @@ async def send_contact_email(contact_id: int, subject: str, message: str) -> dic
     if isinstance(result, dict) and "error" in result: return result
     return {"success": True, "activity_id": result}
 
-@mcp.tool()
+@tool("activities", "extended")
 async def add_contact_calendar_event(contact_id: int, subject: str, description: str, duration_hours: int = 1) -> dict:
     """Добавить встречу (событие CRM) в карточку контакта."""
     contact = await safe_call("crm.contact.get", {"ID": contact_id})
@@ -497,7 +507,7 @@ async def add_contact_calendar_event(contact_id: int, subject: str, description:
 # ЗАДАЧИ, ТАЙМЛАЙН, УВЕДОМЛЕНИЯ
 # ==========================================
 
-@mcp.tool()
+@tool("tasks", "extended")
 async def get_tasks(limit: int = 20) -> list:
     """Получение списка активных задач на портале."""
     limit = max(1, min(limit, 50))
@@ -505,7 +515,7 @@ async def get_tasks(limit: int = 20) -> list:
     if isinstance(tasks, dict) and "tasks" in tasks: return tasks["tasks"][:limit]
     return tasks[:limit] if isinstance(tasks, list) else[]
 
-@mcp.tool()
+@tool("tasks", "extended")
 async def add_task(title: str, responsible_id: int, description: str = "", deadline: str = "") -> dict:
     """Постановка новой задачи сотруднику. deadline: YYYY-MM-DD HH:MM:SS."""
     fields = {"TITLE": title, "RESPONSIBLE_ID": responsible_id, "DESCRIPTION": description}
@@ -514,21 +524,21 @@ async def add_task(title: str, responsible_id: int, description: str = "", deadl
     if isinstance(result, dict) and "error" in result: return result
     return {"success": True, "task_id": result.get("task", {}).get("id") if isinstance(result, dict) else None}
 
-@mcp.tool()
+@tool("timeline", "extended")
 async def get_timeline_comments(entity_type: str, entity_id: int) -> list:
     """Чтение комментариев (истории) из карточки CRM (lead, deal, contact)."""
     params = {"filter": {"ENTITY_ID": entity_id, "ENTITY_TYPE": entity_type.upper()}, "select": ["ID", "COMMENT", "CREATED"]}
     result = await safe_call("crm.timeline.comment.list", params)
     return result if isinstance(result, list) else[]
 
-@mcp.tool()
+@tool("utilities")
 async def send_chat_notification(user_id: int, message: str) -> dict:
     """Отправка уведомления администратору прямо в чат Битрикс24."""
     result = await safe_call("im.notify.personal.add", {"USER_ID": user_id, "MESSAGE": message})
     if isinstance(result, dict) and "error" in result: return result
     return {"success": True, "notification_id": result}
 
-@mcp.tool()
+@tool("utilities")
 async def get_users(search_name: str = "") -> list:
     """Поиск сотрудников (для передачи ID ответственного)."""
     filter_params = {"ACTIVE": "Y"}
@@ -541,7 +551,7 @@ async def get_users(search_name: str = "") -> list:
 # СМАРТ-ПРОЦЕССЫ, ДОКУМЕНТЫ, ФАЙЛЫ, БП
 # ==========================================
 
-@mcp.tool()
+@tool("documents", "extended")
 async def create_crm_document(deal_id: int, template_id: int) -> dict:
     """Генерация документа (договор/счет) по шаблону."""
     res = await safe_call("crm.documentgenerator.document.add", {"templateId": template_id, "entityTypeId": 2, "entityId": deal_id})
@@ -549,7 +559,7 @@ async def create_crm_document(deal_id: int, template_id: int) -> dict:
     doc = res.get("document", {})
     return {"success": True, "document_id": doc.get("id"), "download_url": doc.get("downloadUrl")}
 
-@mcp.tool()
+@tool("smart_processes", "extended")
 async def add_smart_process_comment(spa_title: str, element_id: int, comment: str) -> dict:
     """Добавить комментарий в элемент смарт-процесса."""
     types_data = await safe_call("crm.type.list", {"filter": {"title": spa_title}})
@@ -561,7 +571,7 @@ async def add_smart_process_comment(spa_title: str, element_id: int, comment: st
     result = await safe_call("crm.timeline.comment.add", {"fields": fields})
     return {"success": True, "comment_id": result}
 
-@mcp.tool()
+@tool("smart_processes", "extended")
 async def add_smart_process_userfield(spa_title: str, field_name_suffix: str, ru_label: str) -> dict:
     """Создать пользовательское поле в смарт-процессе."""
     types_data = await safe_call("crm.type.list", {"filter": {"title": spa_title}})
@@ -573,7 +583,7 @@ async def add_smart_process_userfield(spa_title: str, field_name_suffix: str, ru
     result = await safe_call("userfieldconfig.add", {"moduleId": "crm", "field": field})
     return {"success": True, "result": result}
 
-@mcp.tool()
+@tool("smart_processes", "extended")
 async def create_smart_process_funnel(spa_title: str, funnel_name: str) -> dict:
     """Создать новую воронку в смарт-процессе."""
     types_data = await safe_call("crm.type.list", {"filter": {"title": spa_title}})
@@ -585,7 +595,7 @@ async def create_smart_process_funnel(spa_title: str, funnel_name: str) -> dict:
     category_id = res.get("category", {}).get("id") if isinstance(res, dict) else None
     return {"success": True, "category_id": category_id}
 
-@mcp.tool()
+@tool("documents", "extended")
 async def start_bizproc(template_id: int, document_type: str, document_id: str, parameters: dict = None) -> dict:
     """Запуск бизнес-процесса. document_type: 'crm', document_id: 'DEAL_123'"""
     params = {"TEMPLATE_ID": template_id, "DOCUMENT_ID":["crm", "CCrmDocumentDeal" if "DEAL" in document_id else "CCrmDocumentLead", document_id], "PARAMETERS": parameters or {}}
@@ -593,7 +603,7 @@ async def start_bizproc(template_id: int, document_type: str, document_id: str, 
     if isinstance(result, dict) and "error" in result: return result
     return {"success": True, "workflow_id": result}
 
-@mcp.tool()
+@tool("documents", "extended")
 async def upload_file_to_disk(folder_id: int, file_name: str, base64_content: str) -> dict:
     """Загрузка файла (например, чека об оплате) на Диск. Требуется Base64."""
     params = {"id": folder_id, "data": {"NAME": file_name}, "fileContent": [file_name, base64_content]}
@@ -606,7 +616,7 @@ async def upload_file_to_disk(folder_id: int, file_name: str, base64_content: st
 # ОБЩИЕ ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
 # ==========================================
 
-@mcp.tool()
+@tool("utilities")
 async def update_crm_element(entity_type: str, entity_id: int, fields: dict) -> dict:
     """Универсальное обновление любого элемента CRM (lead, deal, contact)."""
     method = f"crm.{entity_type}.update".lower()
@@ -614,7 +624,7 @@ async def update_crm_element(entity_type: str, entity_id: int, fields: dict) -> 
     if isinstance(result, dict) and "error" in result: return result
     return {"success": bool(result), "message": "Успешно обновлено!" if result else "Не удалось обновить."}
 
-@mcp.tool()
+@tool("utilities")
 async def find_duplicates_by_comm(phone: str = "", email: str = "") -> dict:
     """Поиск дубликатов по контактам, лидам, компаниям."""
     if not phone and not email: return {"error": "Необходимо указать телефон или email"}
@@ -632,7 +642,7 @@ async def find_duplicates_by_comm(phone: str = "", email: str = "") -> dict:
                     all_duplicates[key] = value
     return all_duplicates
 
-@mcp.tool()
+@tool("analytics", "extended")
 async def get_items_by_stage_name(entity_type_id: int, stage_name: str, category_id: int = 0) -> list:
     """Получить элементы (сделки, смарт-процессы) отфильтрованные по текстовому названию стадии."""
     entity_id_status = f"DEAL_STAGE_{category_id}" if category_id > 0 else "DEAL_STAGE"
@@ -649,7 +659,7 @@ async def get_items_by_stage_name(entity_type_id: int, stage_name: str, category
     if isinstance(res, dict) and "items" in res: res = res["items"]
     return res if isinstance(res, list) else[]
 
-@mcp.tool()
+@tool("utilities")
 def today() -> str:
     """Получить текущую дату и время в формате YYYY-MM-DD HH:MM"""
     now = datetime.now()
@@ -710,6 +720,12 @@ async def get_active_deals_resource() -> str:
     for i, deal in enumerate(deals, 1):
         lines.append(f"{i}. {deal.get('TITLE')} (ID: {deal.get('ID')})\n   Стадия: {deal.get('STAGE_ID')}\n   Сумма: {deal.get('OPPORTUNITY')} {deal.get('CURRENCY_ID')}\n")
     return "\n".join(lines)
+
+
+@mcp.resource("tools://metadata")
+async def get_tools_metadata() -> str:
+    """Метаданные всех инструментов: category и tier."""
+    return json.dumps(TOOLS_META)
 
 
 if __name__ == "__main__":

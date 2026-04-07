@@ -94,6 +94,13 @@ class FakeMCPController:
             def get_openai_tools(self) -> list[dict[str, Any]]:
                 return controller.tools_by_service.get(self.service_name, [])
 
+            async def get_tools_metadata(self) -> dict[str, dict]:
+                tools = controller.tools_by_service.get(self.service_name, [])
+                return {
+                    t["function"]["name"]: {"category": "other", "tier": "core"}
+                    for t in tools
+                }
+
             async def call_tool(self, tool_name: str, tool_args: dict[str, Any] | None = None) -> Any:
                 tool_args = tool_args or {}
                 controller.tool_calls.append(

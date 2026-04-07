@@ -45,9 +45,12 @@ class Settings(BaseSettings):
 
     encryption_key: SecretStr = Field(default="")
 
-    mcp_server_path: str = Field(default="mcp_service/mcp_server.py")
-    mcp_bitrix_path: str = Field(default="mcp_clients/servers/bitrix_server.py")
-    mcp_google_path: str = Field(default="mcp_service/google_server.py")
+    mcp_services: dict = Field(default={
+        "bitrix": {
+            "script_path": "mcp_clients/servers/bitrix_server.py",
+            "env_mapping": {"webhook_url": "B24_WEBHOOK_URL"},
+        }
+    })
 
     @property
     def postgres_dsn(self) -> str:

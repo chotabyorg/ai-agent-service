@@ -1,5 +1,6 @@
 """Isolated MCP subprocess manager for tenant-scoped tool access."""
 
+import json
 import os
 import sys
 from contextlib import AsyncExitStack
@@ -30,27 +31,25 @@ class MCPManager:
     async def __aexit__(self, exc_type, exc, tb) -> None:
         await self.close()
 
+    def _get_service_config(self) -> dict:
+        config = self.settings.mcp_services.get(self.service_name)
+        if not config:
+            raise ValueError(f"Unsupported MCP service: {self.service_name}")
+        return config
+
     def _build_env(self) -> dict[str, str]:
         env = os.environ.copy()
-
-        if self.service_name == "bitrix":
-            webhook_url = self.credentials.get("webhook_url") or self.credentials.get(
-                "B24_WEBHOOK_URL"
-            )
-            if not webhook_url:
-                raise ValueError("Bitrix credentials must contain 'webhook_url'.")
-            env["B24_WEBHOOK_URL"] = str(webhook_url)
-            return env
-
-        raise ValueError(f"Unsupported MCP service: {self.service_name}")
+        config = self._get_service_config()
+        for cred_key, env_key in config["env_mapping"].items():
+            value = self.credentials.get(cred_key)
+            if not value:
+                raise ValueError(f"Missing credential '{cred_key}' for {self.service_name}")
+            env[env_key] = str(value)
+        return env
 
     def _get_server_script_path(self) -> Path:
-        base_dir = Path(__file__).resolve().parent.parent
-
-        if self.service_name == "bitrix":
-            return base_dir / self.settings.mcp_bitrix_path
-
-        raise ValueError(f"Unsupported MCP service: {self.service_name}")
+        config = self._get_service_config()
+        return Path(__file__).resolve().parent.parent / config["script_path"]
 
     def _build_server_params(self) -> StdioServerParameters:
         script_path = self._get_server_script_path()
@@ -110,3 +109,11 @@ class MCPManager:
             raise RuntimeError("MCP session is not initialized.")
 
         return await self.session.call_tool(tool_name, tool_args or {})
+
+    async def get_tools_metadata(self) -> dict[str, dict]:
+        """Читает tools://metadata из MCP-сервера."""
+        if self.session is None:
+            raise RuntimeError("MCP session is not initialized.")
+        result = await self.session.read_resource("tools://metadata")
+        content = result.contents[0].text if result.contents else "{}"
+        return json.loads(content)
