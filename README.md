@@ -133,6 +133,7 @@ ai-agent-service/
 | `MCP_SERVER_PATH` | `mcp_service/mcp_server.py` | Резервный путь для custom MCP server |
 | `MCP_BITRIX_PATH` | `mcp_clients/servers/bitrix_server.py` | Локальный путь к Bitrix MCP server |
 | `MCP_GOOGLE_PATH` | `mcp_service/google_server.py` | Резервный путь для Google MCP server |
+| `INTERNAL_API_TOKEN` | `""` | Токен для service-to-service вызовов `/internal/*` эндпоинтов. Проверяется через заголовок `X-Service-Token`. Пустое значение отключает доступ (fail-closed). |
 
 ### Минимальный `.env` пример
 
@@ -300,6 +301,36 @@ curl http://localhost:8000/v1/mcp-services
 
 - `GET /v1/models` — получить список доступных LLM-моделей.
 
+### Internal API (service-to-service)
+
+Эндпоинты под префиксом `/internal/v1` предназначены для вызовов из других внутренних сервисов (например, `subscription-service`) и **не проходят через API Gateway**. Каждый запрос должен содержать заголовок `X-Service-Token` со значением, равным `INTERNAL_API_TOKEN`. Сравнение выполняется через `secrets.compare_digest` для защиты от timing-атак. Если `INTERNAL_API_TOKEN` не задан на сервере — любой запрос отклоняется (fail-closed).
+
+- `GET /internal/v1/agents/count?user_id=<uuid>` — вернуть количество агентов пользователя.
+  - Response `200`: `{ "total": int, "active": int }` — `total` считает всех агентов пользователя, `active` — только тех, у кого `is_active = true`.
+  - `400` — если `user_id` не UUID.
+  - `401` — если заголовок `X-Service-Token` отсутствует или не совпадает.
+- `POST /internal/v1/agents/deactivate-all` — массово деактивировать всех агентов пользователя.
+  - Request body: `{ "user_id": "<uuid>" }`.
+  - Response `200`: `{ "deactivated": int }` — количество записей, у которых `is_active` переведён с `true` на `false`. Если активных нет — возвращает `{ "deactivated": 0 }`, а не 404.
+  - `401` — если заголовок `X-Service-Token` отсутствует или не совпадает.
+  - `422` — если в теле нет `user_id` или он не UUID.
+
+Пример проверки лимита агентов:
+
+```bash
+curl -H "X-Service-Token: $INTERNAL_API_TOKEN" \
+  "http://localhost:8000/internal/v1/agents/count?user_id=11111111-1111-1111-1111-111111111111"
+```
+
+Пример массовой деактивации при истечении подписки:
+
+```bash
+curl -X POST http://localhost:8000/internal/v1/agents/deactivate-all \
+  -H "Content-Type: application/json" \
+  -H "X-Service-Token: $INTERNAL_API_TOKEN" \
+  -d '{"user_id": "11111111-1111-1111-1111-111111111111"}'
+```
+
 ### Chat API
 
 - `POST /v1/chat/completions` — обработать сообщение пользователя через LLM + Redis history + MCP tools.
@@ -330,7 +361,7 @@ curl -X POST http://localhost:8000/v1/chat/completions \
 - SSE streaming пока не реализован.
 - Встроенный MCP manager сейчас настроен прежде всего под Bitrix24.
 - Автоматическое применение миграций при старте сервиса не добавлено.
-- Авторизация внутренних сервисов пока не реализована.
+- Авторизация service-to-service реализована только для `/internal/v1/*` эндпоинтов (через `X-Service-Token`). Для публичных `/v1/*` эндпоинтов внутренний вызов ai-agent-service из других микросервисов по-прежнему полагается на доверие внутри Docker-сети.
 
 ## Полезные файлы
 
