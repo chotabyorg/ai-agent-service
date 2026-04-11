@@ -18,6 +18,7 @@ services:
       retries: 5
     networks:
       - ai-network
+      - microservices_network
 
   postgres:
     image: postgres:15-alpine
@@ -58,3 +59,5 @@ volumes:
 networks:
   ai-network:
     name: ai-network
+  microservices_network:
+    external: true
