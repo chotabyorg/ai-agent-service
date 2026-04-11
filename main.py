@@ -4,6 +4,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
+from api.internal.agents import router as internal_agents_router
 from api.v1.agents import router as agents_router
 from api.v1.chat import router as chat_router
 from api.v1.mcp_services import router as mcp_services_router
@@ -61,6 +62,10 @@ app.include_router(
     openrouter_key_router,
     prefix=f"{settings.api_v1_prefix}/agents",
     tags=["openrouter-key"],
+)
+app.include_router(
+    internal_agents_router,
+    prefix="/internal/v1",
 )
 
 

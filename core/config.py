@@ -45,6 +45,8 @@ class Settings(BaseSettings):
 
     encryption_key: SecretStr = Field(default="")
 
+    internal_api_token: str = Field(default="")
+
     mcp_services: dict = Field(default={
         "bitrix": {
             "script_path": "mcp_clients/servers/bitrix_server.py",

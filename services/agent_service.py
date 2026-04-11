@@ -3,7 +3,7 @@
 from collections.abc import Sequence
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.agent import AgentCredentials, AgentTemplate
@@ -188,3 +188,34 @@ class AgentService:
             select(AgentCredentials).where(AgentCredentials.agent_id == agent_id)
         )
         return result.scalars().all()
+
+    async def count_agents(
+        self,
+        session: AsyncSession,
+        user_id: UUID,
+    ) -> tuple[int, int]:
+        """Return (total, active) agent counts for the given user."""
+        stmt = select(
+            func.count(AgentTemplate.id),
+            func.count(AgentTemplate.id).filter(AgentTemplate.is_active.is_(True)),
+        ).where(AgentTemplate.user_id == user_id)
+        total, active = (await session.execute(stmt)).one()
+        return int(total or 0), int(active or 0)
+
+    async def deactivate_all_agents(
+        self,
+        session: AsyncSession,
+        user_id: UUID,
+    ) -> int:
+        """Deactivate all active agents for a user. Returns the number updated."""
+        stmt = (
+            update(AgentTemplate)
+            .where(
+                AgentTemplate.user_id == user_id,
+                AgentTemplate.is_active.is_(True),
+            )
+            .values(is_active=False)
+        )
+        result = await session.execute(stmt)
+        await session.commit()
+        return int(result.rowcount or 0)
