@@ -2,12 +2,14 @@
 
 import secrets
 from collections.abc import AsyncGenerator
+from typing import Annotated
 
-from fastapi import HTTPException, Request, status
+from fastapi import Depends, HTTPException, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.config import get_settings
 from db.database import get_db_session
+from services.subscription_client import SubscriptionClient
 
 
 async def get_db() -> AsyncGenerator[AsyncSession, None]:
@@ -15,6 +17,17 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
 
     async for session in get_db_session():
         yield session
+
+
+def get_subscription_client(request: Request) -> SubscriptionClient | None:
+    """Return the subscription client stored on app.state, or ``None``."""
+
+    return getattr(request.app.state, "subscription_client", None)
+
+
+SubscriptionClientDep = Annotated[
+    SubscriptionClient | None, Depends(get_subscription_client)
+]
 
 
 def verify_service_token(request: Request) -> None:

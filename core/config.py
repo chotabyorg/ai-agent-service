@@ -47,6 +47,9 @@ class Settings(BaseSettings):
 
     internal_api_token: str = Field(default="")
 
+    subscription_service_url: str = Field(default="")
+    subscription_check_enabled: bool = Field(default=False)
+
     mcp_services: dict = Field(default={
         "bitrix": {
             "script_path": "mcp_clients/servers/bitrix_server.py",

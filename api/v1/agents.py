@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
 from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from api.dependencies import get_db
+from api.dependencies import SubscriptionClientDep, get_db
 from schemas.agent import (
     AgentCreate,
     AgentCredentialsCreate,
@@ -78,8 +78,19 @@ async def update_agent(
     payload: AgentUpdate,
     db: DbSession,
     user_id: UserIdHeader,
+    subscription_client: SubscriptionClientDep = None,
 ) -> AgentResponse:
     if payload.is_active is True:
+        # 1. Subscription check (before OpenRouter key check)
+        if subscription_client is not None:
+            check_result = await subscription_client.check(str(user_id))
+            if not check_result.get("allowed"):
+                raise HTTPException(
+                    status_code=402,
+                    detail=check_result.get("reason", "subscription_required"),
+                )
+
+        # 2. OpenRouter key check
         agent_check = await agent_service.get_agent_by_id(db, agent_id, user_id=user_id)
         if agent_check is None:
             raise HTTPException(

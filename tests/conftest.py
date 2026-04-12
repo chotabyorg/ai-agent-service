@@ -10,6 +10,8 @@ from cryptography.fernet import Fernet
 
 os.environ["ENCRYPTION_KEY"] = Fernet.generate_key().decode()
 
+from unittest.mock import AsyncMock
+
 import httpx
 import pytest
 import pytest_asyncio
@@ -23,6 +25,7 @@ from sqlalchemy.pool import NullPool
 import core.redis as redis_module
 import main
 from api.dependencies import get_db
+from services.subscription_client import SubscriptionClient
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -193,3 +196,23 @@ async def api_client_no_raise(
     transport = httpx.ASGITransport(app=main.app, raise_app_exceptions=False)
     async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
         yield client
+
+
+@pytest.fixture
+def mock_subscription_client() -> AsyncMock:
+    """A mock SubscriptionClient that defaults to ``{"allowed": True}``."""
+
+    client = AsyncMock(spec=SubscriptionClient)
+    client.check.return_value = {"allowed": True}
+    return client
+
+
+@pytest.fixture
+def enable_subscription_check(mock_subscription_client: AsyncMock) -> Iterator[AsyncMock]:
+    """Inject *mock_subscription_client* into ``app.state`` for the test."""
+
+    main.app.state.subscription_client = mock_subscription_client
+    try:
+        yield mock_subscription_client
+    finally:
+        main.app.state.subscription_client = None

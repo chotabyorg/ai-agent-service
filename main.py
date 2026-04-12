@@ -13,14 +13,21 @@ from api.v1.openrouter_key import router as openrouter_key_router
 from api.v1.tools import router as tools_router
 from core.config import get_settings
 from core.redis import close_redis, init_redis
+from services.subscription_client import SubscriptionClient
 
 
 settings = get_settings()
 
 
 @asynccontextmanager
-async def lifespan(_: FastAPI):
+async def lifespan(app: FastAPI):
     await init_redis()
+    if settings.subscription_check_enabled and settings.subscription_service_url:
+        app.state.subscription_client = SubscriptionClient(
+            settings.subscription_service_url
+        )
+    else:
+        app.state.subscription_client = None
     try:
         yield
     finally:
