@@ -6,9 +6,9 @@ services:
     env_file:
       - .env
     depends_on:
-      postgres:
+      ai-agent-postgres:
         condition: service_healthy
-      redis:
+      ai-agent-redis:
         condition: service_healthy
     command: sh -c "alembic upgrade head && uvicorn main:app --host 0.0.0.0 --port 8000"
     healthcheck:
@@ -20,8 +20,9 @@ services:
       - ai-network
       - microservices_network
 
-  postgres:
+  ai-agent-postgres:
     image: postgres:15-alpine
+    container_name: ai-agent-postgres
     environment:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
@@ -38,8 +39,9 @@ services:
     networks:
       - ai-network
 
-  redis:
+  ai-agent-redis:
     image: redis:7-alpine
+    container_name: ai-agent-redis
     expose:
       - 6379
     healthcheck:
