@@ -1,6 +1,6 @@
 name: Deploy
 on:
-  workflow_dispath:
+  workflow_dispatch:
   push:
     branches: [main]
 
