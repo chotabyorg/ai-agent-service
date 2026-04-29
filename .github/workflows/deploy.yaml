@@ -1,0 +1,11 @@
+name: Deploy
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy:
+    uses: chotabyorg/gitops/.github/workflows/reusable-deploy.yaml@main
+    with:
+      service: ai-agent-service
+      gitops_repo: chotabyorg/gitops
