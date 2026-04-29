@@ -10,3 +10,7 @@ jobs:
     with:
       service: ai-agent-service
       gitops_repo: chotabyorg/gitops
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
