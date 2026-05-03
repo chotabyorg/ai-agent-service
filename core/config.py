@@ -43,6 +43,11 @@ class Settings(BaseSettings):
     llm_http_referer: str | None = Field(default=None)
     llm_app_title: str | None = Field(default=None)
 
+    privacy_filter_enabled: bool = Field(default=False)
+    privacy_filter_base_url: str = Field(default="http://privacy-filter-service:8000")
+    privacy_filter_service_token: str = Field(default="")
+    privacy_filter_timeout_seconds: float = Field(default=30.0)
+
     encryption_key: SecretStr = Field(default="")
 
     internal_api_token: str = Field(default="")

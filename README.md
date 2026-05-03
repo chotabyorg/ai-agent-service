@@ -130,6 +130,10 @@ ai-agent-service/
 | `LLM_DEFAULT_TEMPERATURE` | `0.7` | Температура по умолчанию |
 | `LLM_HTTP_REFERER` | `null` | Опциональный `HTTP-Referer` для OpenRouter |
 | `LLM_APP_TITLE` | `null` | Опциональный `X-Title` для OpenRouter |
+| `PRIVACY_FILTER_ENABLED` | `false` | Если `true`, все внешние LLM-вызовы идут через privacy-filter-service |
+| `PRIVACY_FILTER_BASE_URL` | `http://privacy-filter-service:8000` | Внутренний URL privacy-filter-service |
+| `PRIVACY_FILTER_SERVICE_TOKEN` | `""` | Bearer-токен для внутреннего вызова privacy-filter-service |
+| `PRIVACY_FILTER_TIMEOUT_SECONDS` | `30` | Таймаут запроса к privacy-filter-service |
 | `MCP_SERVER_PATH` | `mcp_service/mcp_server.py` | Резервный путь для custom MCP server |
 | `MCP_BITRIX_PATH` | `mcp_clients/servers/bitrix_server.py` | Локальный путь к Bitrix MCP server |
 | `MCP_GOOGLE_PATH` | `mcp_service/google_server.py` | Резервный путь для Google MCP server |
@@ -151,7 +155,27 @@ REDIS_DB=0
 LLM_API_KEY=your_api_key
 LLM_BASE_URL=https://openrouter.ai/api/v1
 LLM_DEFAULT_MODEL=google/gemini-2.5-flash
+
+PRIVACY_FILTER_ENABLED=false
+PRIVACY_FILTER_BASE_URL=http://privacy-filter-service:8000
+PRIVACY_FILTER_SERVICE_TOKEN=
 ```
+
+### Анонимизация ПД через privacy-filter-service
+
+По умолчанию сервис работает как раньше и напрямую вызывает OpenRouter. Если установить
+`PRIVACY_FILTER_ENABLED=true`, `ai-agent-service` сохраняет текущую orchestration-логику
+агентов, истории и MCP, но каждый внешний LLM-вызов отправляет во внутренний
+`privacy-filter-service`.
+
+В privacy mode сервис передает в proxy:
+- `messages`, `tools`, модель, температуру и `parallel_tool_calls`;
+- per-agent OpenRouter key;
+- `ConversationSession.id` как `privacy_session_id`.
+
+Если privacy-filter-service недоступен или не настроен, запрос завершается ошибкой
+и прямого fallback на OpenRouter нет. Это сделано специально, чтобы при включенной
+анонимизации авария proxy не приводила к отправке ПД внешнему провайдеру.
 
 ## Установка и запуск
 
