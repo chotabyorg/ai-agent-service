@@ -132,7 +132,6 @@ ai-agent-service/
 | `LLM_APP_TITLE` | `null` | Опциональный `X-Title` для OpenRouter |
 | `PRIVACY_FILTER_ENABLED` | `false` | Если `true`, все внешние LLM-вызовы идут через privacy-filter-service |
 | `PRIVACY_FILTER_BASE_URL` | `http://privacy-filter-service:8000` | Внутренний URL privacy-filter-service |
-| `PRIVACY_FILTER_SERVICE_TOKEN` | `""` | Bearer-токен для внутреннего вызова privacy-filter-service |
 | `PRIVACY_FILTER_TIMEOUT_SECONDS` | `30` | Таймаут запроса к privacy-filter-service |
 | `MCP_SERVER_PATH` | `mcp_service/mcp_server.py` | Резервный путь для custom MCP server |
 | `MCP_BITRIX_PATH` | `mcp_clients/servers/bitrix_server.py` | Локальный путь к Bitrix MCP server |
@@ -158,7 +157,6 @@ LLM_DEFAULT_MODEL=google/gemini-2.5-flash
 
 PRIVACY_FILTER_ENABLED=false
 PRIVACY_FILTER_BASE_URL=http://privacy-filter-service:8000
-PRIVACY_FILTER_SERVICE_TOKEN=
 ```
 
 ### Анонимизация ПД через privacy-filter-service
@@ -172,6 +170,7 @@ PRIVACY_FILTER_SERVICE_TOKEN=
 - `messages`, `tools`, модель, температуру и `parallel_tool_calls`;
 - per-agent OpenRouter key;
 - `ConversationSession.id` как `privacy_session_id`.
+- общий `INTERNAL_API_TOKEN` как Bearer-токен внутреннего вызова.
 
 Если privacy-filter-service недоступен или не настроен, запрос завершается ошибкой
 и прямого fallback на OpenRouter нет. Это сделано специально, чтобы при включенной

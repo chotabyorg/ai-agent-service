@@ -188,7 +188,7 @@ async def test_chat_uses_privacy_proxy_when_enabled(
 
     monkeypatch.setattr(llm_service.settings, "privacy_filter_enabled", True)
     monkeypatch.setattr(llm_service.settings, "privacy_filter_base_url", "http://privacy-filter-service:8000")
-    monkeypatch.setattr(llm_service.settings, "privacy_filter_service_token", "service-token")
+    monkeypatch.setattr(llm_service.settings, "internal_api_token", "service-token")
     monkeypatch.setattr(llm_service.settings, "privacy_filter_timeout_seconds", 5.0)
 
     agent = await create_agent(api_client, db_session_factory=db_session)
@@ -243,7 +243,7 @@ async def test_chat_privacy_proxy_unavailable_fails_closed(
 
     monkeypatch.setattr(llm_service.settings, "privacy_filter_enabled", True)
     monkeypatch.setattr(llm_service.settings, "privacy_filter_base_url", "http://privacy-filter-service:8000")
-    monkeypatch.setattr(llm_service.settings, "privacy_filter_service_token", "service-token")
+    monkeypatch.setattr(llm_service.settings, "internal_api_token", "service-token")
     monkeypatch.setattr(llm_service.settings, "privacy_filter_timeout_seconds", 5.0)
 
     agent = await create_agent(api_client, db_session_factory=db_session)
@@ -369,7 +369,7 @@ async def test_chat_privacy_proxy_preserves_mcp_tool_loop(
 
     monkeypatch.setattr(llm_service.settings, "privacy_filter_enabled", True)
     monkeypatch.setattr(llm_service.settings, "privacy_filter_base_url", "http://privacy-filter-service:8000")
-    monkeypatch.setattr(llm_service.settings, "privacy_filter_service_token", "service-token")
+    monkeypatch.setattr(llm_service.settings, "internal_api_token", "service-token")
     monkeypatch.setattr(llm_service.settings, "privacy_filter_timeout_seconds", 5.0)
 
     agent = await create_agent(api_client, db_session_factory=db_session)
@@ -435,7 +435,7 @@ async def test_chat_privacy_proxy_insufficient_funds_deactivates_agent(
 
     monkeypatch.setattr(llm_service.settings, "privacy_filter_enabled", True)
     monkeypatch.setattr(llm_service.settings, "privacy_filter_base_url", "http://privacy-filter-service:8000")
-    monkeypatch.setattr(llm_service.settings, "privacy_filter_service_token", "service-token")
+    monkeypatch.setattr(llm_service.settings, "internal_api_token", "service-token")
     monkeypatch.setattr(llm_service.settings, "privacy_filter_timeout_seconds", 5.0)
 
     agent = await create_agent(api_client, db_session_factory=db_session)

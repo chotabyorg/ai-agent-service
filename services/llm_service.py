@@ -97,22 +97,22 @@ class PrivacyProxyCompletions:
         self,
         *,
         privacy_filter_base_url: str,
-        privacy_filter_service_token: str,
+        internal_api_token: str,
         privacy_filter_timeout_seconds: float,
         llm_base_url: str,
         agent_api_key: str,
         privacy_session_id: UUID,
     ) -> None:
         self.privacy_filter_base_url = privacy_filter_base_url.rstrip("/")
-        self.privacy_filter_service_token = privacy_filter_service_token
+        self.internal_api_token = internal_api_token
         self.privacy_filter_timeout_seconds = privacy_filter_timeout_seconds
         self.llm_base_url = llm_base_url
         self.agent_api_key = agent_api_key
         self.privacy_session_id = privacy_session_id
 
     async def create(self, **kwargs: Any) -> Any:
-        if not self.privacy_filter_service_token:
-            raise PrivacyProxyConnectionError("Privacy filter service token is not configured.")
+        if not self.internal_api_token:
+            raise PrivacyProxyConnectionError("Internal API token is not configured.")
 
         extra_headers = kwargs.pop("extra_headers", None)
         payload = {
@@ -126,7 +126,7 @@ class PrivacyProxyCompletions:
         }
         url = f"{self.privacy_filter_base_url}/api/v1/privacy-filter/chat/completions"
         headers = {
-            "Authorization": f"Bearer {self.privacy_filter_service_token}",
+            "Authorization": f"Bearer {self.internal_api_token}",
             "Content-Type": "application/json",
         }
 
@@ -158,7 +158,7 @@ class PrivacyProxyLLMClient:
         self,
         *,
         privacy_filter_base_url: str,
-        privacy_filter_service_token: str,
+        internal_api_token: str,
         privacy_filter_timeout_seconds: float,
         llm_base_url: str,
         agent_api_key: str,
@@ -167,7 +167,7 @@ class PrivacyProxyLLMClient:
         self.chat = SimpleNamespace(
             completions=PrivacyProxyCompletions(
                 privacy_filter_base_url=privacy_filter_base_url,
-                privacy_filter_service_token=privacy_filter_service_token,
+                internal_api_token=internal_api_token,
                 privacy_filter_timeout_seconds=privacy_filter_timeout_seconds,
                 llm_base_url=llm_base_url,
                 agent_api_key=agent_api_key,
@@ -296,7 +296,7 @@ class LLMService:
         if self.settings.privacy_filter_enabled:
             llm_client = PrivacyProxyLLMClient(
                 privacy_filter_base_url=self.settings.privacy_filter_base_url,
-                privacy_filter_service_token=self.settings.privacy_filter_service_token,
+                internal_api_token=self.settings.internal_api_token,
                 privacy_filter_timeout_seconds=self.settings.privacy_filter_timeout_seconds,
                 llm_base_url=self.settings.llm_base_url,
                 agent_api_key=agent_api_key,
