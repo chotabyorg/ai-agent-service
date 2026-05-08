@@ -51,6 +51,12 @@ class Settings(BaseSettings):
 
     internal_api_token: str = Field(default="")
 
+    knowledge_base_enabled: bool = Field(default=False)
+    knowledge_base_service_url: str = Field(default="http://knowledge-base-service:8000")
+    knowledge_base_timeout_seconds: float = Field(default=2.0)
+    knowledge_base_max_chars_per_chunk: int = Field(default=1200)
+    knowledge_base_max_total_context_chars: int = Field(default=5000)
+
     subscription_service_url: str = Field(default="")
     subscription_check_enabled: bool = Field(default=False)
 

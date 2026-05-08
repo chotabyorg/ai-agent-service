@@ -24,6 +24,8 @@ from mcp_clients.manager import MCPManager
 from services.agent_service import AgentService
 from services.encryption_service import EncryptionService
 from services.history_service import HistoryService
+from services.knowledge_base_client import KnowledgeBaseClient
+from services.knowledge_base_prompt import build_knowledge_base_system_message
 from services.prompt_builder import ChatContext, PromptBuilder
 from services.session_service import SessionService
 
@@ -223,6 +225,47 @@ class LLMService:
             headers["X-Title"] = self.settings.llm_app_title
         return headers or None
 
+    async def _build_knowledge_base_message(
+        self,
+        *,
+        agent: object,
+        query: str,
+    ) -> str | None:
+        if not self.settings.knowledge_base_enabled:
+            return None
+        if not self.settings.knowledge_base_service_url or not self.settings.internal_api_token:
+            return None
+
+        try:
+            client = KnowledgeBaseClient(
+                base_url=self.settings.knowledge_base_service_url,
+                service_token=self.settings.internal_api_token,
+                timeout=self.settings.knowledge_base_timeout_seconds,
+            )
+            try:
+                response = await client.retrieve_context(
+                    owner_id=str(agent.user_id),  # type: ignore[attr-defined]
+                    agent_id=agent.id,  # type: ignore[attr-defined]
+                    query=query,
+                )
+            finally:
+                await client.aclose()
+
+            if not response.contexts:
+                return None
+            return build_knowledge_base_system_message(
+                response.contexts,
+                max_chars_per_chunk=self.settings.knowledge_base_max_chars_per_chunk,
+                max_total_context_chars=self.settings.knowledge_base_max_total_context_chars,
+            )
+        except Exception:
+            logger.warning(
+                "Knowledge Base retrieval failed for agent %s; continuing without KB context.",
+                getattr(agent, "id", "?"),
+                exc_info=True,
+            )
+            return None
+
     @staticmethod
     def _assistant_message_to_dict(message: object) -> dict[str, object]:
         tool_calls = []
@@ -313,12 +356,18 @@ class LLMService:
 
         chat_context = ChatContext(channel=channel, external_client_id=external_client_id)
         system_prompt = self.prompt_builder.build(agent, chat_context)
+        knowledge_base_message = await self._build_knowledge_base_message(
+            agent=agent,
+            query=user_message,
+        )
 
         messages: list[dict[str, object]] = [
             {"role": "system", "content": system_prompt},
-            *history,
-            {"role": "user", "content": user_message},
         ]
+        if knowledge_base_message:
+            messages.append({"role": "system", "content": knowledge_base_message})
+        messages.extend(history)
+        messages.append({"role": "user", "content": user_message})
 
         executed_calls: set[str] = set()
 

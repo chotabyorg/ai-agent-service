@@ -21,6 +21,34 @@ from tests.fakes import (
 FAKE_OPENROUTER_KEY = "sk-or-v1-test-key-for-unit-tests"
 
 
+class FakeKnowledgeBaseClient:
+    contexts: list[object] = []
+    error: Exception | None = None
+    calls: list[dict[str, object]] = []
+
+    def __init__(self, **kwargs) -> None:
+        self.kwargs = kwargs
+
+    async def retrieve_context(self, *, owner_id, agent_id, query):
+        self.__class__.calls.append(
+            {
+                "owner_id": owner_id,
+                "agent_id": agent_id,
+                "query": query,
+                "kwargs": self.kwargs,
+            }
+        )
+        if self.__class__.error is not None:
+            raise self.__class__.error
+        return type("KnowledgeBaseResponse", (), {"contexts": self.__class__.contexts, "total": len(self.__class__.contexts)})()
+
+    @classmethod
+    def reset(cls) -> None:
+        cls.contexts = []
+        cls.error = None
+        cls.calls = []
+
+
 def build_agent_payload() -> dict[str, object]:
     return {
         "name": "Support agent",
@@ -558,6 +586,181 @@ async def test_chat_uses_existing_redis_history_and_strips_thinking_tags(
         {"role": "user", "content": "Prev user"},
         {"role": "assistant", "content": "Prev assistant"},
         {"role": "user", "content": "New question"},
+    ]
+
+
+@pytest.mark.integration
+async def test_chat_knowledge_base_disabled_preserves_existing_message_order(
+    api_client,
+    db_session,
+    llm_controller,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    FakeKnowledgeBaseClient.reset()
+    monkeypatch.setattr(llm_service_module, "KnowledgeBaseClient", FakeKnowledgeBaseClient, raising=False)
+
+    from api.v1.chat import llm_service
+
+    monkeypatch.setattr(llm_service.settings, "knowledge_base_enabled", False, raising=False)
+    llm_controller.chat.completions.queue(build_llm_response(content="No KB"))
+    agent = await create_agent(api_client, db_session_factory=db_session)
+
+    response = await api_client.post(
+        "/v1/chat/completions",
+        json={
+            "agent_id": agent["id"],
+            "external_client_id": "kb-disabled-user",
+            "channel": "telegram",
+            "message": "Hello",
+        },
+    )
+
+    assert response.status_code == 200
+    assert FakeKnowledgeBaseClient.calls == []
+    assert llm_controller.chat.completions.calls[0]["messages"] == [
+        {"role": "system", "content": "Be concise and helpful."},
+        {"role": "user", "content": "Hello"},
+    ]
+
+
+@pytest.mark.integration
+async def test_chat_inserts_knowledge_base_context_after_system_prompt(
+    api_client,
+    db_session,
+    llm_controller,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from services.knowledge_base_client import KnowledgeBaseContext
+
+    FakeKnowledgeBaseClient.reset()
+    FakeKnowledgeBaseClient.contexts = [
+        KnowledgeBaseContext(
+            chunk_id=uuid4(),
+            document_id=uuid4(),
+            knowledge_base_id=uuid4(),
+            content="Warranty is 12 months.",
+            score=0.88,
+            source_filename="faq.pdf",
+            chunk_index=2,
+            metadata={"raw_extra": "must-not-leak"},
+        )
+    ]
+    monkeypatch.setattr(llm_service_module, "KnowledgeBaseClient", FakeKnowledgeBaseClient, raising=False)
+
+    from api.v1.chat import llm_service
+
+    monkeypatch.setattr(llm_service.settings, "knowledge_base_enabled", True, raising=False)
+    monkeypatch.setattr(llm_service.settings, "knowledge_base_service_url", "http://knowledge-base-service:8000", raising=False)
+    monkeypatch.setattr(llm_service.settings, "knowledge_base_timeout_seconds", 2.0, raising=False)
+    monkeypatch.setattr(llm_service.settings, "knowledge_base_max_chars_per_chunk", 1200, raising=False)
+    monkeypatch.setattr(llm_service.settings, "knowledge_base_max_total_context_chars", 5000, raising=False)
+    monkeypatch.setattr(llm_service.settings, "internal_api_token", "service-token")
+
+    llm_controller.chat.completions.queue(build_llm_response(content="KB answer"))
+    agent = await create_agent(api_client, db_session_factory=db_session)
+
+    response = await api_client.post(
+        "/v1/chat/completions",
+        json={
+            "agent_id": agent["id"],
+            "external_client_id": "kb-user",
+            "channel": "telegram",
+            "message": "What is warranty?",
+        },
+    )
+
+    assert response.status_code == 200
+    assert FakeKnowledgeBaseClient.calls[0]["owner_id"] == agent["user_id"]
+    assert FakeKnowledgeBaseClient.calls[0]["agent_id"] == UUID(agent["id"])
+    assert FakeKnowledgeBaseClient.calls[0]["query"] == "What is warranty?"
+    messages = llm_controller.chat.completions.calls[0]["messages"]
+    assert messages[0] == {"role": "system", "content": "Be concise and helpful."}
+    assert messages[1]["role"] == "system"
+    assert "<knowledge_base_context>" in messages[1]["content"]
+    assert '[1] source="faq.pdf" chunk_index=2 score=0.88' in messages[1]["content"]
+    assert "Warranty is 12 months." in messages[1]["content"]
+    assert "must-not-leak" not in messages[1]["content"]
+    assert messages[2] == {"role": "user", "content": "What is warranty?"}
+
+
+@pytest.mark.integration
+async def test_chat_omits_knowledge_base_message_for_empty_contexts(
+    api_client,
+    db_session,
+    llm_controller,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    FakeKnowledgeBaseClient.reset()
+    monkeypatch.setattr(llm_service_module, "KnowledgeBaseClient", FakeKnowledgeBaseClient, raising=False)
+
+    from api.v1.chat import llm_service
+
+    monkeypatch.setattr(llm_service.settings, "knowledge_base_enabled", True, raising=False)
+    monkeypatch.setattr(llm_service.settings, "knowledge_base_service_url", "http://knowledge-base-service:8000", raising=False)
+    monkeypatch.setattr(llm_service.settings, "knowledge_base_timeout_seconds", 2.0, raising=False)
+    monkeypatch.setattr(llm_service.settings, "knowledge_base_max_chars_per_chunk", 1200, raising=False)
+    monkeypatch.setattr(llm_service.settings, "knowledge_base_max_total_context_chars", 5000, raising=False)
+    monkeypatch.setattr(llm_service.settings, "internal_api_token", "service-token")
+
+    llm_controller.chat.completions.queue(build_llm_response(content="No contexts"))
+    agent = await create_agent(api_client, db_session_factory=db_session)
+
+    response = await api_client.post(
+        "/v1/chat/completions",
+        json={
+            "agent_id": agent["id"],
+            "external_client_id": "kb-empty-user",
+            "channel": "telegram",
+            "message": "Unknown",
+        },
+    )
+
+    assert response.status_code == 200
+    assert len(FakeKnowledgeBaseClient.calls) == 1
+    assert llm_controller.chat.completions.calls[0]["messages"] == [
+        {"role": "system", "content": "Be concise and helpful."},
+        {"role": "user", "content": "Unknown"},
+    ]
+
+
+@pytest.mark.integration
+async def test_chat_knowledge_base_failures_are_fail_open(
+    api_client,
+    db_session,
+    llm_controller,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    FakeKnowledgeBaseClient.reset()
+    FakeKnowledgeBaseClient.error = RuntimeError("kb unavailable")
+    monkeypatch.setattr(llm_service_module, "KnowledgeBaseClient", FakeKnowledgeBaseClient, raising=False)
+
+    from api.v1.chat import llm_service
+
+    monkeypatch.setattr(llm_service.settings, "knowledge_base_enabled", True, raising=False)
+    monkeypatch.setattr(llm_service.settings, "knowledge_base_service_url", "http://knowledge-base-service:8000", raising=False)
+    monkeypatch.setattr(llm_service.settings, "knowledge_base_timeout_seconds", 2.0, raising=False)
+    monkeypatch.setattr(llm_service.settings, "knowledge_base_max_chars_per_chunk", 1200, raising=False)
+    monkeypatch.setattr(llm_service.settings, "knowledge_base_max_total_context_chars", 5000, raising=False)
+    monkeypatch.setattr(llm_service.settings, "internal_api_token", "service-token")
+
+    llm_controller.chat.completions.queue(build_llm_response(content="Fallback without KB"))
+    agent = await create_agent(api_client, db_session_factory=db_session)
+
+    response = await api_client.post(
+        "/v1/chat/completions",
+        json={
+            "agent_id": agent["id"],
+            "external_client_id": "kb-fail-user",
+            "channel": "telegram",
+            "message": "Hello",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["answer"] == "Fallback without KB"
+    assert llm_controller.chat.completions.calls[0]["messages"] == [
+        {"role": "system", "content": "Be concise and helpful."},
+        {"role": "user", "content": "Hello"},
     ]
 
 

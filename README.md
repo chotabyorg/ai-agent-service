@@ -15,6 +15,7 @@
 - Хранение tenant-specific credentials для внешних инструментов.
 - Память диалогов по `session_id` в Redis.
 - Обработка чата через `/v1/chat/completions`.
+- Опциональная подстановка контекста из `knowledge-base-service` перед LLM-вызовом.
 - Изолированный запуск MCP-серверов с динамическим пробросом `env` под каждого агента.
 
 ## Технологический стек
@@ -92,14 +93,16 @@ ai-agent-service/
 2. Проверить, что агент активен.
 3. Найти `ConversationSession` по `session_id` и убедиться, что она принадлежит этому агенту.
 4. Загрузить Redis-историю.
-5. Поднять MCP managers для доступных credentials.
-6. Передать в LLM:
+5. Если включен `KNOWLEDGE_BASE_ENABLED`, запросить внутренний retrieval context у `knowledge-base-service`.
+6. Поднять MCP managers для доступных credentials.
+7. Передать в LLM:
    - `system_prompt`
+   - опциональный Knowledge Base context system message
    - историю диалога
    - новое сообщение пользователя
    - OpenAI-compatible tools, собранные из MCP
-7. Если модель вернула `tool_calls`, выполнить их через `MCPManager.call_tool()` и сделать следующий виток цикла.
-8. Когда модель возвращает обычный текст, сохранить новый `user/assistant` turn в Redis и вернуть ответ клиенту.
+8. Если модель вернула `tool_calls`, выполнить их через `MCPManager.call_tool()` и сделать следующий виток цикла.
+9. Когда модель возвращает обычный текст, сохранить новый `user/assistant` turn в Redis и вернуть ответ клиенту.
 
 ## Переменные окружения
 
@@ -133,6 +136,11 @@ ai-agent-service/
 | `PRIVACY_FILTER_ENABLED` | `false` | Если `true`, все внешние LLM-вызовы идут через privacy-filter-service |
 | `PRIVACY_FILTER_BASE_URL` | `http://privacy-filter-service:8000` | Внутренний URL privacy-filter-service |
 | `PRIVACY_FILTER_TIMEOUT_SECONDS` | `30` | Таймаут запроса к privacy-filter-service |
+| `KNOWLEDGE_BASE_ENABLED` | `false` | Временный global feature flag / kill switch для Knowledge Base retrieval |
+| `KNOWLEDGE_BASE_SERVICE_URL` | `http://knowledge-base-service:8000` | Внутренний URL knowledge-base-service |
+| `KNOWLEDGE_BASE_TIMEOUT_SECONDS` | `2.0` | Таймаут internal retrieval запроса |
+| `KNOWLEDGE_BASE_MAX_CHARS_PER_CHUNK` | `1200` | Максимум символов одного KB chunk в prompt |
+| `KNOWLEDGE_BASE_MAX_TOTAL_CONTEXT_CHARS` | `5000` | Максимум символов всего KB context system message |
 | `MCP_SERVER_PATH` | `mcp_service/mcp_server.py` | Резервный путь для custom MCP server |
 | `MCP_BITRIX_PATH` | `mcp_clients/servers/bitrix_server.py` | Локальный путь к Bitrix MCP server |
 | `MCP_GOOGLE_PATH` | `mcp_service/google_server.py` | Резервный путь для Google MCP server |
@@ -175,6 +183,50 @@ PRIVACY_FILTER_BASE_URL=http://privacy-filter-service:8000
 Если privacy-filter-service недоступен или не настроен, запрос завершается ошибкой
 и прямого fallback на OpenRouter нет. Это сделано специально, чтобы при включенной
 анонимизации авария proxy не приводила к отправке ПД внешнему провайдеру.
+
+### Knowledge Base retrieval hook
+
+По умолчанию hook выключен: `KNOWLEDGE_BASE_ENABLED=false`. Это временный global
+feature flag / kill switch для первого rollout. Per-agent/per-KB управление будет
+добавлено отдельной фазой.
+
+Когда hook включен, `LLMService` перед первым LLM-вызовом запрашивает:
+
+```text
+POST {KNOWLEDGE_BASE_SERVICE_URL}/internal/v1/retrieval/context
+X-Service-Token: {INTERNAL_API_TOKEN}
+```
+
+Payload строится только из доверенного состояния сервиса:
+
+- `owner_id` берется из `agent.user_id`;
+- `agent_id` берется из загруженного агента;
+- `query` — текущее сообщение пользователя.
+
+`top_k` и `similarity_threshold` пока не передаются: defaults применяются внутри
+`knowledge-base-service`.
+
+Если retrieval вернул contexts, сервис добавляет отдельный system message сразу
+после основного system prompt и перед Redis history/user message:
+
+```text
+<knowledge_base_context>
+Use these snippets as company knowledge. If snippets are irrelevant or insufficient, do not invent facts.
+
+[1] source="faq.pdf" chunk_index=2 score=0.88
+...
+</knowledge_base_context>
+```
+
+Контекст ограничивается `KNOWLEDGE_BASE_MAX_CHARS_PER_CHUNK` и
+`KNOWLEDGE_BASE_MAX_TOTAL_CONTEXT_CHARS`. Raw metadata из retrieval response в
+prompt не добавляется.
+
+Hook работает fail-open: timeout, недоступность `knowledge-base-service`, плохой
+response или неожиданная ошибка форматирования логируются как warning, после чего
+чат продолжается без KB context. Пользователь не получает internal retrieval
+ошибку. При включенном privacy proxy KB context идет в тот же `messages` payload,
+что и остальные system/history/user сообщения.
 
 ## Установка и запуск
 
