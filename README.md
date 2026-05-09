@@ -131,6 +131,7 @@ ai-agent-service/
 | `LLM_BASE_URL` | `https://openrouter.ai/api/v1` | Base URL OpenAI-compatible API |
 | `LLM_DEFAULT_MODEL` | `google/gemini-2.5-flash` | Модель по умолчанию |
 | `LLM_DEFAULT_TEMPERATURE` | `0.7` | Температура по умолчанию |
+| `LLM_MAX_TOKENS` | `1024` | Максимум output/completion tokens для OpenAI-compatible provider |
 | `LLM_HTTP_REFERER` | `null` | Опциональный `HTTP-Referer` для OpenRouter |
 | `LLM_APP_TITLE` | `null` | Опциональный `X-Title` для OpenRouter |
 | `PRIVACY_FILTER_ENABLED` | `false` | Если `true`, все внешние LLM-вызовы идут через privacy-filter-service |
@@ -139,8 +140,8 @@ ai-agent-service/
 | `KNOWLEDGE_BASE_ENABLED` | `false` | Временный global feature flag / kill switch для Knowledge Base retrieval |
 | `KNOWLEDGE_BASE_SERVICE_URL` | `http://knowledge-base-service:8000` | Внутренний URL knowledge-base-service |
 | `KNOWLEDGE_BASE_TIMEOUT_SECONDS` | `2.0` | Таймаут internal retrieval запроса |
-| `KNOWLEDGE_BASE_MAX_CHARS_PER_CHUNK` | `1200` | Максимум символов одного KB chunk в prompt |
-| `KNOWLEDGE_BASE_MAX_TOTAL_CONTEXT_CHARS` | `5000` | Максимум символов всего KB context system message |
+| `KNOWLEDGE_BASE_MAX_CHARS_PER_CHUNK` | `1000` | Максимум символов одного KB chunk в prompt |
+| `KNOWLEDGE_BASE_MAX_TOTAL_CONTEXT_CHARS` | `3000` | Максимум символов всего KB context system message |
 | `MCP_SERVER_PATH` | `mcp_service/mcp_server.py` | Резервный путь для custom MCP server |
 | `MCP_BITRIX_PATH` | `mcp_clients/servers/bitrix_server.py` | Локальный путь к Bitrix MCP server |
 | `MCP_GOOGLE_PATH` | `mcp_service/google_server.py` | Резервный путь для Google MCP server |
@@ -221,6 +222,10 @@ Use these snippets as company knowledge. If snippets are irrelevant or insuffici
 Контекст ограничивается `KNOWLEDGE_BASE_MAX_CHARS_PER_CHUNK` и
 `KNOWLEDGE_BASE_MAX_TOTAL_CONTEXT_CHARS`. Raw metadata из retrieval response в
 prompt не добавляется.
+
+`LLM_MAX_TOKENS` ограничивает completion/output tokens для OpenAI-compatible
+provider. Это важно для OpenRouter cost/credit control: сервис не должен
+отправлять провайдеру неограниченный или чрезмерный output token budget.
 
 Hook работает fail-open: timeout, недоступность `knowledge-base-service`, плохой
 response или неожиданная ошибка форматирования логируются как warning, после чего

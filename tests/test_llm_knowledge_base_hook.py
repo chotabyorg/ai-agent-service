@@ -52,8 +52,8 @@ async def test_llm_knowledge_base_hook_uses_agent_owner_and_formats_context(monk
     monkeypatch.setattr(service.settings, "knowledge_base_enabled", True)
     monkeypatch.setattr(service.settings, "knowledge_base_service_url", "http://knowledge-base-service:8000")
     monkeypatch.setattr(service.settings, "knowledge_base_timeout_seconds", 2.0)
-    monkeypatch.setattr(service.settings, "knowledge_base_max_chars_per_chunk", 1200)
-    monkeypatch.setattr(service.settings, "knowledge_base_max_total_context_chars", 5000)
+    monkeypatch.setattr(service.settings, "knowledge_base_max_chars_per_chunk", 1000)
+    monkeypatch.setattr(service.settings, "knowledge_base_max_total_context_chars", 3000)
     monkeypatch.setattr(service.settings, "internal_api_token", "service-token")
 
     message = await service._build_knowledge_base_message(agent=agent, query="Warranty?")
@@ -102,8 +102,8 @@ async def test_llm_knowledge_base_hook_fail_opens_on_unexpected_formatter_error(
     monkeypatch.setattr(service.settings, "knowledge_base_enabled", True)
     monkeypatch.setattr(service.settings, "knowledge_base_service_url", "http://knowledge-base-service:8000")
     monkeypatch.setattr(service.settings, "knowledge_base_timeout_seconds", 2.0)
-    monkeypatch.setattr(service.settings, "knowledge_base_max_chars_per_chunk", 1200)
-    monkeypatch.setattr(service.settings, "knowledge_base_max_total_context_chars", 5000)
+    monkeypatch.setattr(service.settings, "knowledge_base_max_chars_per_chunk", 1000)
+    monkeypatch.setattr(service.settings, "knowledge_base_max_total_context_chars", 3000)
     monkeypatch.setattr(service.settings, "internal_api_token", "service-token")
 
     assert await service._build_knowledge_base_message(agent=agent, query="Question") is None

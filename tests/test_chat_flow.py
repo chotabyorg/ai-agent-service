@@ -42,6 +42,9 @@ class FakeKnowledgeBaseClient:
             raise self.__class__.error
         return type("KnowledgeBaseResponse", (), {"contexts": self.__class__.contexts, "total": len(self.__class__.contexts)})()
 
+    async def aclose(self) -> None:
+        return None
+
     @classmethod
     def reset(cls) -> None:
         cls.contexts = []
@@ -621,6 +624,7 @@ async def test_chat_knowledge_base_disabled_preserves_existing_message_order(
         {"role": "system", "content": "Be concise and helpful."},
         {"role": "user", "content": "Hello"},
     ]
+    assert llm_controller.chat.completions.calls[0]["max_tokens"] == 1024
 
 
 @pytest.mark.integration
@@ -652,8 +656,8 @@ async def test_chat_inserts_knowledge_base_context_after_system_prompt(
     monkeypatch.setattr(llm_service.settings, "knowledge_base_enabled", True, raising=False)
     monkeypatch.setattr(llm_service.settings, "knowledge_base_service_url", "http://knowledge-base-service:8000", raising=False)
     monkeypatch.setattr(llm_service.settings, "knowledge_base_timeout_seconds", 2.0, raising=False)
-    monkeypatch.setattr(llm_service.settings, "knowledge_base_max_chars_per_chunk", 1200, raising=False)
-    monkeypatch.setattr(llm_service.settings, "knowledge_base_max_total_context_chars", 5000, raising=False)
+    monkeypatch.setattr(llm_service.settings, "knowledge_base_max_chars_per_chunk", 1000, raising=False)
+    monkeypatch.setattr(llm_service.settings, "knowledge_base_max_total_context_chars", 3000, raising=False)
     monkeypatch.setattr(llm_service.settings, "internal_api_token", "service-token")
 
     llm_controller.chat.completions.queue(build_llm_response(content="KB answer"))
@@ -698,8 +702,8 @@ async def test_chat_omits_knowledge_base_message_for_empty_contexts(
     monkeypatch.setattr(llm_service.settings, "knowledge_base_enabled", True, raising=False)
     monkeypatch.setattr(llm_service.settings, "knowledge_base_service_url", "http://knowledge-base-service:8000", raising=False)
     monkeypatch.setattr(llm_service.settings, "knowledge_base_timeout_seconds", 2.0, raising=False)
-    monkeypatch.setattr(llm_service.settings, "knowledge_base_max_chars_per_chunk", 1200, raising=False)
-    monkeypatch.setattr(llm_service.settings, "knowledge_base_max_total_context_chars", 5000, raising=False)
+    monkeypatch.setattr(llm_service.settings, "knowledge_base_max_chars_per_chunk", 1000, raising=False)
+    monkeypatch.setattr(llm_service.settings, "knowledge_base_max_total_context_chars", 3000, raising=False)
     monkeypatch.setattr(llm_service.settings, "internal_api_token", "service-token")
 
     llm_controller.chat.completions.queue(build_llm_response(content="No contexts"))
@@ -739,8 +743,8 @@ async def test_chat_knowledge_base_failures_are_fail_open(
     monkeypatch.setattr(llm_service.settings, "knowledge_base_enabled", True, raising=False)
     monkeypatch.setattr(llm_service.settings, "knowledge_base_service_url", "http://knowledge-base-service:8000", raising=False)
     monkeypatch.setattr(llm_service.settings, "knowledge_base_timeout_seconds", 2.0, raising=False)
-    monkeypatch.setattr(llm_service.settings, "knowledge_base_max_chars_per_chunk", 1200, raising=False)
-    monkeypatch.setattr(llm_service.settings, "knowledge_base_max_total_context_chars", 5000, raising=False)
+    monkeypatch.setattr(llm_service.settings, "knowledge_base_max_chars_per_chunk", 1000, raising=False)
+    monkeypatch.setattr(llm_service.settings, "knowledge_base_max_total_context_chars", 3000, raising=False)
     monkeypatch.setattr(llm_service.settings, "internal_api_token", "service-token")
 
     llm_controller.chat.completions.queue(build_llm_response(content="Fallback without KB"))
@@ -842,6 +846,8 @@ async def test_chat_with_tool_call_executes_mcp_and_saves_only_user_and_assistan
     ]
     first_call = llm_controller.chat.completions.calls[0]
     second_call = llm_controller.chat.completions.calls[1]
+    assert first_call["max_tokens"] == 1024
+    assert second_call["max_tokens"] == 1024
     assert first_call["tools"] == mcp_controller.tools_by_service["bitrix"]
     assert second_call["messages"][-1] == {
         "role": "tool",

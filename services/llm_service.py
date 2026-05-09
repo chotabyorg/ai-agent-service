@@ -405,6 +405,7 @@ class LLMService:
                     response = await llm_client.chat.completions.create(
                         model=agent.model_name or self.settings.llm_default_model,
                         temperature=agent.temperature,
+                        max_tokens=self.settings.llm_max_tokens,
                         messages=messages,
                         tools=openai_tools or None,
                         parallel_tool_calls=False,

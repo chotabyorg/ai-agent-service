@@ -26,8 +26,8 @@ def make_context(
 def test_prompt_formats_source_line_without_raw_metadata() -> None:
     message = build_knowledge_base_system_message(
         [make_context()],
-        max_chars_per_chunk=1200,
-        max_total_context_chars=5000,
+        max_chars_per_chunk=1000,
+        max_total_context_chars=3000,
     )
 
     assert message is not None
