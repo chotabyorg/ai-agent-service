@@ -1,0 +1,18 @@
+name: Deploy
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+jobs:
+  deploy:
+    uses: chotabyorg/gitops/.github/workflows/reusable-deploy.yaml@main
+    with:
+      service: ai-agent-service
+      gitops_repo: chotabyorg/gitops
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    secrets:
+      GITOPS_PAT: ${{ secrets.GITOPS_PAT }}
