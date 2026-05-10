@@ -275,6 +275,7 @@ curl -X PUT http://localhost:8000/v1/agents/11111111-1111-1111-1111-111111111111
   -d '{
     "service_name": "bitrix",
     "credentials": {
+      "portal_url": "https://your-portal.bitrix24.by",
       "webhook_url": "https://your-domain.bitrix24.by/rest/1/secret/"
     }
   }'
@@ -286,10 +287,18 @@ curl -X PUT http://localhost:8000/v1/agents/11111111-1111-1111-1111-111111111111
 {
   "service_name": "bitrix",
   "credentials": {
-    "webhook_url": "https://your-domain.bitrix24.by/rest/1/secret/"
+    "portal_url": "https://your-portal.bitrix24.by"
   }
 }
 ```
+
+Правила валидации Bitrix credentials на бэке:
+
+- `portal_url` обязателен и должен быть в формате `https://<portal>.bitrix24.<tld>`.
+- До сохранения выполняется проверка доступности портала через `POST {portal_url}/rest/server.time`.
+- `webhook_url` опционален. Если передан, проверяется формат `https://<portal>.bitrix24.<tld>/rest/<user_id>/<token>/` и валидность через `server.time`.
+- Для фактического выполнения Bitrix MCP tools в текущей реализации нужен валидный `webhook_url` (он пробрасывается в `B24_WEBHOOK_URL`).
+- При `4xx` проблемах валидации API возвращает `422`, при проблемах апстрима (`rate limit`, перегрузка) — `502`.
 
 Пример discovery-запроса доступных интеграций:
 

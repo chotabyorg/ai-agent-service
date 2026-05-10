@@ -5,6 +5,10 @@ import pytest
 from sqlalchemy import select
 
 from models.agent import AgentCredentials, AgentTemplate
+from services.bitrix_webhook_validator import (
+    BitrixCredentialsValidationResult,
+    BitrixCredentialsValidationStatus,
+)
 
 
 def build_agent_payload() -> dict[str, object]:
@@ -285,6 +289,156 @@ async def test_upsert_credentials_returns_404_for_missing_or_foreign_agent(api_c
 
 
 @pytest.mark.integration
+async def test_upsert_bitrix_credentials_rejects_invalid_portal_payload(
+    api_client,
+    monkeypatch,
+) -> None:
+    import api.v1.agents as agents_module
+
+    async def mock_validate(_: dict[str, object]) -> BitrixCredentialsValidationResult:
+        return BitrixCredentialsValidationResult(
+            status=BitrixCredentialsValidationStatus.INVALID_FORMAT,
+            details="portal_url must match format https://<portal>.bitrix24.<tld>.",
+        )
+
+    monkeypatch.setattr(agents_module, "validate_bitrix_credentials", mock_validate)
+
+    owner_id = uuid4()
+    create_response = await api_client.post(
+        "/v1/agents/",
+        json=build_agent_payload(),
+        headers=build_headers(owner_id),
+    )
+    agent_id = create_response.json()["id"]
+
+    response = await api_client.put(
+        f"/v1/agents/{agent_id}/credentials",
+        json={"service_name": "bitrix", "credentials": {"portal_url": 123}},
+        headers=build_headers(owner_id),
+    )
+
+    assert response.status_code == 422
+    assert "portal_url" in response.json()["detail"]
+
+
+@pytest.mark.integration
+async def test_upsert_bitrix_credentials_returns_422_on_invalid_portal(
+    api_client,
+    monkeypatch,
+) -> None:
+    import api.v1.agents as agents_module
+
+    async def mock_validate(_: dict[str, object]) -> BitrixCredentialsValidationResult:
+        return BitrixCredentialsValidationResult(
+            status=BitrixCredentialsValidationStatus.INVALID_FORMAT,
+            details="bad format",
+        )
+
+    monkeypatch.setattr(agents_module, "validate_bitrix_credentials", mock_validate)
+
+    owner_id = uuid4()
+    create_response = await api_client.post(
+        "/v1/agents/",
+        json=build_agent_payload(),
+        headers=build_headers(owner_id),
+    )
+    agent_id = create_response.json()["id"]
+
+    response = await api_client.put(
+        f"/v1/agents/{agent_id}/credentials",
+        json={"service_name": "bitrix", "credentials": {"portal_url": "https://example"}},
+        headers=build_headers(owner_id),
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == "bad format"
+
+
+@pytest.mark.integration
+async def test_upsert_bitrix_credentials_persists_normalized_url(
+    api_client,
+    db_session,
+    monkeypatch,
+) -> None:
+    import api.v1.agents as agents_module
+
+    async def mock_validate(_: dict[str, object]) -> BitrixCredentialsValidationResult:
+        return BitrixCredentialsValidationResult(
+            status=BitrixCredentialsValidationStatus.VALID,
+            normalized_credentials={
+                "portal_url": "https://portal.bitrix24.com",
+                "webhook_url": "https://portal.bitrix24.com/rest/1/secret/",
+            },
+        )
+
+    monkeypatch.setattr(agents_module, "validate_bitrix_credentials", mock_validate)
+
+    owner_id = uuid4()
+    create_response = await api_client.post(
+        "/v1/agents/",
+        json=build_agent_payload(),
+        headers=build_headers(owner_id),
+    )
+    agent_id = create_response.json()["id"]
+
+    response = await api_client.put(
+        f"/v1/agents/{agent_id}/credentials",
+        json={
+            "service_name": "bitrix",
+            "credentials": {
+                "portal_url": "https://portal.bitrix24.com/",
+                "webhook_url": "https://portal.bitrix24.com/rest/1/secret/crm.contact.get.json?ID=42",
+            },
+        },
+        headers=build_headers(owner_id),
+    )
+
+    assert response.status_code == 200
+    async with db_session() as session:
+        record = await session.get(AgentCredentials, {"agent_id": UUID(agent_id), "service_name": "bitrix"})
+    assert record is not None
+    assert record.credentials["portal_url"] == "https://portal.bitrix24.com"
+    assert record.credentials["webhook_url"] == "https://portal.bitrix24.com/rest/1/secret/"
+
+
+@pytest.mark.integration
+async def test_upsert_bitrix_credentials_accepts_portal_only_payload(
+    api_client,
+    db_session,
+    monkeypatch,
+) -> None:
+    import api.v1.agents as agents_module
+
+    async def mock_validate(_: dict[str, object]) -> BitrixCredentialsValidationResult:
+        return BitrixCredentialsValidationResult(
+            status=BitrixCredentialsValidationStatus.VALID,
+            normalized_credentials={"portal_url": "https://portal.bitrix24.com"},
+        )
+
+    monkeypatch.setattr(agents_module, "validate_bitrix_credentials", mock_validate)
+
+    owner_id = uuid4()
+    create_response = await api_client.post(
+        "/v1/agents/",
+        json=build_agent_payload(),
+        headers=build_headers(owner_id),
+    )
+    agent_id = create_response.json()["id"]
+
+    response = await api_client.put(
+        f"/v1/agents/{agent_id}/credentials",
+        json={"service_name": "bitrix", "credentials": {"portal_url": "https://portal.bitrix24.com/"}},
+        headers=build_headers(owner_id),
+    )
+    assert response.status_code == 200
+
+    async with db_session() as session:
+        record = await session.get(AgentCredentials, {"agent_id": UUID(agent_id), "service_name": "bitrix"})
+    assert record is not None
+    assert record.credentials == {"portal_url": "https://portal.bitrix24.com"}
+
+
+@pytest.mark.integration
 async def test_multiple_credential_services_are_persisted_for_same_agent(api_client, db_session) -> None:
     owner_id = uuid4()
     create_response = await api_client.post(
@@ -332,7 +486,7 @@ async def test_mcp_service_discovery_returns_supported_integrations(api_client) 
             "service_name": "bitrix",
             "display_name": "Bitrix24 CRM",
             "description": "Интеграция с вашей CRM Bitrix24",
-            "required_keys": ["webhook_url"],
+            "required_keys": ["portal_url"],
         }
     ]
 
