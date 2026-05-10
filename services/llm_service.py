@@ -5,8 +5,11 @@ import logging
 import re
 from contextlib import AsyncExitStack
 from dataclasses import dataclass
+from types import SimpleNamespace
+from typing import Any
 from uuid import UUID
 
+import httpx
 from openai import (
     APIConnectionError,
     APIError,
@@ -21,6 +24,8 @@ from mcp_clients.manager import MCPManager
 from services.agent_service import AgentService
 from services.encryption_service import EncryptionService
 from services.history_service import HistoryService
+from services.knowledge_base_client import KnowledgeBaseClient
+from services.knowledge_base_prompt import build_knowledge_base_system_message
 from services.prompt_builder import ChatContext, PromptBuilder
 from services.session_service import SessionService
 
@@ -59,10 +64,118 @@ class AgentRateLimitError(AgentKeyError):
     """Rate limit exceeded on the OpenRouter key."""
 
 
+class PrivacyProxyConnectionError(Exception):
+    """Privacy proxy is unavailable or misconfigured."""
+
+
+class PrivacyProxyAuthenticationError(Exception):
+    """Upstream LLM key was rejected through privacy proxy."""
+
+
+class PrivacyProxyInsufficientFundsError(Exception):
+    """Upstream LLM key has insufficient funds through privacy proxy."""
+
+
+class PrivacyProxyRateLimitError(Exception):
+    """Upstream LLM rate limit was exceeded through privacy proxy."""
+
+
 @dataclass
 class ChatProcessingResult:
     session_id: UUID
     answer: str
+
+
+def _to_namespace(value: Any) -> Any:
+    if isinstance(value, dict):
+        return SimpleNamespace(**{key: _to_namespace(item) for key, item in value.items()})
+    if isinstance(value, list):
+        return [_to_namespace(item) for item in value]
+    return value
+
+
+class PrivacyProxyCompletions:
+    def __init__(
+        self,
+        *,
+        privacy_filter_base_url: str,
+        internal_api_token: str,
+        privacy_filter_timeout_seconds: float,
+        llm_base_url: str,
+        agent_api_key: str,
+        privacy_session_id: UUID,
+    ) -> None:
+        self.privacy_filter_base_url = privacy_filter_base_url.rstrip("/")
+        self.internal_api_token = internal_api_token
+        self.privacy_filter_timeout_seconds = privacy_filter_timeout_seconds
+        self.llm_base_url = llm_base_url
+        self.agent_api_key = agent_api_key
+        self.privacy_session_id = privacy_session_id
+
+    async def create(self, **kwargs: Any) -> Any:
+        if not self.internal_api_token:
+            raise PrivacyProxyConnectionError("Internal API token is not configured.")
+
+        extra_headers = kwargs.pop("extra_headers", None)
+        payload = {
+            "privacy_session_id": str(self.privacy_session_id),
+            "upstream": {
+                "base_url": self.llm_base_url,
+                "api_key": self.agent_api_key,
+                "extra_headers": extra_headers,
+            },
+            "chat_completion": {key: value for key, value in kwargs.items() if value is not None},
+        }
+        url = f"{self.privacy_filter_base_url}/api/v1/privacy-filter/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {self.internal_api_token}",
+            "Content-Type": "application/json",
+        }
+
+        try:
+            async with httpx.AsyncClient(timeout=self.privacy_filter_timeout_seconds) as client:
+                response = await client.post(url, headers=headers, json=payload)
+        except httpx.TimeoutException as exc:
+            raise PrivacyProxyConnectionError("Privacy filter request timed out.") from exc
+        except httpx.HTTPError as exc:
+            raise PrivacyProxyConnectionError("Cannot connect to privacy filter service.") from exc
+
+        if response.status_code in {401, 403}:
+            raise PrivacyProxyAuthenticationError("OpenRouter key is invalid. Agent deactivated.")
+        if response.status_code == 402:
+            raise PrivacyProxyInsufficientFundsError("No funds on OpenRouter. Agent deactivated.")
+        if response.status_code == 429:
+            raise PrivacyProxyRateLimitError("Rate limit exceeded. Try again later.")
+        if response.status_code >= 400:
+            raise PrivacyProxyConnectionError("Privacy filter service returned an error.")
+
+        try:
+            return _to_namespace(response.json())
+        except ValueError as exc:
+            raise PrivacyProxyConnectionError("Privacy filter service returned invalid JSON.") from exc
+
+
+class PrivacyProxyLLMClient:
+    def __init__(
+        self,
+        *,
+        privacy_filter_base_url: str,
+        internal_api_token: str,
+        privacy_filter_timeout_seconds: float,
+        llm_base_url: str,
+        agent_api_key: str,
+        privacy_session_id: UUID,
+    ) -> None:
+        self.chat = SimpleNamespace(
+            completions=PrivacyProxyCompletions(
+                privacy_filter_base_url=privacy_filter_base_url,
+                internal_api_token=internal_api_token,
+                privacy_filter_timeout_seconds=privacy_filter_timeout_seconds,
+                llm_base_url=llm_base_url,
+                agent_api_key=agent_api_key,
+                privacy_session_id=privacy_session_id,
+            )
+        )
 
 
 class LLMService:
@@ -111,6 +224,47 @@ class LLMService:
         if self.settings.llm_app_title:
             headers["X-Title"] = self.settings.llm_app_title
         return headers or None
+
+    async def _build_knowledge_base_message(
+        self,
+        *,
+        agent: object,
+        query: str,
+    ) -> str | None:
+        if not self.settings.knowledge_base_enabled:
+            return None
+        if not self.settings.knowledge_base_service_url or not self.settings.internal_api_token:
+            return None
+
+        try:
+            client = KnowledgeBaseClient(
+                base_url=self.settings.knowledge_base_service_url,
+                service_token=self.settings.internal_api_token,
+                timeout=self.settings.knowledge_base_timeout_seconds,
+            )
+            try:
+                response = await client.retrieve_context(
+                    owner_id=str(agent.user_id),  # type: ignore[attr-defined]
+                    agent_id=agent.id,  # type: ignore[attr-defined]
+                    query=query,
+                )
+            finally:
+                await client.aclose()
+
+            if not response.contexts:
+                return None
+            return build_knowledge_base_system_message(
+                response.contexts,
+                max_chars_per_chunk=self.settings.knowledge_base_max_chars_per_chunk,
+                max_total_context_chars=self.settings.knowledge_base_max_total_context_chars,
+            )
+        except Exception:
+            logger.warning(
+                "Knowledge Base retrieval failed for agent %s; continuing without KB context.",
+                getattr(agent, "id", "?"),
+                exc_info=True,
+            )
+            return None
 
     @staticmethod
     def _assistant_message_to_dict(message: object) -> dict[str, object]:
@@ -174,11 +328,6 @@ class LLMService:
         if not agent_api_key:
             raise AgentNoApiKeyError("Agent has no OpenRouter API key configured.")
 
-        llm_client = AsyncOpenAI(
-            base_url=self.settings.llm_base_url,
-            api_key=agent_api_key,
-        )
-
         conversation_session = await self.session_service.get_or_create_session(
             db_session,
             agent_id=agent_id,
@@ -187,17 +336,38 @@ class LLMService:
         )
         session_id = conversation_session.id
 
+        if self.settings.privacy_filter_enabled:
+            llm_client = PrivacyProxyLLMClient(
+                privacy_filter_base_url=self.settings.privacy_filter_base_url,
+                internal_api_token=self.settings.internal_api_token,
+                privacy_filter_timeout_seconds=self.settings.privacy_filter_timeout_seconds,
+                llm_base_url=self.settings.llm_base_url,
+                agent_api_key=agent_api_key,
+                privacy_session_id=session_id,
+            )
+        else:
+            llm_client = AsyncOpenAI(
+                base_url=self.settings.llm_base_url,
+                api_key=agent_api_key,
+            )
+
         credentials_records = await self.agent_service.get_credentials(db_session, agent_id)
         history = await self.history_service.load_history(session_id)
 
         chat_context = ChatContext(channel=channel, external_client_id=external_client_id)
         system_prompt = self.prompt_builder.build(agent, chat_context)
+        knowledge_base_message = await self._build_knowledge_base_message(
+            agent=agent,
+            query=user_message,
+        )
 
         messages: list[dict[str, object]] = [
             {"role": "system", "content": system_prompt},
-            *history,
-            {"role": "user", "content": user_message},
         ]
+        if knowledge_base_message:
+            messages.append({"role": "system", "content": knowledge_base_message})
+        messages.extend(history)
+        messages.append({"role": "user", "content": user_message})
 
         executed_calls: set[str] = set()
 
@@ -235,6 +405,7 @@ class LLMService:
                     response = await llm_client.chat.completions.create(
                         model=agent.model_name or self.settings.llm_default_model,
                         temperature=agent.temperature,
+                        max_tokens=self.settings.llm_max_tokens,
                         messages=messages,
                         tools=openai_tools or None,
                         parallel_tool_calls=False,
@@ -256,9 +427,19 @@ class LLMService:
                 except APIError as exc:
                     logger.error("OpenRouter error for agent %s: %s", agent.id, exc)
                     raise ChatProcessingError(f"LLM error: {exc.message}")
+                except PrivacyProxyAuthenticationError:
+                    await self._deactivate_agent(agent, db_session, "OpenRouter API key invalid or revoked")
+                    raise AgentApiKeyInvalidError("OpenRouter key is invalid. Agent deactivated.")
+                except PrivacyProxyInsufficientFundsError:
+                    await self._deactivate_agent(agent, db_session, "Insufficient funds on OpenRouter")
+                    raise AgentInsufficientFundsError("No funds on OpenRouter. Agent deactivated.")
+                except PrivacyProxyRateLimitError:
+                    raise AgentRateLimitError("Rate limit exceeded. Try again later.")
+                except PrivacyProxyConnectionError as exc:
+                    raise ChatProcessingError(str(exc))
 
                 message = response.choices[0].message
-                if not message.tool_calls:
+                if not getattr(message, "tool_calls", None):
                     raw_answer = message.content or "I processed your request."
                     clean_answer = self._strip_thinking_tags(raw_answer)
                     if not clean_answer:
