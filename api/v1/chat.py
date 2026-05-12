@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.dependencies import get_db
 from schemas.chat import ChatRequest, ChatResponse
+from services.format_service import FormatService
 from services.llm_service import (
     AgentApiKeyInvalidError,
     AgentInactiveError,
@@ -70,4 +71,6 @@ async def create_chat_completion(payload: ChatRequest, db: DbSession) -> ChatRes
             detail=str(exc),
         ) from exc
 
-    return ChatResponse(session_id=result.session_id, answer=result.answer)
+    formatted_answer = FormatService.format_message(result.answer, payload.channel)
+
+    return ChatResponse(session_id=result.session_id, answer=formatted_answer)

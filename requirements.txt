@@ -18,3 +18,4 @@ fakeredis
 testcontainers[postgresql]
 pytz
 cryptography>=41.0.0
+markdown

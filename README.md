@@ -100,6 +100,7 @@ ai-agent-service/
    - OpenAI-compatible tools, собранные из MCP
 7. Если модель вернула `tool_calls`, выполнить их через `MCPManager.call_tool()` и сделать следующий виток цикла.
 8. Когда модель возвращает обычный текст, сохранить новый `user/assistant` turn в Redis и вернуть ответ клиенту.
+9. Перед отдачей ответа клиенту `FormatService` преобразует сырой Markdown в формат, совместимый с `channel` (HTML для сайтов/Telegram, Plain Text для Instagram).
 
 ## Переменные окружения
 
