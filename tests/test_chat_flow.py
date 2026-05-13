@@ -21,6 +21,37 @@ from tests.fakes import (
 FAKE_OPENROUTER_KEY = "sk-or-v1-test-key-for-unit-tests"
 
 
+class FakeKnowledgeBaseClient:
+    contexts: list[object] = []
+    error: Exception | None = None
+    calls: list[dict[str, object]] = []
+
+    def __init__(self, **kwargs) -> None:
+        self.kwargs = kwargs
+
+    async def retrieve_context(self, *, owner_id, agent_id, query):
+        self.__class__.calls.append(
+            {
+                "owner_id": owner_id,
+                "agent_id": agent_id,
+                "query": query,
+                "kwargs": self.kwargs,
+            }
+        )
+        if self.__class__.error is not None:
+            raise self.__class__.error
+        return type("KnowledgeBaseResponse", (), {"contexts": self.__class__.contexts, "total": len(self.__class__.contexts)})()
+
+    async def aclose(self) -> None:
+        return None
+
+    @classmethod
+    def reset(cls) -> None:
+        cls.contexts = []
+        cls.error = None
+        cls.calls = []
+
+
 def build_agent_payload() -> dict[str, object]:
     return {
         "name": "Support agent",
@@ -129,6 +160,337 @@ async def test_chat_creates_and_reuses_session_key(api_client, db_session, llm_c
 
 
 @pytest.mark.integration
+async def test_chat_uses_privacy_proxy_when_enabled(
+    api_client,
+    db_session,
+    fake_redis,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured_requests: list[dict[str, object]] = []
+
+    class FakeResponse:
+        status_code = 200
+
+        def json(self):
+            return {
+                "id": "chatcmpl-privacy",
+                "object": "chat.completion",
+                "model": "google/gemini-2.5-flash",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": "Privacy answer",
+                        },
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {"prompt_tokens": 4, "completion_tokens": 2, "total_tokens": 6},
+                "privacy": {
+                    "privacy_session_id": "unused",
+                    "replacements_count": 1,
+                    "restored_items_count": 1,
+                    "detector_model": "openai/privacy-filter",
+                },
+            }
+
+    class FakeAsyncClient:
+        def __init__(self, timeout):
+            self.timeout = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def post(self, url, headers, json):
+            captured_requests.append({"url": url, "headers": headers, "json": json})
+            return FakeResponse()
+
+    def fail_direct_openai(**kwargs):
+        raise AssertionError("Direct OpenRouter client must not be created in privacy mode.")
+
+    monkeypatch.setattr(llm_service_module, "AsyncOpenAI", fail_direct_openai)
+    monkeypatch.setattr(llm_service_module.httpx, "AsyncClient", FakeAsyncClient)
+
+    from api.v1.chat import llm_service
+
+    monkeypatch.setattr(llm_service.settings, "privacy_filter_enabled", True)
+    monkeypatch.setattr(llm_service.settings, "privacy_filter_base_url", "http://privacy-filter-service:8000")
+    monkeypatch.setattr(llm_service.settings, "internal_api_token", "service-token")
+    monkeypatch.setattr(llm_service.settings, "privacy_filter_timeout_seconds", 5.0)
+
+    agent = await create_agent(api_client, db_session_factory=db_session)
+
+    response = await api_client.post(
+        "/v1/chat/completions",
+        json={
+            "agent_id": agent["id"],
+            "external_client_id": "privacy-user",
+            "channel": "telegram",
+            "message": "Hello with PII",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["answer"] == "Privacy answer"
+    assert captured_requests
+    request = captured_requests[0]
+    assert request["url"] == "http://privacy-filter-service:8000/api/v1/privacy-filter/chat/completions"
+    assert request["headers"]["Authorization"] == "Bearer service-token"
+    assert request["json"]["upstream"]["api_key"] == FAKE_OPENROUTER_KEY
+    assert request["json"]["privacy_session_id"] == response.json()["session_id"]
+    assert request["json"]["chat_completion"]["messages"][-1]["content"] == "Hello with PII"
+
+
+@pytest.mark.integration
+async def test_chat_privacy_proxy_unavailable_fails_closed(
+    api_client,
+    db_session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FailingAsyncClient:
+        def __init__(self, timeout):
+            self.timeout = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def post(self, url, headers, json):
+            raise llm_service_module.httpx.ConnectError("proxy unavailable")
+
+    def fail_direct_openai(**kwargs):
+        raise AssertionError("Direct OpenRouter fallback must not be used in privacy mode.")
+
+    monkeypatch.setattr(llm_service_module, "AsyncOpenAI", fail_direct_openai)
+    monkeypatch.setattr(llm_service_module.httpx, "AsyncClient", FailingAsyncClient)
+
+    from api.v1.chat import llm_service
+
+    monkeypatch.setattr(llm_service.settings, "privacy_filter_enabled", True)
+    monkeypatch.setattr(llm_service.settings, "privacy_filter_base_url", "http://privacy-filter-service:8000")
+    monkeypatch.setattr(llm_service.settings, "internal_api_token", "service-token")
+    monkeypatch.setattr(llm_service.settings, "privacy_filter_timeout_seconds", 5.0)
+
+    agent = await create_agent(api_client, db_session_factory=db_session)
+
+    response = await api_client.post(
+        "/v1/chat/completions",
+        json={
+            "agent_id": agent["id"],
+            "external_client_id": "privacy-user-down",
+            "channel": "telegram",
+            "message": "Hello with PII",
+        },
+    )
+
+    assert response.status_code == 422
+    assert response.json() == {"detail": "Cannot connect to privacy filter service."}
+
+
+@pytest.mark.integration
+async def test_chat_privacy_proxy_preserves_mcp_tool_loop(
+    api_client,
+    db_session,
+    mcp_controller,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured_requests: list[dict[str, object]] = []
+    responses = [
+        {
+            "id": "chatcmpl-tool-1",
+            "object": "chat.completion",
+            "model": "google/gemini-2.5-flash",
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": "",
+                        "tool_calls": [
+                            {
+                                "id": "tool-1",
+                                "type": "function",
+                                "function": {
+                                    "name": "find_contact",
+                                    "arguments": "{\"phone\":\"+375291112233\"}",
+                                },
+                            }
+                        ],
+                    },
+                    "finish_reason": "tool_calls",
+                }
+            ],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 4, "total_tokens": 14},
+            "privacy": {
+                "privacy_session_id": "unused",
+                "replacements_count": 1,
+                "restored_items_count": 1,
+                "detector_model": "openai/privacy-filter",
+            },
+        },
+        {
+            "id": "chatcmpl-tool-2",
+            "object": "chat.completion",
+            "model": "google/gemini-2.5-flash",
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {"role": "assistant", "content": "Contact found"},
+                    "finish_reason": "stop",
+                }
+            ],
+            "usage": {"prompt_tokens": 14, "completion_tokens": 2, "total_tokens": 16},
+            "privacy": {
+                "privacy_session_id": "unused",
+                "replacements_count": 0,
+                "restored_items_count": 0,
+                "detector_model": "openai/privacy-filter",
+            },
+        },
+    ]
+
+    class FakeResponse:
+        status_code = 200
+
+        def __init__(self, payload):
+            self._payload = payload
+
+        def json(self):
+            return self._payload
+
+    class FakeAsyncClient:
+        def __init__(self, timeout):
+            self.timeout = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def post(self, url, headers, json):
+            captured_requests.append({"url": url, "headers": headers, "json": json})
+            return FakeResponse(responses.pop(0))
+
+    mcp_controller.tools_by_service["bitrix"] = [
+        {
+            "type": "function",
+            "function": {
+                "name": "find_contact",
+                "description": "Find a contact",
+                "parameters": {"type": "object", "properties": {"phone": {"type": "string"}}},
+            },
+        }
+    ]
+    mcp_controller.tool_results["find_contact"] = build_tool_result('{"contact_id": 42}')
+
+    def fail_direct_openai(**kwargs):
+        raise AssertionError("Direct OpenRouter fallback must not be used in privacy mode.")
+
+    monkeypatch.setattr(llm_service_module, "AsyncOpenAI", fail_direct_openai)
+    monkeypatch.setattr(llm_service_module.httpx, "AsyncClient", FakeAsyncClient)
+
+    from api.v1.chat import llm_service
+
+    monkeypatch.setattr(llm_service.settings, "privacy_filter_enabled", True)
+    monkeypatch.setattr(llm_service.settings, "privacy_filter_base_url", "http://privacy-filter-service:8000")
+    monkeypatch.setattr(llm_service.settings, "internal_api_token", "service-token")
+    monkeypatch.setattr(llm_service.settings, "privacy_filter_timeout_seconds", 5.0)
+
+    agent = await create_agent(api_client, db_session_factory=db_session)
+    await store_credentials(
+        api_client,
+        agent["id"],
+        "bitrix",
+        {"webhook_url": "https://example.bitrix/rest"},
+        owner_id=UUID(agent["user_id"]),
+    )
+
+    response = await api_client.post(
+        "/v1/chat/completions",
+        json={
+            "agent_id": agent["id"],
+            "external_client_id": "privacy-tool-user",
+            "channel": "telegram",
+            "message": "Find +375291112233",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["answer"] == "Contact found"
+    assert mcp_controller.tool_calls == [
+        {
+            "service_name": "bitrix",
+            "tool_name": "find_contact",
+            "tool_args": {"phone": "+375291112233"},
+        }
+    ]
+    assert len(captured_requests) == 2
+    assert captured_requests[1]["json"]["chat_completion"]["messages"][-1]["role"] == "tool"
+
+
+@pytest.mark.integration
+async def test_chat_privacy_proxy_insufficient_funds_deactivates_agent(
+    api_client,
+    db_session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeResponse:
+        status_code = 402
+
+        def json(self):
+            return {"detail": "LLM service returned an error."}
+
+    class FakeAsyncClient:
+        def __init__(self, timeout):
+            self.timeout = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def post(self, url, headers, json):
+            return FakeResponse()
+
+    monkeypatch.setattr(llm_service_module.httpx, "AsyncClient", FakeAsyncClient)
+
+    from api.v1.chat import llm_service
+
+    monkeypatch.setattr(llm_service.settings, "privacy_filter_enabled", True)
+    monkeypatch.setattr(llm_service.settings, "privacy_filter_base_url", "http://privacy-filter-service:8000")
+    monkeypatch.setattr(llm_service.settings, "internal_api_token", "service-token")
+    monkeypatch.setattr(llm_service.settings, "privacy_filter_timeout_seconds", 5.0)
+
+    agent = await create_agent(api_client, db_session_factory=db_session)
+
+    response = await api_client.post(
+        "/v1/chat/completions",
+        json={
+            "agent_id": agent["id"],
+            "external_client_id": "privacy-funds-user",
+            "channel": "telegram",
+            "message": "Hello",
+        },
+    )
+
+    assert response.status_code == 402
+    assert response.json() == {"detail": "No funds on OpenRouter. Agent deactivated."}
+
+    async with db_session() as session:
+        stored_agent = await session.get(AgentTemplate, UUID(agent["id"]))
+        assert stored_agent is not None
+        assert stored_agent.is_active is False
+
+
+@pytest.mark.integration
 async def test_chat_creates_distinct_sessions_for_different_channel_and_agent(
     api_client,
     db_session,
@@ -231,6 +593,182 @@ async def test_chat_uses_existing_redis_history_and_strips_thinking_tags(
 
 
 @pytest.mark.integration
+async def test_chat_knowledge_base_disabled_preserves_existing_message_order(
+    api_client,
+    db_session,
+    llm_controller,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    FakeKnowledgeBaseClient.reset()
+    monkeypatch.setattr(llm_service_module, "KnowledgeBaseClient", FakeKnowledgeBaseClient, raising=False)
+
+    from api.v1.chat import llm_service
+
+    monkeypatch.setattr(llm_service.settings, "knowledge_base_enabled", False, raising=False)
+    llm_controller.chat.completions.queue(build_llm_response(content="No KB"))
+    agent = await create_agent(api_client, db_session_factory=db_session)
+
+    response = await api_client.post(
+        "/v1/chat/completions",
+        json={
+            "agent_id": agent["id"],
+            "external_client_id": "kb-disabled-user",
+            "channel": "telegram",
+            "message": "Hello",
+        },
+    )
+
+    assert response.status_code == 200
+    assert FakeKnowledgeBaseClient.calls == []
+    assert llm_controller.chat.completions.calls[0]["messages"] == [
+        {"role": "system", "content": "Be concise and helpful."},
+        {"role": "user", "content": "Hello"},
+    ]
+    assert llm_controller.chat.completions.calls[0]["max_tokens"] == 1024
+
+
+@pytest.mark.integration
+async def test_chat_inserts_knowledge_base_context_after_system_prompt(
+    api_client,
+    db_session,
+    llm_controller,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from services.knowledge_base_client import KnowledgeBaseContext
+
+    FakeKnowledgeBaseClient.reset()
+    FakeKnowledgeBaseClient.contexts = [
+        KnowledgeBaseContext(
+            chunk_id=uuid4(),
+            document_id=uuid4(),
+            knowledge_base_id=uuid4(),
+            content="Warranty is 12 months.",
+            score=0.88,
+            source_filename="faq.pdf",
+            chunk_index=2,
+            metadata={"raw_extra": "must-not-leak"},
+        )
+    ]
+    monkeypatch.setattr(llm_service_module, "KnowledgeBaseClient", FakeKnowledgeBaseClient, raising=False)
+
+    from api.v1.chat import llm_service
+
+    monkeypatch.setattr(llm_service.settings, "knowledge_base_enabled", True, raising=False)
+    monkeypatch.setattr(llm_service.settings, "knowledge_base_service_url", "http://knowledge-base-service:8000", raising=False)
+    monkeypatch.setattr(llm_service.settings, "knowledge_base_timeout_seconds", 2.0, raising=False)
+    monkeypatch.setattr(llm_service.settings, "knowledge_base_max_chars_per_chunk", 1000, raising=False)
+    monkeypatch.setattr(llm_service.settings, "knowledge_base_max_total_context_chars", 3000, raising=False)
+    monkeypatch.setattr(llm_service.settings, "internal_api_token", "service-token")
+
+    llm_controller.chat.completions.queue(build_llm_response(content="KB answer"))
+    agent = await create_agent(api_client, db_session_factory=db_session)
+
+    response = await api_client.post(
+        "/v1/chat/completions",
+        json={
+            "agent_id": agent["id"],
+            "external_client_id": "kb-user",
+            "channel": "telegram",
+            "message": "What is warranty?",
+        },
+    )
+
+    assert response.status_code == 200
+    assert FakeKnowledgeBaseClient.calls[0]["owner_id"] == agent["user_id"]
+    assert FakeKnowledgeBaseClient.calls[0]["agent_id"] == UUID(agent["id"])
+    assert FakeKnowledgeBaseClient.calls[0]["query"] == "What is warranty?"
+    messages = llm_controller.chat.completions.calls[0]["messages"]
+    assert messages[0] == {"role": "system", "content": "Be concise and helpful."}
+    assert messages[1]["role"] == "system"
+    assert "<knowledge_base_context>" in messages[1]["content"]
+    assert '[1] source="faq.pdf" chunk_index=2 score=0.88' in messages[1]["content"]
+    assert "Warranty is 12 months." in messages[1]["content"]
+    assert "must-not-leak" not in messages[1]["content"]
+    assert messages[2] == {"role": "user", "content": "What is warranty?"}
+
+
+@pytest.mark.integration
+async def test_chat_omits_knowledge_base_message_for_empty_contexts(
+    api_client,
+    db_session,
+    llm_controller,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    FakeKnowledgeBaseClient.reset()
+    monkeypatch.setattr(llm_service_module, "KnowledgeBaseClient", FakeKnowledgeBaseClient, raising=False)
+
+    from api.v1.chat import llm_service
+
+    monkeypatch.setattr(llm_service.settings, "knowledge_base_enabled", True, raising=False)
+    monkeypatch.setattr(llm_service.settings, "knowledge_base_service_url", "http://knowledge-base-service:8000", raising=False)
+    monkeypatch.setattr(llm_service.settings, "knowledge_base_timeout_seconds", 2.0, raising=False)
+    monkeypatch.setattr(llm_service.settings, "knowledge_base_max_chars_per_chunk", 1000, raising=False)
+    monkeypatch.setattr(llm_service.settings, "knowledge_base_max_total_context_chars", 3000, raising=False)
+    monkeypatch.setattr(llm_service.settings, "internal_api_token", "service-token")
+
+    llm_controller.chat.completions.queue(build_llm_response(content="No contexts"))
+    agent = await create_agent(api_client, db_session_factory=db_session)
+
+    response = await api_client.post(
+        "/v1/chat/completions",
+        json={
+            "agent_id": agent["id"],
+            "external_client_id": "kb-empty-user",
+            "channel": "telegram",
+            "message": "Unknown",
+        },
+    )
+
+    assert response.status_code == 200
+    assert len(FakeKnowledgeBaseClient.calls) == 1
+    assert llm_controller.chat.completions.calls[0]["messages"] == [
+        {"role": "system", "content": "Be concise and helpful."},
+        {"role": "user", "content": "Unknown"},
+    ]
+
+
+@pytest.mark.integration
+async def test_chat_knowledge_base_failures_are_fail_open(
+    api_client,
+    db_session,
+    llm_controller,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    FakeKnowledgeBaseClient.reset()
+    FakeKnowledgeBaseClient.error = RuntimeError("kb unavailable")
+    monkeypatch.setattr(llm_service_module, "KnowledgeBaseClient", FakeKnowledgeBaseClient, raising=False)
+
+    from api.v1.chat import llm_service
+
+    monkeypatch.setattr(llm_service.settings, "knowledge_base_enabled", True, raising=False)
+    monkeypatch.setattr(llm_service.settings, "knowledge_base_service_url", "http://knowledge-base-service:8000", raising=False)
+    monkeypatch.setattr(llm_service.settings, "knowledge_base_timeout_seconds", 2.0, raising=False)
+    monkeypatch.setattr(llm_service.settings, "knowledge_base_max_chars_per_chunk", 1000, raising=False)
+    monkeypatch.setattr(llm_service.settings, "knowledge_base_max_total_context_chars", 3000, raising=False)
+    monkeypatch.setattr(llm_service.settings, "internal_api_token", "service-token")
+
+    llm_controller.chat.completions.queue(build_llm_response(content="Fallback without KB"))
+    agent = await create_agent(api_client, db_session_factory=db_session)
+
+    response = await api_client.post(
+        "/v1/chat/completions",
+        json={
+            "agent_id": agent["id"],
+            "external_client_id": "kb-fail-user",
+            "channel": "telegram",
+            "message": "Hello",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["answer"] == "Fallback without KB"
+    assert llm_controller.chat.completions.calls[0]["messages"] == [
+        {"role": "system", "content": "Be concise and helpful."},
+        {"role": "user", "content": "Hello"},
+    ]
+
+
+@pytest.mark.integration
 async def test_chat_falls_back_to_default_answer_when_model_returns_empty_content(
     api_client,
     db_session,
@@ -308,6 +846,8 @@ async def test_chat_with_tool_call_executes_mcp_and_saves_only_user_and_assistan
     ]
     first_call = llm_controller.chat.completions.calls[0]
     second_call = llm_controller.chat.completions.calls[1]
+    assert first_call["max_tokens"] == 1024
+    assert second_call["max_tokens"] == 1024
     assert first_call["tools"] == mcp_controller.tools_by_service["bitrix"]
     assert second_call["messages"][-1] == {
         "role": "tool",

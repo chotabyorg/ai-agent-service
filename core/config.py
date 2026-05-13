@@ -40,12 +40,23 @@ class Settings(BaseSettings):
     llm_base_url: str = Field(default="https://openrouter.ai/api/v1")
     llm_default_model: str = Field(default="google/gemini-2.5-flash")
     llm_default_temperature: float = Field(default=0.7)
+    llm_max_tokens: int = Field(default=1024)
     llm_http_referer: str | None = Field(default=None)
     llm_app_title: str | None = Field(default=None)
+
+    privacy_filter_enabled: bool = Field(default=False)
+    privacy_filter_base_url: str = Field(default="http://privacy-filter-service:8000")
+    privacy_filter_timeout_seconds: float = Field(default=30.0)
 
     encryption_key: SecretStr = Field(default="")
 
     internal_api_token: str = Field(default="")
+
+    knowledge_base_enabled: bool = Field(default=False)
+    knowledge_base_service_url: str = Field(default="http://knowledge-base-service:8000")
+    knowledge_base_timeout_seconds: float = Field(default=2.0)
+    knowledge_base_max_chars_per_chunk: int = Field(default=1000)
+    knowledge_base_max_total_context_chars: int = Field(default=3000)
 
     subscription_service_url: str = Field(default="")
     subscription_check_enabled: bool = Field(default=False)
