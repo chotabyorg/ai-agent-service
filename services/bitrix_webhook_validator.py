@@ -68,7 +68,7 @@ def _normalize_webhook_url(webhook_url: str, portal_url: str) -> str | None:
         return None
     if parsed.scheme.lower() != "https":
         return None
-    if parsed.query or parsed.fragment:
+    if parsed.fragment:
         return None
     if parsed.port not in (None, 443):
         return None
@@ -134,9 +134,22 @@ def _classify_response(status_code: int, error_code: str) -> BitrixCredentialsVa
     return BitrixCredentialsValidationStatus.ERROR
 
 
-async def _probe_bitrix_endpoint(url: str) -> BitrixCredentialsValidationStatus:
+async def _probe_bitrix_endpoint(
+    url: str,
+    client: httpx.AsyncClient | None = None,
+) -> BitrixCredentialsValidationStatus:
     try:
-        async with httpx.AsyncClient(timeout=10.0, follow_redirects=False) as client:
+        if client is None:
+            async with httpx.AsyncClient(timeout=10.0, follow_redirects=False) as local_client:
+                response = await local_client.post(
+                    url,
+                    json={},
+                    headers={
+                        "Content-Type": "application/json",
+                        "Accept": "application/json",
+                    },
+                )
+        else:
             response = await client.post(
                 url,
                 json={},
@@ -191,57 +204,68 @@ async def validate_bitrix_credentials(credentials: dict[str, object]) -> BitrixC
             details="Bitrix portal host must resolve to public IP addresses.",
         )
 
-    portal_probe_status = await _probe_bitrix_endpoint(f"{normalized_portal_url}/rest/server.time")
-    if portal_probe_status not in {
-        BitrixCredentialsValidationStatus.VALID,
-        BitrixCredentialsValidationStatus.INVALID_CREDENTIALS,
-        BitrixCredentialsValidationStatus.ACCESS_DENIED,
-    }:
-        details = "Bitrix portal is not reachable via REST API."
-        if portal_probe_status == BitrixCredentialsValidationStatus.RATE_LIMITED:
-            details = "Bitrix REST API is rate-limited or temporarily blocked."
-        return BitrixCredentialsValidationResult(status=portal_probe_status, details=details)
-
-    normalized_credentials: dict[str, str] = {"portal_url": normalized_portal_url}
-
-    if webhook_candidate is not None:
-        if not webhook_candidate.strip():
-            return BitrixCredentialsValidationResult(
-                status=BitrixCredentialsValidationStatus.INVALID_WEBHOOK,
-                details="webhook_url must be a non-empty string when provided.",
-            )
-
-        # If webhook value is equal to portal URL, treat it as portal-only config.
-        if _normalize_portal_url(webhook_candidate):
-            return BitrixCredentialsValidationResult(
-                status=BitrixCredentialsValidationStatus.VALID,
-                normalized_credentials=normalized_credentials,
-            )
-
-        normalized_webhook = _normalize_webhook_url(webhook_candidate, normalized_portal_url)
-        if not normalized_webhook:
-            return BitrixCredentialsValidationResult(
-                status=BitrixCredentialsValidationStatus.INVALID_WEBHOOK,
-                details="webhook_url must match https://<portal>.bitrix24.<tld>/rest/<user_id>/<token>/.",
-            )
-
-        webhook_probe_status = await _probe_bitrix_endpoint(f"{normalized_webhook}server.time")
-        if webhook_probe_status != BitrixCredentialsValidationStatus.VALID:
-            if webhook_probe_status in {
-                BitrixCredentialsValidationStatus.INVALID_CREDENTIALS,
-                BitrixCredentialsValidationStatus.ACCESS_DENIED,
-            }:
-                details = "Webhook is invalid or has insufficient permissions."
-                return BitrixCredentialsValidationResult(status=webhook_probe_status, details=details)
-            if webhook_probe_status == BitrixCredentialsValidationStatus.RATE_LIMITED:
+    async with httpx.AsyncClient(timeout=10.0, follow_redirects=False) as client:
+        portal_probe_status = await _probe_bitrix_endpoint(
+            f"{normalized_portal_url}/rest/server.time",
+            client=client,
+        )
+        if portal_probe_status not in {
+            BitrixCredentialsValidationStatus.VALID,
+            BitrixCredentialsValidationStatus.INVALID_CREDENTIALS,
+            BitrixCredentialsValidationStatus.ACCESS_DENIED,
+        }:
+            details = "Bitrix portal is not reachable via REST API."
+            if portal_probe_status == BitrixCredentialsValidationStatus.RATE_LIMITED:
                 details = "Bitrix REST API is rate-limited or temporarily blocked."
-                return BitrixCredentialsValidationResult(status=webhook_probe_status, details=details)
-            return BitrixCredentialsValidationResult(
-                status=BitrixCredentialsValidationStatus.PORTAL_UNREACHABLE,
-                details="Bitrix webhook endpoint is not reachable.",
-            )
+            return BitrixCredentialsValidationResult(status=portal_probe_status, details=details)
 
-        normalized_credentials["webhook_url"] = normalized_webhook
+        normalized_credentials: dict[str, str] = {"portal_url": normalized_portal_url}
+
+        if webhook_candidate is not None:
+            if not webhook_candidate.strip():
+                return BitrixCredentialsValidationResult(
+                    status=BitrixCredentialsValidationStatus.INVALID_WEBHOOK,
+                    details="webhook_url must be a non-empty string when provided.",
+                )
+
+            # If webhook value is equal to portal URL, treat it as portal-only config.
+            if _normalize_portal_url(webhook_candidate):
+                return BitrixCredentialsValidationResult(
+                    status=BitrixCredentialsValidationStatus.VALID,
+                    normalized_credentials=normalized_credentials,
+                )
+
+            normalized_webhook = _normalize_webhook_url(webhook_candidate, normalized_portal_url)
+            if not normalized_webhook:
+                return BitrixCredentialsValidationResult(
+                    status=BitrixCredentialsValidationStatus.INVALID_WEBHOOK,
+                    details=(
+                        "webhook_url must match "
+                        "https://<portal>.bitrix24.<tld>/rest/<user_id>/<token>/ "
+                        "(method suffix and query params are allowed)."
+                    ),
+                )
+
+            webhook_probe_status = await _probe_bitrix_endpoint(
+                f"{normalized_webhook}server.time",
+                client=client,
+            )
+            if webhook_probe_status != BitrixCredentialsValidationStatus.VALID:
+                if webhook_probe_status in {
+                    BitrixCredentialsValidationStatus.INVALID_CREDENTIALS,
+                    BitrixCredentialsValidationStatus.ACCESS_DENIED,
+                }:
+                    details = "Webhook is invalid or has insufficient permissions."
+                    return BitrixCredentialsValidationResult(status=webhook_probe_status, details=details)
+                if webhook_probe_status == BitrixCredentialsValidationStatus.RATE_LIMITED:
+                    details = "Bitrix REST API is rate-limited or temporarily blocked."
+                    return BitrixCredentialsValidationResult(status=webhook_probe_status, details=details)
+                return BitrixCredentialsValidationResult(
+                    status=BitrixCredentialsValidationStatus.PORTAL_UNREACHABLE,
+                    details="Bitrix webhook endpoint is not reachable.",
+                )
+
+            normalized_credentials["webhook_url"] = normalized_webhook
 
     return BitrixCredentialsValidationResult(
         status=BitrixCredentialsValidationStatus.VALID,

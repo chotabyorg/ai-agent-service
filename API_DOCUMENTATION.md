@@ -29,6 +29,7 @@
 - `webhook_url` опционален.
 - Если `webhook_url` передан, он должен быть в формате:
   `https://<portal>.bitrix24.<tld>/rest/<user_id>/<token>/`
+  (допускаются method suffix и query params, они будут отброшены при нормализации),
   и дополнительно проверяется через `POST {webhook_url}server.time`.
 - В текущем MCP runtime для фактического вызова Bitrix tools нужен валидный `webhook_url`.
 

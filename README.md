@@ -297,7 +297,7 @@ curl -X PUT http://localhost:8000/v1/agents/11111111-1111-1111-1111-111111111111
 
 - `portal_url` обязателен и должен быть в формате `https://<portal>.bitrix24.<tld>`.
 - До сохранения выполняется проверка доступности портала через `POST {portal_url}/rest/server.time`.
-- `webhook_url` опционален. Если передан, проверяется формат `https://<portal>.bitrix24.<tld>/rest/<user_id>/<token>/` и валидность через `server.time`.
+- `webhook_url` опционален. Если передан, нормализуется к `https://<portal>.bitrix24.<tld>/rest/<user_id>/<token>/`; допускаются URL с method suffix и query params (например `.../crm.contact.get.json?ID=42`), после чего проверяется валидность через `server.time`.
 - Для фактического выполнения Bitrix MCP tools в текущей реализации нужен валидный `webhook_url` (он пробрасывается в `B24_WEBHOOK_URL`).
 - При `4xx` проблемах валидации API возвращает `422`, при проблемах апстрима (`rate limit`, перегрузка) — `502`.
 

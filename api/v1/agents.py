@@ -268,7 +268,11 @@ async def upsert_agent_credentials(
             **normalized_credentials,
         }
 
-    credentials = await agent_service.upsert_credentials(db, user_id, agent_id, payload)
+    try:
+        credentials = await agent_service.upsert_credentials(db, user_id, agent_id, payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
     if credentials is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
