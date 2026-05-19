@@ -23,15 +23,14 @@
 
 ### Bitrix validation rules
 
-- `portal_url` обязателен.
-- Формат `portal_url`: `https://<portal>.bitrix24.<tld>`.
-- До сохранения выполняется ping REST API: `POST {portal_url}/rest/server.time`.
-- `webhook_url` опционален.
+- Сначала проверяется владение агентом: если агент не существует или не принадлежит пользователю, API возвращает `404 Agent not found` без внешней Bitrix валидации.
+- `webhook_url` обязателен для текущего runtime (`B24_WEBHOOK_URL`).
 - Если `webhook_url` передан, он должен быть в формате:
   `https://<portal>.bitrix24.<tld>/rest/<user_id>/<token>/`
   (допускаются method suffix и query params, они будут отброшены при нормализации),
   и дополнительно проверяется через `POST {webhook_url}server.time`.
-- В текущем MCP runtime для фактического вызова Bitrix tools нужен валидный `webhook_url`.
+- `portal_url` опционален, но если передан, должен быть формата `https://<portal>.bitrix24.<tld>`.
+- До сохранения выполняется ping REST API через `server.time`.
 
 ### Responses
 
@@ -46,7 +45,7 @@
 {
   "service_name": "bitrix",
   "credentials": {
-    "portal_url": "https://your-portal.bitrix24.com"
+    "webhook_url": "https://your-portal.bitrix24.com/rest/1/secret_token/"
   }
 }
 ```
@@ -63,7 +62,7 @@
     "service_name": "bitrix",
     "display_name": "Bitrix24 CRM",
     "description": "Интеграция с вашей CRM Bitrix24",
-    "required_keys": ["portal_url"]
+    "required_keys": ["webhook_url"]
   }
 ]
 ```

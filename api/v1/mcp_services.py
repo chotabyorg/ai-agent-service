@@ -12,7 +12,7 @@ SUPPORTED_MCP_SERVICES = [
         service_name="bitrix",
         display_name="Bitrix24 CRM",
         description="Интеграция с вашей CRM Bitrix24",
-        required_keys=["portal_url"],
+        required_keys=["webhook_url"],
     )
 ]
 

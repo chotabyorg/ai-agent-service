@@ -368,17 +368,17 @@ curl -X PUT http://localhost:8000/v1/agents/11111111-1111-1111-1111-111111111111
 {
   "service_name": "bitrix",
   "credentials": {
-    "portal_url": "https://your-portal.bitrix24.by"
+    "webhook_url": "https://your-portal.bitrix24.by/rest/1/secret/"
   }
 }
 ```
 
 Правила валидации Bitrix credentials на бэке:
 
-- `portal_url` обязателен и должен быть в формате `https://<portal>.bitrix24.<tld>`.
-- До сохранения выполняется проверка доступности портала через `POST {portal_url}/rest/server.time`.
-- `webhook_url` опционален. Если передан, нормализуется к `https://<portal>.bitrix24.<tld>/rest/<user_id>/<token>/`; допускаются URL с method suffix и query params (например `.../crm.contact.get.json?ID=42`), после чего проверяется валидность через `server.time`.
-- Для фактического выполнения Bitrix MCP tools в текущей реализации нужен валидный `webhook_url` (он пробрасывается в `B24_WEBHOOK_URL`).
+- `webhook_url` обязателен, потому что текущий Bitrix MCP runtime строится на `B24_WEBHOOK_URL`.
+- `webhook_url` нормализуется к `https://<portal>.bitrix24.<tld>/rest/<user_id>/<token>/`; допускаются URL с method suffix и query params (например `.../crm.contact.get.json?ID=42`).
+- Если `portal_url` передан, он должен быть в формате `https://<portal>.bitrix24.<tld>`.
+- До сохранения выполняется проверка доступности Bitrix REST endpoint через `server.time` для портала/вебхука.
 - При `4xx` проблемах валидации API возвращает `422`, при проблемах апстрима (`rate limit`, перегрузка) — `502`.
 
 Пример discovery-запроса доступных интеграций:

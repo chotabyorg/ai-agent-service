@@ -239,7 +239,21 @@ async def upsert_agent_credentials(
     db: DbSession,
     user_id: UserIdHeader,
 ) -> AgentCredentialsResponse:
+    agent = await agent_service.get_agent_by_id(db, agent_id, user_id=user_id)
+    if agent is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Agent not found",
+        )
+
     if payload.service_name.strip().lower() == "bitrix":
+        webhook_raw = payload.credentials.get("webhook_url")
+        if not isinstance(webhook_raw, str) or not webhook_raw.strip():
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="webhook_url is required for Bitrix credentials.",
+            )
+
         validation = await validate_bitrix_credentials(payload.credentials)
         if validation.status in {
             BitrixCredentialsValidationStatus.INVALID_FORMAT,
@@ -267,6 +281,11 @@ async def upsert_agent_credentials(
             **payload.credentials,
             **normalized_credentials,
         }
+        if not isinstance(payload.credentials.get("webhook_url"), str):
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="webhook_url is required for Bitrix credentials.",
+            )
 
     try:
         credentials = await agent_service.upsert_credentials(db, user_id, agent_id, payload)
