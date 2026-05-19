@@ -990,16 +990,13 @@ async def test_chat_skips_bitrix_credentials_without_webhook_url(
     mcp_controller.enter_errors["bitrix"] = ValueError("Bitrix credentials must contain 'webhook_url'.")
     llm_controller.chat.completions.queue(build_llm_response(content="Proceed without tools"))
     agent = await create_agent(api_client, db_session_factory=db_session)
-
-    async with db_session() as session:
-        session.add(
-            AgentCredentials(
-                agent_id=UUID(agent["id"]),
-                service_name="bitrix",
-                credentials={"token": "incomplete"},
-            )
-        )
-        await session.commit()
+    await store_credentials(
+        api_client,
+        agent["id"],
+        "bitrix",
+        {"token": "incomplete"},
+        owner_id=UUID(agent["user_id"]),
+    )
 
     response = await api_client.post(
         "/v1/chat/completions",
