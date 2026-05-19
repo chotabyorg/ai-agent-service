@@ -342,19 +342,16 @@ async def test_upsert_bitrix_credentials_foreign_agent_returns_404_before_valida
 
 
 @pytest.mark.integration
-async def test_upsert_bitrix_credentials_rejects_invalid_portal_payload(
+async def test_upsert_bitrix_credentials_requires_webhook_url_before_validation(
     api_client,
     monkeypatch,
 ) -> None:
     import api.v1.agents as agents_module
 
-    async def mock_validate(_: dict[str, object]) -> BitrixCredentialsValidationResult:
-        return BitrixCredentialsValidationResult(
-            status=BitrixCredentialsValidationStatus.INVALID_FORMAT,
-            details="portal_url must match format https://<portal>.bitrix24.<tld>.",
-        )
+    async def fail_if_called(_: dict[str, object]) -> BitrixCredentialsValidationResult:
+        raise AssertionError("Bitrix validation must not run when webhook_url is missing.")
 
-    monkeypatch.setattr(agents_module, "validate_bitrix_credentials", mock_validate)
+    monkeypatch.setattr(agents_module, "validate_bitrix_credentials", fail_if_called)
 
     owner_id = uuid4()
     create_response = await api_client.post(
@@ -366,12 +363,12 @@ async def test_upsert_bitrix_credentials_rejects_invalid_portal_payload(
 
     response = await api_client.put(
         f"/v1/agents/{agent_id}/credentials",
-        json={"service_name": "bitrix", "credentials": {"portal_url": 123}},
+        json={"service_name": "bitrix", "credentials": {"portal_url": "https://portal.bitrix24.com/"}},
         headers=build_headers(owner_id),
     )
 
     assert response.status_code == 422
-    assert "portal_url" in response.json()["detail"]
+    assert response.json()["detail"] == "webhook_url is required for Bitrix credentials."
 
 
 @pytest.mark.integration
@@ -399,7 +396,13 @@ async def test_upsert_bitrix_credentials_returns_422_on_invalid_portal(
 
     response = await api_client.put(
         f"/v1/agents/{agent_id}/credentials",
-        json={"service_name": "bitrix", "credentials": {"portal_url": "https://example"}},
+        json={
+            "service_name": "bitrix",
+            "credentials": {
+                "portal_url": "https://example",
+                "webhook_url": "https://portal.bitrix24.com/rest/1/secret/",
+            },
+        },
         headers=build_headers(owner_id),
     )
 
@@ -461,13 +464,10 @@ async def test_upsert_bitrix_credentials_requires_webhook_url(
 ) -> None:
     import api.v1.agents as agents_module
 
-    async def mock_validate(_: dict[str, object]) -> BitrixCredentialsValidationResult:
-        return BitrixCredentialsValidationResult(
-            status=BitrixCredentialsValidationStatus.VALID,
-            normalized_credentials={"portal_url": "https://portal.bitrix24.com"},
-        )
+    async def fail_if_called(_: dict[str, object]) -> BitrixCredentialsValidationResult:
+        raise AssertionError("Bitrix validation must not run when webhook_url is missing.")
 
-    monkeypatch.setattr(agents_module, "validate_bitrix_credentials", mock_validate)
+    monkeypatch.setattr(agents_module, "validate_bitrix_credentials", fail_if_called)
 
     owner_id = uuid4()
     create_response = await api_client.post(
