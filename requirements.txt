@@ -11,6 +11,10 @@ redis
 openai
 mcp
 fast-bitrix24
+google-api-python-client
+google-auth
+google-auth-httplib2
+google-auth-oauthlib
 pytest
 pytest-asyncio
 httpx
