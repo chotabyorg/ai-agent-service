@@ -1,6 +1,6 @@
 # Google Workspace MCP Tools
 
-Stage 1 implements Google Sheets and lead management tools. All tools return structured JSON with `ok`, `action`, `resource`, `dryRun`, `summary`, `warnings` and optional `data`.
+Stages 1-2 implement Google Sheets, lead management and Google Calendar tools. All tools return structured JSON with `ok`, `action`, `resource`, `dryRun`, `summary`, `warnings` and optional `data`.
 
 ## Google Sheets
 
@@ -147,8 +147,108 @@ Input:
 
 Updates status and appends a timestamped note.
 
+## Google Calendar
+
+### `google_calendar_list_calendars`
+
+Input:
+
+```json
+{}
+```
+
+Lists calendars visible to the authorized account.
+
+### `google_calendar_search_events`
+
+Input:
+
+```json
+{
+  "query": "Alice",
+  "timeMin": "2026-06-01T00:00:00Z",
+  "timeMax": "2026-06-30T23:59:59Z",
+  "calendarId": "primary",
+  "maxResults": 20
+}
+```
+
+Searches events with optional query and time bounds.
+
+### `google_calendar_create_event`
+
+Input:
+
+```json
+{
+  "calendarId": "primary",
+  "title": "Discovery call",
+  "description": "Discuss proposal",
+  "start": "2026-06-01T12:00:00Z",
+  "end": "2026-06-01T12:30:00Z",
+  "attendees": [{ "email": "alice@example.com", "displayName": "Alice" }],
+  "location": "Google Meet",
+  "leadContext": { "name": "Alice", "email": "alice@example.com" },
+  "dryRun": true
+}
+```
+
+Creates an event. Supports dry-run and appends compact lead context to the description.
+
+### `google_calendar_update_event`
+
+Input:
+
+```json
+{
+  "calendarId": "primary",
+  "eventId": "event-id",
+  "title": "Updated title",
+  "dryRun": false,
+  "requiresConfirmation": true
+}
+```
+
+Updates an event. Non-dry-run updates require `requiresConfirmation=true`.
+
+### `google_calendar_delete_event`
+
+Input:
+
+```json
+{
+  "calendarId": "primary",
+  "eventId": "event-id",
+  "dryRun": false,
+  "requiresConfirmation": true
+}
+```
+
+Deletes an event only when `requiresConfirmation=true` and `ENABLE_DESTRUCTIVE_TOOLS=true`.
+
+### `google_calendar_create_followup`
+
+Input:
+
+```json
+{
+  "calendarId": "primary",
+  "lead": {
+    "name": "Alice",
+    "company": "Example Inc",
+    "email": "alice@example.com",
+    "status": "interested"
+  },
+  "followUpAt": "2026-06-01T12:00:00Z",
+  "description": "Follow up on pricing",
+  "durationMinutes": 30,
+  "dryRun": true
+}
+```
+
+Creates a lead follow-up reminder as a Calendar event.
+
 ## Future Stages
 
-- Stage 2: Google Calendar tools and follow-up scheduling.
 - Stage 3: Gmail search/read/draft with send safety gate.
 - Stage 4: Drive, Contacts and full hardening.

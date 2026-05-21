@@ -2,10 +2,15 @@ import pytest
 
 from mcp_clients.servers.google_workspace.auth.oauth import (
     GoogleAuthError,
+    build_credentials,
     get_refresh_token,
     validate_required_scopes,
 )
-from mcp_clients.servers.google_workspace.config.settings import GoogleWorkspaceSettings, SHEETS_SCOPE
+from mcp_clients.servers.google_workspace.config.settings import (
+    CALENDAR_SCOPE,
+    GoogleWorkspaceSettings,
+    SHEETS_SCOPE,
+)
 
 
 def test_validate_required_scopes_raises_for_missing_sheet_scope() -> None:
@@ -28,3 +33,17 @@ def test_get_refresh_token_requires_authorization_when_missing(tmp_path) -> None
 
     assert exc_info.value.code == "GOOGLE_AUTH_REQUIRED"
     assert str(exc_info.value) == "Google OAuth authorization is required."
+
+
+def test_build_credentials_requires_calendar_scope_before_token_lookup(tmp_path) -> None:
+    settings = GoogleWorkspaceSettings(
+        google_client_id="client-id",
+        google_client_secret="client-secret",
+        google_refresh_token="refresh-token",
+        google_scopes=SHEETS_SCOPE,
+    )
+
+    with pytest.raises(GoogleAuthError) as exc_info:
+        build_credentials(settings, [CALENDAR_SCOPE])
+
+    assert exc_info.value.code == "GOOGLE_SCOPE_MISSING"

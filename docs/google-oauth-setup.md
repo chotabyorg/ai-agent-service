@@ -1,26 +1,29 @@
 # Google OAuth Setup
 
-This document covers Stage 1 Google Sheets OAuth setup for `chota-google-workspace-mcp`.
+This document covers Google OAuth setup for `chota-google-workspace-mcp`.
 
 ## Google Cloud Console
 
 1. Open Google Cloud Console.
 2. Create or select a project for chota Google Workspace integrations.
-3. Enable the Google Sheets API.
+3. Enable APIs:
+   - Google Sheets API
+   - Google Calendar API
 4. Configure the OAuth consent screen.
 5. Add test users for local development if the app is not published.
 6. Create OAuth credentials with type `Web application`.
 7. Add the exact authorized redirect URI used in `GOOGLE_REDIRECT_URI`.
 
-## Stage 1 Scopes
+## Scopes
 
 Use least privilege:
 
 ```text
 https://www.googleapis.com/auth/spreadsheets
+https://www.googleapis.com/auth/calendar
 ```
 
-Calendar, Gmail, Drive and Contacts scopes are intentionally not required in Stage 1.
+Gmail, Drive and Contacts scopes are intentionally not required until later stages.
 
 ## Environment
 
@@ -29,7 +32,7 @@ GOOGLE_CLIENT_ID=
 GOOGLE_CLIENT_SECRET=
 GOOGLE_REDIRECT_URI=http://localhost:8080/oauth2/callback
 GOOGLE_REFRESH_TOKEN=
-GOOGLE_SCOPES=https://www.googleapis.com/auth/spreadsheets
+GOOGLE_SCOPES=https://www.googleapis.com/auth/spreadsheets https://www.googleapis.com/auth/calendar
 GOOGLE_TOKEN_STORAGE_MODE=local
 ```
 

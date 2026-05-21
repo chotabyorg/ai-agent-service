@@ -82,9 +82,9 @@ ai-agent-service/
 - инструменты одного агента изолированы от другого;
 - секреты пробрасываются только на время конкретной обработки сообщения.
 
-## Google Workspace MCP (Stage 1)
+## Google Workspace MCP (Stages 1-2)
 
-Stage 1 добавляет отдельный MCP server:
+Google Workspace MCP server:
 
 ```text
 mcp_clients/servers/google_workspace/server.py
@@ -92,7 +92,7 @@ mcp_clients/servers/google_workspace/server.py
 
 Он запускается тем же механизмом `MCPManager`, что и Bitrix MCP: credentials конкретного агента пробрасываются в env только для изолированного subprocess.
 
-Текущий Stage 1 покрывает:
+Текущий статус:
 
 - Google OAuth 2.0 configuration на refresh token.
 - Google Sheets metadata/tabs/range read.
@@ -102,6 +102,9 @@ mcp_clients/servers/google_workspace/server.py
 - Lead status update с timestamped note.
 - Dry-run режим для write tools.
 - Confirmation gate для `google_sheets_update_range`.
+- Google Calendar list/search/create/update/delete event tools.
+- Follow-up scheduling для лида через Google Calendar.
+- Confirmation + `ENABLE_DESTRUCTIVE_TOOLS=true` gate для удаления Calendar events.
 
 В credentials агента для сервиса `google` нужно сохранить:
 
@@ -111,7 +114,7 @@ mcp_clients/servers/google_workspace/server.py
   "client_secret": "...",
   "redirect_uri": "http://localhost:8080/oauth2/callback",
   "refresh_token": "...",
-  "scopes": "https://www.googleapis.com/auth/spreadsheets",
+  "scopes": "https://www.googleapis.com/auth/spreadsheets https://www.googleapis.com/auth/calendar",
   "token_storage_mode": "local"
 }
 ```

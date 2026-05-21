@@ -1,6 +1,6 @@
 # Lead Workflows
 
-Stage 1 supports lead workflows backed by Google Sheets.
+Stages 1-2 support lead workflows backed by Google Sheets and Google Calendar.
 
 ## Lead Table
 
@@ -70,9 +70,23 @@ Default lead statuses:
 
 Status values are currently validated as non-empty strings. A stricter enum can be enabled later if product requirements require it.
 
-## Follow-up and Gmail
+## Follow-up Flow
 
-Follow-up scheduling and Gmail draft workflows are intentionally deferred:
+Use `google_calendar_create_followup` after lead creation or status update:
 
-- Stage 2: Calendar follow-ups.
+```json
+{
+  "lead": { "name": "Alice", "email": "alice@example.com" },
+  "followUpAt": "2026-06-01T12:00:00Z",
+  "durationMinutes": 30,
+  "dryRun": false
+}
+```
+
+The tool creates a Calendar event with lead context in the description and adds the lead email as an attendee when available.
+
+## Gmail
+
+Gmail draft workflows are intentionally deferred:
+
 - Stage 3: Gmail draft and sending safety gate.

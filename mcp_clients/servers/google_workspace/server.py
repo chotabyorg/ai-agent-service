@@ -14,6 +14,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from mcp_clients.servers.google_workspace.config.settings import get_google_settings
+from mcp_clients.servers.google_workspace.tools.calendar import register_calendar_tools
 from mcp_clients.servers.google_workspace.tools.sheets import TOOLS_META, register_sheets_tools
 from mcp_clients.servers.google_workspace.utils.logging import configure_logging
 
@@ -35,6 +36,7 @@ def tool(category: str, tier: str = "core") -> Callable:
 
 
 register_sheets_tools(mcp, tool)
+register_calendar_tools(mcp, tool)
 
 
 @mcp.resource("tools://metadata")
