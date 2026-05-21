@@ -82,7 +82,7 @@ ai-agent-service/
 - инструменты одного агента изолированы от другого;
 - секреты пробрасываются только на время конкретной обработки сообщения.
 
-## Google Workspace MCP (Stages 1-2)
+## Google Workspace MCP (Stages 1-3)
 
 Google Workspace MCP server:
 
@@ -105,6 +105,8 @@ mcp_clients/servers/google_workspace/server.py
 - Google Calendar list/search/create/update/delete event tools.
 - Follow-up scheduling для лида через Google Calendar.
 - Confirmation + `ENABLE_DESTRUCTIVE_TOOLS=true` gate для удаления Calendar events.
+- Gmail search/read thread/create draft/reply draft tools.
+- Gmail send draft tool с `ENABLE_GMAIL_SEND=true`, `requiresConfirmation=true` и отдельным `gmail.send` scope.
 
 В credentials агента для сервиса `google` нужно сохранить:
 
@@ -114,7 +116,7 @@ mcp_clients/servers/google_workspace/server.py
   "client_secret": "...",
   "redirect_uri": "http://localhost:8080/oauth2/callback",
   "refresh_token": "...",
-  "scopes": "https://www.googleapis.com/auth/spreadsheets https://www.googleapis.com/auth/calendar",
+  "scopes": "https://www.googleapis.com/auth/spreadsheets https://www.googleapis.com/auth/calendar https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/gmail.compose",
   "token_storage_mode": "local"
 }
 ```

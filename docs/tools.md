@@ -1,6 +1,6 @@
 # Google Workspace MCP Tools
 
-Stages 1-2 implement Google Sheets, lead management and Google Calendar tools. All tools return structured JSON with `ok`, `action`, `resource`, `dryRun`, `summary`, `warnings` and optional `data`.
+Stages 1-3 implement Google Sheets, lead management, Google Calendar and Gmail tools. All tools return structured JSON with `ok`, `action`, `resource`, `dryRun`, `summary`, `warnings` and optional `data`.
 
 ## Google Sheets
 
@@ -250,5 +250,84 @@ Creates a lead follow-up reminder as a Calendar event.
 
 ## Future Stages
 
-- Stage 3: Gmail search/read/draft with send safety gate.
 - Stage 4: Drive, Contacts and full hardening.
+
+## Gmail
+
+### `gmail_search_emails`
+
+Input:
+
+```json
+{
+  "query": "from:alice@example.com newer_than:30d",
+  "maxResults": 10
+}
+```
+
+Searches Gmail messages. Requires `https://www.googleapis.com/auth/gmail.readonly`.
+
+### `gmail_read_thread`
+
+Input:
+
+```json
+{ "threadId": "thread-id" }
+```
+
+Reads thread metadata and snippets without returning full message bodies. Requires `gmail.readonly`.
+
+### `gmail_create_draft`
+
+Input:
+
+```json
+{
+  "to": ["alice@example.com"],
+  "cc": [],
+  "bcc": [],
+  "subject": "Proposal",
+  "body": "Hello Alice",
+  "leadContext": { "name": "Alice", "email": "alice@example.com" },
+  "dryRun": true
+}
+```
+
+Creates a Gmail draft. It does not send email. Requires `gmail.compose` for non-dry-run calls.
+
+### `gmail_send_draft`
+
+Input:
+
+```json
+{
+  "draftId": "draft-id",
+  "requiresConfirmation": true
+}
+```
+
+Sends an existing Gmail draft only when all gates pass:
+
+- `requiresConfirmation=true`
+- `ENABLE_GMAIL_SEND=true`
+- OAuth includes `https://www.googleapis.com/auth/gmail.send`
+
+### `gmail_reply_to_thread`
+
+Input:
+
+```json
+{
+  "threadId": "thread-id",
+  "body": "Thanks, following up here.",
+  "to": [],
+  "cc": [],
+  "bcc": [],
+  "subject": null,
+  "leadContext": { "name": "Alice", "email": "alice@example.com" },
+  "dryRun": true,
+  "requiresConfirmation": true
+}
+```
+
+Creates a reply draft in the existing thread. It does not send email. If `to` is omitted, the tool tries to infer the recipient from the thread's latest `From` header.

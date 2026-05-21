@@ -18,6 +18,16 @@ GOOGLE_STAGE_2_CREDENTIALS = {
     ),
 }
 
+GOOGLE_STAGE_3_CREDENTIALS = {
+    **GOOGLE_CREDENTIALS,
+    "scopes": (
+        "https://www.googleapis.com/auth/spreadsheets "
+        "https://www.googleapis.com/auth/calendar "
+        "https://www.googleapis.com/auth/gmail.readonly "
+        "https://www.googleapis.com/auth/gmail.compose"
+    ),
+}
+
 
 def test_build_env_injects_google_workspace_credentials() -> None:
     manager = MCPManager("google", GOOGLE_CREDENTIALS)
@@ -32,11 +42,12 @@ def test_build_env_injects_google_workspace_credentials() -> None:
 
 
 async def test_google_workspace_mcp_subprocess_lists_stage_1_tools() -> None:
-    async with MCPManager("google", GOOGLE_STAGE_2_CREDENTIALS) as manager:
+    async with MCPManager("google", GOOGLE_STAGE_3_CREDENTIALS) as manager:
         tool_names = {tool.name for tool in manager._tools}
         metadata = await manager.get_tools_metadata()
 
     assert "google_sheets_upsert_lead" in tool_names
     assert "google_sheets_update_lead_status" in tool_names
     assert "google_calendar_create_followup" in tool_names
+    assert "gmail_create_draft" in tool_names
     assert metadata["google_sheets_upsert_lead"] == {"category": "google_sheets", "tier": "core"}

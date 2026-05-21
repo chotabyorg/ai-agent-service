@@ -1,6 +1,6 @@
 # Lead Workflows
 
-Stages 1-2 support lead workflows backed by Google Sheets and Google Calendar.
+Stages 1-3 support lead workflows backed by Google Sheets, Google Calendar and Gmail drafts.
 
 ## Lead Table
 
@@ -85,8 +85,20 @@ Use `google_calendar_create_followup` after lead creation or status update:
 
 The tool creates a Calendar event with lead context in the description and adds the lead email as an attendee when available.
 
-## Gmail
+## Gmail Draft Flow
 
-Gmail draft workflows are intentionally deferred:
+Use `gmail_create_draft` after lead qualification:
 
-- Stage 3: Gmail draft and sending safety gate.
+```json
+{
+  "to": ["alice@example.com"],
+  "subject": "Proposal",
+  "body": "Hello Alice",
+  "leadContext": { "name": "Alice", "email": "alice@example.com" },
+  "dryRun": false
+}
+```
+
+Sending is a separate action through `gmail_send_draft`. It is disabled by default and requires `ENABLE_GMAIL_SEND=true`, `requiresConfirmation=true`, and the `gmail.send` OAuth scope.
+
+Use `gmail_reply_to_thread` to create a reply draft in an existing thread. It also does not send the email.

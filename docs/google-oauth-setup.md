@@ -9,6 +9,7 @@ This document covers Google OAuth setup for `chota-google-workspace-mcp`.
 3. Enable APIs:
    - Google Sheets API
    - Google Calendar API
+   - Gmail API
 4. Configure the OAuth consent screen.
 5. Add test users for local development if the app is not published.
 6. Create OAuth credentials with type `Web application`.
@@ -21,9 +22,17 @@ Use least privilege:
 ```text
 https://www.googleapis.com/auth/spreadsheets
 https://www.googleapis.com/auth/calendar
+https://www.googleapis.com/auth/gmail.readonly
+https://www.googleapis.com/auth/gmail.compose
 ```
 
-Gmail, Drive and Contacts scopes are intentionally not required until later stages.
+Only add this scope for accounts that are allowed to send email through agents:
+
+```text
+https://www.googleapis.com/auth/gmail.send
+```
+
+Drive and Contacts scopes are intentionally not required until Stage 4.
 
 ## Environment
 
@@ -32,8 +41,9 @@ GOOGLE_CLIENT_ID=
 GOOGLE_CLIENT_SECRET=
 GOOGLE_REDIRECT_URI=http://localhost:8080/oauth2/callback
 GOOGLE_REFRESH_TOKEN=
-GOOGLE_SCOPES=https://www.googleapis.com/auth/spreadsheets https://www.googleapis.com/auth/calendar
+GOOGLE_SCOPES=https://www.googleapis.com/auth/spreadsheets https://www.googleapis.com/auth/calendar https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/gmail.compose
 GOOGLE_TOKEN_STORAGE_MODE=local
+ENABLE_GMAIL_SEND=false
 ```
 
 In production, store refresh tokens in encrypted platform credentials, not in local files.
@@ -51,6 +61,7 @@ Requirements:
 ## Security Notes
 
 - Do not commit OAuth credentials or tokens.
-- Do not request Gmail send, Drive or Contacts scopes for Sheets-only agents.
+- Do not request Gmail send, Drive or Contacts scopes for agents that do not need them.
+- Keep `ENABLE_GMAIL_SEND=false` unless a production workflow has an explicit human-approved sending policy.
 - Rotate refresh tokens when an agent or workspace is disconnected.
 - Keep logs free of tokens, client secrets and personal data.
