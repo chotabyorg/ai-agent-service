@@ -25,6 +25,10 @@ from sqlalchemy.pool import NullPool
 import core.redis as redis_module
 import main
 from api.dependencies import get_db
+from services.bitrix_webhook_validator import (
+    BitrixCredentialsValidationResult,
+    BitrixCredentialsValidationStatus,
+)
 from services.subscription_client import SubscriptionClient
 
 
@@ -133,6 +137,28 @@ def disable_lifespan_redis(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(main, "init_redis", noop)
     monkeypatch.setattr(main, "close_redis", noop)
+
+
+@pytest.fixture(autouse=True)
+def mock_bitrix_webhook_validation(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def fake_validate_bitrix_credentials(credentials: dict[str, object]) -> BitrixCredentialsValidationResult:
+        normalized_credentials: dict[str, str] = {}
+        portal_url = credentials.get("portal_url")
+        webhook_url = credentials.get("webhook_url")
+        if isinstance(portal_url, str):
+            normalized_credentials["portal_url"] = portal_url
+        if isinstance(webhook_url, str):
+            normalized_credentials["webhook_url"] = webhook_url
+
+        return BitrixCredentialsValidationResult(
+            status=BitrixCredentialsValidationStatus.VALID,
+            normalized_credentials=normalized_credentials,
+        )
+
+    monkeypatch.setattr(
+        "api.v1.agents.validate_bitrix_credentials",
+        fake_validate_bitrix_credentials,
+    )
 
 
 @pytest.fixture
