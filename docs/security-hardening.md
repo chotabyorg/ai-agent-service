@@ -39,3 +39,10 @@ Write tools support dry-run where practical. Dry-run validates input and returns
 ## Logging And Responses
 
 Tool responses are structured and audit-friendly. They return resource identifiers, action names, summaries and warnings. Secrets and OAuth tokens are never returned.
+
+## Error Handling
+
+- Tool input validation returns `VALIDATION_ERROR` without stack traces.
+- Invalid or expired Google tokens return `GOOGLE_AUTH_INVALID` and ask the operator to re-authorize OAuth.
+- Permission, missing resource, rate-limit and transient Google API failures are mapped to explicit sanitized error codes.
+- Unknown Google API failures return a sanitized `GOOGLE_API_ERROR` with exception type only.

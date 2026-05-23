@@ -23,7 +23,11 @@ from mcp_clients.servers.google_workspace.services.drive_service import (
     build_drive_search_query,
     file_resource,
 )
-from mcp_clients.servers.google_workspace.utils.responses import error_response, success_response
+from mcp_clients.servers.google_workspace.utils.responses import (
+    error_response,
+    google_api_error_response,
+    success_response,
+)
 
 
 def _tool_error(exc: Exception) -> dict[str, Any]:
@@ -37,7 +41,7 @@ def _tool_error(exc: Exception) -> dict[str, Any]:
         return error_response(exc.code, str(exc), recoverable=exc.recoverable)
     if isinstance(exc, ValueError):
         return error_response("VALIDATION_ERROR", str(exc), recoverable=True)
-    return error_response("GOOGLE_API_ERROR", "Google Drive request failed.", details={"type": exc.__class__.__name__})
+    return google_api_error_response(exc, "Google Drive")
 
 
 def _get_drive_client() -> GoogleDriveClient:

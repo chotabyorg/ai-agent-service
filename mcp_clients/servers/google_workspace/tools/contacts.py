@@ -21,7 +21,11 @@ from mcp_clients.servers.google_workspace.services.contacts_service import (
     contact_resource,
     find_duplicate_contact,
 )
-from mcp_clients.servers.google_workspace.utils.responses import error_response, success_response
+from mcp_clients.servers.google_workspace.utils.responses import (
+    error_response,
+    google_api_error_response,
+    success_response,
+)
 
 
 def _tool_error(exc: Exception) -> dict[str, Any]:
@@ -35,11 +39,7 @@ def _tool_error(exc: Exception) -> dict[str, Any]:
         return error_response(exc.code, str(exc), recoverable=exc.recoverable)
     if isinstance(exc, ValueError):
         return error_response("VALIDATION_ERROR", str(exc), recoverable=True)
-    return error_response(
-        "GOOGLE_API_ERROR",
-        "Google Contacts request failed.",
-        details={"type": exc.__class__.__name__},
-    )
+    return google_api_error_response(exc, "Google Contacts")
 
 
 def _get_contacts_client() -> GoogleContactsClient:

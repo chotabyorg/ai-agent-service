@@ -24,7 +24,11 @@ from mcp_clients.servers.google_workspace.schemas.sheets import (
     UpsertLeadInput,
 )
 from mcp_clients.servers.google_workspace.services.lead_service import LeadSheetService
-from mcp_clients.servers.google_workspace.utils.responses import error_response, success_response
+from mcp_clients.servers.google_workspace.utils.responses import (
+    error_response,
+    google_api_error_response,
+    success_response,
+)
 from mcp_clients.servers.google_workspace.utils.sheets import build_sheet_range, parse_a1_range
 
 
@@ -40,11 +44,7 @@ def _tool_error(exc: Exception) -> dict[str, Any]:
         )
     if isinstance(exc, GoogleAuthError):
         return error_response(exc.code, str(exc), recoverable=exc.recoverable)
-    return error_response(
-        "GOOGLE_API_ERROR",
-        "Google Workspace request failed.",
-        details={"type": exc.__class__.__name__},
-    )
+    return google_api_error_response(exc, "Google Workspace")
 
 
 def _get_sheets_service() -> tuple[GoogleSheetsClient, LeadSheetService]:
