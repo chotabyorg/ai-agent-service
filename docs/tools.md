@@ -1,6 +1,6 @@
 # Google Workspace MCP Tools
 
-Stages 1-3 implement Google Sheets, lead management, Google Calendar and Gmail tools. All tools return structured JSON with `ok`, `action`, `resource`, `dryRun`, `summary`, `warnings` and optional `data`.
+Stages 1-4 implement Google Sheets, lead management, Google Calendar, Gmail, Drive and Contacts tools. All tools return structured JSON with `ok`, `action`, `resource`, `dryRun`, `summary`, `warnings` and optional `data`.
 
 ## Google Sheets
 
@@ -248,10 +248,6 @@ Input:
 
 Creates a lead follow-up reminder as a Calendar event.
 
-## Future Stages
-
-- Stage 4: Drive, Contacts and full hardening.
-
 ## Gmail
 
 ### `gmail_search_emails`
@@ -331,3 +327,87 @@ Input:
 ```
 
 Creates a reply draft in the existing thread. It does not send email. If `to` is omitted, the tool tries to infer the recipient from the thread's latest `From` header.
+
+## Google Drive
+
+### `google_drive_search_files`
+
+Input:
+
+```json
+{
+  "query": "Alice",
+  "mimeType": "application/pdf",
+  "maxResults": 10
+}
+```
+
+Searches non-trashed Drive files by name and optional MIME type. Requires `drive.metadata.readonly`.
+
+### `google_drive_create_folder`
+
+Input:
+
+```json
+{
+  "name": "Lead Reports",
+  "parentFolderId": null,
+  "dryRun": true
+}
+```
+
+Creates a Drive folder. Requires `drive.file` for non-dry-run calls.
+
+### `google_drive_create_text_file`
+
+Input:
+
+```json
+{
+  "name": "lead-report.json",
+  "content": "{\"ok\": true}",
+  "mimeType": "application/json",
+  "parentFolderId": null,
+  "dryRun": true
+}
+```
+
+Creates a small UTF-8 text, JSON, CSV or Markdown file. Content is capped at 1 MB. Requires `drive.file` for non-dry-run calls.
+
+## Google Contacts
+
+### `google_contacts_search`
+
+Input:
+
+```json
+{
+  "query": "alice@example.com",
+  "maxResults": 10
+}
+```
+
+Searches Google Contacts through the People API. Requires `contacts`.
+
+### `google_contacts_upsert_contact`
+
+Input:
+
+```json
+{
+  "contact": {
+    "name": "Alice Example",
+    "company": "Example Inc",
+    "email": "alice@example.com",
+    "phone": "+15551002000",
+    "telegram": "alice",
+    "website": "example.com",
+    "notes": "Qualified lead",
+    "customFields": { "external_id": "abc-1" }
+  },
+  "dedupeKeys": ["email", "phone", "telegram", "website", "custom:external_id"],
+  "dryRun": true
+}
+```
+
+Creates or updates a Google Contact. In dry-run mode, it only returns the People API payload that would be used.

@@ -15,6 +15,8 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from mcp_clients.servers.google_workspace.config.settings import get_google_settings
 from mcp_clients.servers.google_workspace.tools.calendar import register_calendar_tools
+from mcp_clients.servers.google_workspace.tools.contacts import register_contacts_tools
+from mcp_clients.servers.google_workspace.tools.drive import register_drive_tools
 from mcp_clients.servers.google_workspace.tools.gmail import register_gmail_tools
 from mcp_clients.servers.google_workspace.tools.sheets import TOOLS_META, register_sheets_tools
 from mcp_clients.servers.google_workspace.utils.logging import configure_logging
@@ -39,6 +41,8 @@ def tool(category: str, tier: str = "core") -> Callable:
 register_sheets_tools(mcp, tool)
 register_calendar_tools(mcp, tool)
 register_gmail_tools(mcp, tool)
+register_drive_tools(mcp, tool)
+register_contacts_tools(mcp, tool)
 
 
 @mcp.resource("tools://metadata")

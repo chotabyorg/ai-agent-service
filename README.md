@@ -82,7 +82,7 @@ ai-agent-service/
 - инструменты одного агента изолированы от другого;
 - секреты пробрасываются только на время конкретной обработки сообщения.
 
-## Google Workspace MCP (Stages 1-3)
+## Google Workspace MCP (Stages 1-4)
 
 Google Workspace MCP server:
 
@@ -107,6 +107,9 @@ mcp_clients/servers/google_workspace/server.py
 - Confirmation + `ENABLE_DESTRUCTIVE_TOOLS=true` gate для удаления Calendar events.
 - Gmail search/read thread/create draft/reply draft tools.
 - Gmail send draft tool с `ENABLE_GMAIL_SEND=true`, `requiresConfirmation=true` и отдельным `gmail.send` scope.
+- Google Drive search/create folder/create text file tools.
+- Google Contacts search/upsert tools with dedupe.
+- Final hardening: least-privilege scopes, dry-run write paths, confirmation gates, bounded batch sizes and structured non-secret responses.
 
 В credentials агента для сервиса `google` нужно сохранить:
 
@@ -116,7 +119,7 @@ mcp_clients/servers/google_workspace/server.py
   "client_secret": "...",
   "redirect_uri": "http://localhost:8080/oauth2/callback",
   "refresh_token": "...",
-  "scopes": "https://www.googleapis.com/auth/spreadsheets https://www.googleapis.com/auth/calendar https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/gmail.compose",
+  "scopes": "https://www.googleapis.com/auth/spreadsheets https://www.googleapis.com/auth/calendar https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/gmail.compose https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/drive.metadata.readonly https://www.googleapis.com/auth/contacts",
   "token_storage_mode": "local"
 }
 ```
@@ -135,6 +138,7 @@ python mcp_clients/servers/google_workspace/server.py
 - `docs/google-oauth-setup.md`
 - `docs/tools.md`
 - `docs/lead-workflows.md`
+- `docs/security-hardening.md`
 
 ## Память диалогов
 

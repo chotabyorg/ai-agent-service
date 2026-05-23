@@ -8,6 +8,9 @@ from mcp_clients.servers.google_workspace.auth.oauth import (
 )
 from mcp_clients.servers.google_workspace.config.settings import (
     CALENDAR_SCOPE,
+    CONTACTS_SCOPE,
+    DRIVE_FILE_SCOPE,
+    DRIVE_METADATA_SCOPE,
     GMAIL_COMPOSE_SCOPE,
     GMAIL_READONLY_SCOPE,
     GMAIL_SEND_SCOPE,
@@ -62,5 +65,33 @@ def test_build_credentials_requires_gmail_send_scope_separately() -> None:
 
     with pytest.raises(GoogleAuthError) as exc_info:
         build_credentials(settings, [GMAIL_SEND_SCOPE])
+
+    assert exc_info.value.code == "GOOGLE_SCOPE_MISSING"
+
+
+def test_build_credentials_requires_drive_metadata_scope_separately() -> None:
+    settings = GoogleWorkspaceSettings(
+        google_client_id="client-id",
+        google_client_secret="client-secret",
+        google_refresh_token="refresh-token",
+        google_scopes=DRIVE_FILE_SCOPE,
+    )
+
+    with pytest.raises(GoogleAuthError) as exc_info:
+        build_credentials(settings, [DRIVE_METADATA_SCOPE])
+
+    assert exc_info.value.code == "GOOGLE_SCOPE_MISSING"
+
+
+def test_build_credentials_requires_contacts_scope() -> None:
+    settings = GoogleWorkspaceSettings(
+        google_client_id="client-id",
+        google_client_secret="client-secret",
+        google_refresh_token="refresh-token",
+        google_scopes=DRIVE_FILE_SCOPE,
+    )
+
+    with pytest.raises(GoogleAuthError) as exc_info:
+        build_credentials(settings, [CONTACTS_SCOPE])
 
     assert exc_info.value.code == "GOOGLE_SCOPE_MISSING"

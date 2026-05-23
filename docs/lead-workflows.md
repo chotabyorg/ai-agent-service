@@ -1,6 +1,6 @@
 # Lead Workflows
 
-Stages 1-3 support lead workflows backed by Google Sheets, Google Calendar and Gmail drafts.
+Stages 1-4 support lead workflows backed by Google Sheets, Google Calendar, Gmail drafts, Google Drive and Google Contacts.
 
 ## Lead Table
 
@@ -102,3 +102,37 @@ Use `gmail_create_draft` after lead qualification:
 Sending is a separate action through `gmail_send_draft`. It is disabled by default and requires `ENABLE_GMAIL_SEND=true`, `requiresConfirmation=true`, and the `gmail.send` OAuth scope.
 
 Use `gmail_reply_to_thread` to create a reply draft in an existing thread. It also does not send the email.
+
+## Contact Sync Flow
+
+Use `google_contacts_upsert_contact` after lead qualification:
+
+```json
+{
+  "contact": {
+    "name": "Alice Example",
+    "company": "Example Inc",
+    "email": "alice@example.com",
+    "phone": "+15551002000"
+  },
+  "dedupeKeys": ["email", "phone"],
+  "dryRun": false
+}
+```
+
+The tool searches contacts by the first available dedupe value, updates the duplicate if found, or creates a new contact.
+
+## Drive Report Flow
+
+Use `google_drive_create_text_file` to store exported lead reports:
+
+```json
+{
+  "name": "lead-report.json",
+  "content": "{\"lead\":\"alice@example.com\"}",
+  "mimeType": "application/json",
+  "dryRun": false
+}
+```
+
+Use `google_drive_search_files` to find documents related to a lead or company.
