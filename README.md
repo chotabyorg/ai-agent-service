@@ -415,6 +415,16 @@ curl -X POST http://localhost:8000/internal/v1/agents/deactivate-all \
 
 - `POST /v1/chat/completions` — обработать сообщение пользователя через LLM + Redis history + MCP tools.
 
+Поддерживаемые runtime channels:
+
+| Channel | Session key strategy | Notes |
+| --- | --- | --- |
+| `telegram` | caller-provided Telegram external id | Telegram-specific prompt rules |
+| `instagram` | caller-provided Instagram external id | Instagram-specific prompt rules |
+| `whatsapp` | `whatsapp:{integration_id}:{wa_id}` | WhatsApp text-only MVP through `whatsapp-gateway-service` |
+
+Для `channel="whatsapp"` сервис добавляет WhatsApp-specific prompt rules: короткие conversational ответы, text-only ожидания, без HTML и без Telegram/Instagram-specific UX подсказок.
+
 Пример запроса:
 
 ```bash
@@ -441,7 +451,7 @@ curl -X POST http://localhost:8000/v1/chat/completions \
 - SSE streaming пока не реализован.
 - Встроенный MCP manager сейчас настроен прежде всего под Bitrix24.
 - Автоматическое применение миграций при старте сервиса не добавлено.
-- Авторизация service-to-service реализована только для `/internal/v1/*` эндпоинтов (через `X-Service-Token`). Для публичных `/v1/*` эндпоинтов внутренний вызов ai-agent-service из других микросервисов по-прежнему полагается на доверие внутри Docker-сети.
+- Авторизация service-to-service реализована только для `/internal/v1/*` эндпоинтов (через `X-Service-Token`). `/v1/chat/completions` остаётся internal/service-facing endpoint в текущей deployment-модели: внешние клиенты идут через `chota-gateway`, а внутренние сервисы общаются внутри Kubernetes/private network. В этом PR auth behavior для `/v1/chat/completions` не менялся; future hardening может добавить service-token auth, если deployment assumptions изменятся.
 
 ## Полезные файлы
 
