@@ -52,6 +52,7 @@ def test_build_env_injects_google_workspace_credentials() -> None:
     assert env["GOOGLE_REDIRECT_URI"] == "http://localhost/oauth2/callback"
     assert env["GOOGLE_REFRESH_TOKEN"] == "refresh-token"
     assert env["GOOGLE_SCOPES"] == "https://www.googleapis.com/auth/spreadsheets"
+    assert env["GOOGLE_TOKEN_STORAGE_MODE"] == "local"
 
 
 async def test_google_workspace_mcp_subprocess_lists_stage_1_tools() -> None:
@@ -65,4 +66,25 @@ async def test_google_workspace_mcp_subprocess_lists_stage_1_tools() -> None:
     assert "gmail_create_draft" in tool_names
     assert "google_drive_create_text_file" in tool_names
     assert "google_contacts_upsert_contact" in tool_names
-    assert metadata["google_sheets_upsert_lead"] == {"category": "google_sheets", "tier": "core"}
+    assert metadata["google_sheets_upsert_lead"] == {"category": "google_sheets", "tier": "extended"}
+
+
+def test_build_env_missing_required_field_raises() -> None:
+    import pytest
+    minimal = {"client_id": "test", "client_secret": "secret"}
+    manager = MCPManager("google_workspace", minimal)
+    with pytest.raises(ValueError, match="Missing credential 'refresh_token'"):
+        manager._build_env()
+
+
+def test_build_env_missing_optional_field_is_ok() -> None:
+    minimal = {
+        "client_id": "test",
+        "client_secret": "secret",
+        "refresh_token": "token",
+    }
+    manager = MCPManager("google_workspace", minimal)
+    env = manager._build_env()
+    assert env["GOOGLE_CLIENT_ID"] == "test"
+    assert "GOOGLE_SCOPES" not in env
+    assert "GOOGLE_REDIRECT_URI" not in env

@@ -120,7 +120,7 @@ async def test_google_workspace_mcp_subprocess_lists_contacts_tools() -> None:
 
     assert "google_contacts_search" in names
     assert "google_contacts_upsert_contact" in names
-    assert metadata["google_contacts_upsert_contact"] == {"category": "google_contacts", "tier": "core"}
+    assert metadata["google_contacts_upsert_contact"] == {"category": "google_contacts", "tier": "extended"}
 
 
 @pytest.mark.asyncio

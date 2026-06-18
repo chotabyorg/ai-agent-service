@@ -33,7 +33,7 @@ async def test_google_workspace_mcp_subprocess_lists_gmail_tools() -> None:
     assert "gmail_search_emails" in tool_names
     assert "gmail_create_draft" in tool_names
     assert "gmail_send_draft" in tool_names
-    assert metadata["gmail_send_draft"] == {"category": "gmail", "tier": "core"}
+    assert metadata["gmail_send_draft"] == {"category": "gmail", "tier": "extended"}
 
 
 @pytest.mark.asyncio

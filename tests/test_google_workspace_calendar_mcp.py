@@ -27,7 +27,7 @@ async def test_google_workspace_mcp_subprocess_lists_calendar_tools() -> None:
 
     assert "google_calendar_create_event" in tool_names
     assert "google_calendar_create_followup" in tool_names
-    assert metadata["google_calendar_create_event"] == {"category": "google_calendar", "tier": "core"}
+    assert metadata["google_calendar_create_event"] == {"category": "google_calendar", "tier": "extended"}
 
 
 @pytest.mark.asyncio

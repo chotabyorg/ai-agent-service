@@ -554,7 +554,7 @@ async def test_mcp_service_discovery_returns_supported_integrations(api_client) 
             "service_name": "google_workspace",
             "display_name": "Google Workspace",
             "description": "Интеграция с Google Sheets, Calendar, Gmail, Drive и Contacts",
-            "required_keys": ["client_id", "client_secret", "refresh_token", "scopes"],
+            "required_keys": ["client_id", "client_secret", "refresh_token"],
         },
     ]
 

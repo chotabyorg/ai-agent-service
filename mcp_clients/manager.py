@@ -45,6 +45,10 @@ class MCPManager:
             if not value:
                 raise ValueError(f"Missing credential '{cred_key}' for {self.service_name}")
             env[env_key] = str(value)
+        for cred_key, env_key in config.get("optional_env_mapping", {}).items():
+            value = self.credentials.get(cred_key)
+            if value:
+                env[env_key] = str(value)
         return env
 
     def _get_server_script_path(self) -> Path:

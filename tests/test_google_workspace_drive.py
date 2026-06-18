@@ -54,7 +54,7 @@ async def test_google_workspace_mcp_subprocess_lists_drive_tools() -> None:
     assert "google_drive_search_files" in names
     assert "google_drive_create_folder" in names
     assert "google_drive_create_text_file" in names
-    assert metadata["google_drive_create_text_file"] == {"category": "google_drive", "tier": "core"}
+    assert metadata["google_drive_create_text_file"] == {"category": "google_drive", "tier": "extended"}
 
 
 @pytest.mark.asyncio
