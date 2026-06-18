@@ -98,7 +98,7 @@ def register_gmail_tools(mcp: Any, tool: Callable[[str, str], Callable]) -> None
         except Exception as exc:
             return _tool_error(exc)
 
-    @tool("gmail", "core")
+    @tool("gmail", "extended")
     async def gmail_create_draft(
         to: list[str],
         subject: str,
@@ -150,7 +150,7 @@ def register_gmail_tools(mcp: Any, tool: Callable[[str, str], Callable]) -> None
         except Exception as exc:
             return _tool_error(exc)
 
-    @tool("gmail", "core")
+    @tool("gmail", "extended")
     async def gmail_send_draft(draftId: str, requiresConfirmation: bool = True) -> dict[str, Any]:
         """Send a Gmail draft only when explicitly confirmed and ENABLE_GMAIL_SEND=true."""
 
@@ -179,7 +179,7 @@ def register_gmail_tools(mcp: Any, tool: Callable[[str, str], Callable]) -> None
         except Exception as exc:
             return _tool_error(exc)
 
-    @tool("gmail", "core")
+    @tool("gmail", "extended")
     async def gmail_reply_to_thread(
         threadId: str,
         body: str,

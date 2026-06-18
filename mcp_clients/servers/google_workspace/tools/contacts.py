@@ -70,7 +70,7 @@ def register_contacts_tools(mcp: Any, tool: Callable[[str, str], Callable]) -> N
         except Exception as exc:
             return _tool_error(exc)
 
-    @tool("google_contacts", "core")
+    @tool("google_contacts", "extended")
     async def google_contacts_upsert_contact(
         contact: dict[str, Any],
         dedupeKeys: list[str] | None = None,

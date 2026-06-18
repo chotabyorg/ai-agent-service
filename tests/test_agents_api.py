@@ -9,6 +9,10 @@ from services.bitrix_webhook_validator import (
     BitrixCredentialsValidationResult,
     BitrixCredentialsValidationStatus,
 )
+from services.google_workspace_validator import (
+    GoogleCredentialsValidationResult,
+    GoogleCredentialsValidationStatus,
+)
 
 
 def build_agent_payload() -> dict[str, object]:
@@ -545,7 +549,13 @@ async def test_mcp_service_discovery_returns_supported_integrations(api_client) 
             "display_name": "Bitrix24 CRM",
             "description": "Интеграция с вашей CRM Bitrix24",
             "required_keys": ["webhook_url"],
-        }
+        },
+        {
+            "service_name": "google_workspace",
+            "display_name": "Google Workspace",
+            "description": "Интеграция с Google Sheets, Calendar, Gmail, Drive и Contacts",
+            "required_keys": ["client_id", "client_secret", "refresh_token", "scopes"],
+        },
     ]
 
 
@@ -664,3 +674,226 @@ async def test_delete_credentials_returns_404_for_foreign_agent(api_client) -> N
         f"/v1/agents/{agent_id}/credentials/bitrix", headers=build_headers(stranger_id)
     )
     assert response.status_code == 404
+
+
+# ── Google Workspace credential tests ──────────────────────────────
+
+
+def build_google_credentials() -> dict[str, object]:
+    return {
+        "service_name": "google_workspace",
+        "credentials": {
+            "client_id": "test-client-id.apps.googleusercontent.com",
+            "client_secret": "GOCSPX-test-secret-123",
+            "refresh_token": "1//test-refresh-token-abc",
+            "scopes": "https://www.googleapis.com/auth/spreadsheets https://www.googleapis.com/auth/calendar https://www.googleapis.com/auth/gmail.readonly",
+        },
+    }
+
+
+@pytest.mark.integration
+async def test_upsert_google_credentials_returns_safe_response_no_secrets(api_client, db_session) -> None:
+    owner_id = uuid4()
+    create_resp = await api_client.post(
+        "/v1/agents/", json=build_agent_payload(), headers=build_headers(owner_id)
+    )
+    agent_id = create_resp.json()["id"]
+
+    response = await api_client.put(
+        f"/v1/agents/{agent_id}/credentials",
+        json=build_google_credentials(),
+        headers=build_headers(owner_id),
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["agent_id"] == agent_id
+    assert data["service_name"] == "google_workspace"
+    assert data["has_credentials"] is True
+    assert "credential_keys" in data
+    assert "credentials" not in data
+
+    sensitive_keys = {"client_secret", "refresh_token"}
+    for key in sensitive_keys:
+        assert key not in data
+
+
+@pytest.mark.integration
+async def test_upsert_google_credentials_persists_in_db(api_client, db_session) -> None:
+    owner_id = uuid4()
+    create_resp = await api_client.post(
+        "/v1/agents/", json=build_agent_payload(), headers=build_headers(owner_id)
+    )
+    agent_id = create_resp.json()["id"]
+
+    await api_client.put(
+        f"/v1/agents/{agent_id}/credentials",
+        json=build_google_credentials(),
+        headers=build_headers(owner_id),
+    )
+
+    async with db_session() as session:
+        record = await session.get(AgentCredentials, {"agent_id": UUID(agent_id), "service_name": "google_workspace"})
+    assert record is not None
+    assert record.credentials["client_id"] == "test-client-id.apps.googleusercontent.com"
+    assert record.credentials["client_secret"] == "GOCSPX-test-secret-123"
+    assert record.credentials["refresh_token"] == "1//test-refresh-token-abc"
+
+
+@pytest.mark.integration
+async def test_upsert_google_credentials_missing_required_field_returns_422(api_client, monkeypatch) -> None:
+    import api.v1.agents as agents_module
+
+    monkeypatch.undo()
+
+    from services.google_workspace_validator import validate_google_workspace_credentials as real_validate
+    monkeypatch.setattr(agents_module, "validate_google_workspace_credentials", real_validate)
+
+    owner_id = uuid4()
+    create_resp = await api_client.post(
+        "/v1/agents/", json=build_agent_payload(), headers=build_headers(owner_id)
+    )
+    agent_id = create_resp.json()["id"]
+
+    response = await api_client.put(
+        f"/v1/agents/{agent_id}/credentials",
+        json={
+            "service_name": "google_workspace",
+            "credentials": {
+                "client_id": "test.apps.googleusercontent.com",
+            },
+        },
+        headers=build_headers(owner_id),
+    )
+
+    assert response.status_code == 422
+    assert "Missing required fields" in response.json()["detail"]
+
+
+@pytest.mark.integration
+async def test_upsert_google_credentials_invalid_scopes_returns_422(api_client, monkeypatch) -> None:
+    import api.v1.agents as agents_module
+
+    monkeypatch.undo()
+
+    from services.google_workspace_validator import validate_google_workspace_credentials as real_validate
+    monkeypatch.setattr(agents_module, "validate_google_workspace_credentials", real_validate)
+
+    owner_id = uuid4()
+    create_resp = await api_client.post(
+        "/v1/agents/", json=build_agent_payload(), headers=build_headers(owner_id)
+    )
+    agent_id = create_resp.json()["id"]
+
+    response = await api_client.put(
+        f"/v1/agents/{agent_id}/credentials",
+        json={
+            "service_name": "google_workspace",
+            "credentials": {
+                "client_id": "test.apps.googleusercontent.com",
+                "client_secret": "GOCSPX-secret",
+                "refresh_token": "1//refresh",
+                "scopes": "https://www.googleapis.com/auth/bad.scope",
+            },
+        },
+        headers=build_headers(owner_id),
+    )
+
+    assert response.status_code == 422
+    assert "Unsupported scopes" in response.json()["detail"]
+
+
+@pytest.mark.integration
+async def test_upsert_google_credentials_unknown_field_returns_422(api_client, monkeypatch) -> None:
+    import api.v1.agents as agents_module
+
+    monkeypatch.undo()
+
+    from services.google_workspace_validator import validate_google_workspace_credentials as real_validate
+    monkeypatch.setattr(agents_module, "validate_google_workspace_credentials", real_validate)
+
+    owner_id = uuid4()
+    create_resp = await api_client.post(
+        "/v1/agents/", json=build_agent_payload(), headers=build_headers(owner_id)
+    )
+    agent_id = create_resp.json()["id"]
+
+    response = await api_client.put(
+        f"/v1/agents/{agent_id}/credentials",
+        json={
+            "service_name": "google_workspace",
+            "credentials": {
+                "client_id": "test.apps.googleusercontent.com",
+                "client_secret": "GOCSPX-secret",
+                "refresh_token": "1//refresh",
+                "private_key": "-----BEGIN PRIVATE KEY-----",
+            },
+        },
+        headers=build_headers(owner_id),
+    )
+
+    assert response.status_code == 422
+    assert "Unknown credential fields" in response.json()["detail"]
+
+
+@pytest.mark.integration
+async def test_mixed_bitrix_and_google_credentials_for_same_agent(api_client, db_session) -> None:
+    owner_id = uuid4()
+    create_resp = await api_client.post(
+        "/v1/agents/", json=build_agent_payload(), headers=build_headers(owner_id)
+    )
+    agent_id = create_resp.json()["id"]
+
+    await api_client.put(
+        f"/v1/agents/{agent_id}/credentials",
+        json={
+            "service_name": "bitrix",
+            "credentials": {"webhook_url": "https://example.bitrix/rest"},
+        },
+        headers=build_headers(owner_id),
+    )
+
+    await api_client.put(
+        f"/v1/agents/{agent_id}/credentials",
+        json=build_google_credentials(),
+        headers=build_headers(owner_id),
+    )
+
+    list_resp = await api_client.get(
+        f"/v1/agents/{agent_id}/credentials", headers=build_headers(owner_id)
+    )
+    assert list_resp.status_code == 200
+    service_names = {item["service_name"] for item in list_resp.json()}
+    assert service_names == {"bitrix", "google_workspace"}
+
+    async with db_session() as session:
+        bitrix_record = await session.get(AgentCredentials, {"agent_id": UUID(agent_id), "service_name": "bitrix"})
+        google_record = await session.get(AgentCredentials, {"agent_id": UUID(agent_id), "service_name": "google_workspace"})
+    assert bitrix_record is not None
+    assert google_record is not None
+    assert bitrix_record.credentials.get("webhook_url") is not None
+    assert google_record.credentials.get("client_id") is not None
+
+
+@pytest.mark.integration
+async def test_put_credentials_does_not_return_secrets_in_response(api_client) -> None:
+    owner_id = uuid4()
+    create_resp = await api_client.post(
+        "/v1/agents/", json=build_agent_payload(), headers=build_headers(owner_id)
+    )
+    agent_id = create_resp.json()["id"]
+
+    response = await api_client.put(
+        f"/v1/agents/{agent_id}/credentials",
+        json={
+            "service_name": "bitrix",
+            "credentials": {"webhook_url": "https://secret-bitrix.bitrix24.ru/rest/1/token/"},
+        },
+        headers=build_headers(owner_id),
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert "credentials" not in data
+    assert data["has_credentials"] is True
+    assert "credential_keys" in data

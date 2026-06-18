@@ -26,7 +26,7 @@ def _tool_payload(result) -> dict:
 
 @pytest.mark.asyncio
 async def test_google_workspace_mcp_subprocess_lists_gmail_tools() -> None:
-    async with MCPManager("google", GOOGLE_GMAIL_CREDENTIALS) as manager:
+    async with MCPManager("google_workspace", GOOGLE_GMAIL_CREDENTIALS) as manager:
         tool_names = {tool.name for tool in manager._tools}
         metadata = await manager.get_tools_metadata()
 
@@ -38,7 +38,7 @@ async def test_google_workspace_mcp_subprocess_lists_gmail_tools() -> None:
 
 @pytest.mark.asyncio
 async def test_gmail_create_draft_dry_run_does_not_require_google_call() -> None:
-    async with MCPManager("google", GOOGLE_GMAIL_CREDENTIALS) as manager:
+    async with MCPManager("google_workspace", GOOGLE_GMAIL_CREDENTIALS) as manager:
         result = await manager.call_tool(
             "gmail_create_draft",
             {
@@ -58,7 +58,7 @@ async def test_gmail_create_draft_dry_run_does_not_require_google_call() -> None
 
 @pytest.mark.asyncio
 async def test_gmail_send_draft_disabled_by_default() -> None:
-    async with MCPManager("google", GOOGLE_GMAIL_CREDENTIALS) as manager:
+    async with MCPManager("google_workspace", GOOGLE_GMAIL_CREDENTIALS) as manager:
         result = await manager.call_tool(
             "gmail_send_draft",
             {

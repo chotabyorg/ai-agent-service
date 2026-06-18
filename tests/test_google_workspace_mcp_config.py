@@ -43,7 +43,7 @@ GOOGLE_STAGE_4_CREDENTIALS = {
 
 
 def test_build_env_injects_google_workspace_credentials() -> None:
-    manager = MCPManager("google", GOOGLE_CREDENTIALS)
+    manager = MCPManager("google_workspace", GOOGLE_CREDENTIALS)
 
     env = manager._build_env()
 
@@ -55,7 +55,7 @@ def test_build_env_injects_google_workspace_credentials() -> None:
 
 
 async def test_google_workspace_mcp_subprocess_lists_stage_1_tools() -> None:
-    async with MCPManager("google", GOOGLE_STAGE_4_CREDENTIALS) as manager:
+    async with MCPManager("google_workspace", GOOGLE_STAGE_4_CREDENTIALS) as manager:
         tool_names = {tool.name for tool in manager._tools}
         metadata = await manager.get_tools_metadata()
 

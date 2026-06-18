@@ -66,7 +66,7 @@ class Settings(BaseSettings):
             "script_path": "mcp_clients/servers/bitrix_server.py",
             "env_mapping": {"webhook_url": "B24_WEBHOOK_URL"},
         },
-        "google": {
+        "google_workspace": {
             "script_path": "mcp_clients/servers/google_workspace/server.py",
             "env_mapping": {
                 "client_id": "GOOGLE_CLIENT_ID",

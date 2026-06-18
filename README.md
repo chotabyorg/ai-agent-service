@@ -111,7 +111,7 @@ mcp_clients/servers/google_workspace/server.py
 - Google Contacts search/upsert tools with dedupe.
 - Final hardening: least-privilege scopes, dry-run write paths, confirmation gates, bounded batch sizes and structured non-secret responses.
 
-В credentials агента для сервиса `google` нужно сохранить:
+В credentials агента для сервиса `google_workspace` нужно сохранить:
 
 ```json
 {

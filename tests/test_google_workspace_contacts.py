@@ -114,7 +114,7 @@ def test_build_contact_search_query_uses_first_available_dedupe_value() -> None:
 
 @pytest.mark.asyncio
 async def test_google_workspace_mcp_subprocess_lists_contacts_tools() -> None:
-    async with MCPManager("google", GOOGLE_STAGE_4_CREDENTIALS) as manager:
+    async with MCPManager("google_workspace", GOOGLE_STAGE_4_CREDENTIALS) as manager:
         names = {tool.name for tool in manager._tools}
         metadata = await manager.get_tools_metadata()
 
@@ -125,7 +125,7 @@ async def test_google_workspace_mcp_subprocess_lists_contacts_tools() -> None:
 
 @pytest.mark.asyncio
 async def test_contacts_upsert_dry_run_does_not_require_google_call() -> None:
-    async with MCPManager("google", GOOGLE_STAGE_4_CREDENTIALS) as manager:
+    async with MCPManager("google_workspace", GOOGLE_STAGE_4_CREDENTIALS) as manager:
         result = await manager.call_tool(
             "google_contacts_upsert_contact",
             {

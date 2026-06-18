@@ -29,6 +29,10 @@ from services.bitrix_webhook_validator import (
     BitrixCredentialsValidationResult,
     BitrixCredentialsValidationStatus,
 )
+from services.google_workspace_validator import (
+    GoogleCredentialsValidationResult,
+    GoogleCredentialsValidationStatus,
+)
 from services.subscription_client import SubscriptionClient
 
 
@@ -158,6 +162,27 @@ def mock_bitrix_webhook_validation(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         "api.v1.agents.validate_bitrix_credentials",
         fake_validate_bitrix_credentials,
+    )
+
+
+@pytest.fixture(autouse=True)
+def mock_google_workspace_validation(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_validate_google_workspace_credentials(
+        credentials: dict[str, object],
+    ) -> GoogleCredentialsValidationResult:
+        normalized_credentials: dict[str, object] = {
+            key: credentials[key]
+            for key in credentials
+            if isinstance(credentials.get(key), (str, int, float, bool))
+        }
+        return GoogleCredentialsValidationResult(
+            status=GoogleCredentialsValidationStatus.VALID,
+            normalized_credentials=normalized_credentials,
+        )
+
+    monkeypatch.setattr(
+        "api.v1.agents.validate_google_workspace_credentials",
+        fake_validate_google_workspace_credentials,
     )
 
 

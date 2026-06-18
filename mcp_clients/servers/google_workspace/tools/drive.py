@@ -80,7 +80,7 @@ def register_drive_tools(mcp: Any, tool: Callable[[str, str], Callable]) -> None
         except Exception as exc:
             return _tool_error(exc)
 
-    @tool("google_drive", "core")
+    @tool("google_drive", "extended")
     async def google_drive_create_folder(
         name: str,
         parentFolderId: str | None = None,
@@ -112,7 +112,7 @@ def register_drive_tools(mcp: Any, tool: Callable[[str, str], Callable]) -> None
         except Exception as exc:
             return _tool_error(exc)
 
-    @tool("google_drive", "core")
+    @tool("google_drive", "extended")
     async def google_drive_create_text_file(
         name: str,
         content: str,

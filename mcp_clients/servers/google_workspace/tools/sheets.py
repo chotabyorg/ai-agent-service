@@ -44,6 +44,8 @@ def _tool_error(exc: Exception) -> dict[str, Any]:
         )
     if isinstance(exc, GoogleAuthError):
         return error_response(exc.code, str(exc), recoverable=exc.recoverable)
+    if isinstance(exc, ValueError):
+        return error_response("VALIDATION_ERROR", str(exc), recoverable=True)
     return google_api_error_response(exc, "Google Workspace")
 
 
@@ -115,7 +117,7 @@ def register_sheets_tools(mcp: Any, tool: Callable[[str, str], Callable]) -> Non
         except Exception as exc:
             return _tool_error(exc)
 
-    @tool("google_sheets", "core")
+    @tool("google_sheets", "extended")
     async def google_sheets_append_row(
         spreadsheetId: str,
         sheetName: str,
@@ -154,7 +156,7 @@ def register_sheets_tools(mcp: Any, tool: Callable[[str, str], Callable]) -> Non
         except Exception as exc:
             return _tool_error(exc)
 
-    @tool("google_sheets", "core")
+    @tool("google_sheets", "extended")
     async def google_sheets_update_range(
         spreadsheetId: str,
         range: str,
@@ -230,7 +232,7 @@ def register_sheets_tools(mcp: Any, tool: Callable[[str, str], Callable]) -> Non
         except Exception as exc:
             return _tool_error(exc)
 
-    @tool("google_sheets", "core")
+    @tool("google_sheets", "extended")
     async def google_sheets_create_spreadsheet(title: str, dryRun: bool = False) -> dict[str, Any]:
         """Create a new Google spreadsheet."""
 
@@ -254,7 +256,7 @@ def register_sheets_tools(mcp: Any, tool: Callable[[str, str], Callable]) -> Non
         except Exception as exc:
             return _tool_error(exc)
 
-    @tool("google_sheets", "core")
+    @tool("google_sheets", "extended")
     async def google_sheets_create_tab(
         spreadsheetId: str,
         title: str,
@@ -283,7 +285,7 @@ def register_sheets_tools(mcp: Any, tool: Callable[[str, str], Callable]) -> Non
         except Exception as exc:
             return _tool_error(exc)
 
-    @tool("google_sheets", "core")
+    @tool("google_sheets", "extended")
     async def google_sheets_upsert_lead(
         spreadsheetId: str,
         sheetName: str,
@@ -325,7 +327,7 @@ def register_sheets_tools(mcp: Any, tool: Callable[[str, str], Callable]) -> Non
         except Exception as exc:
             return _tool_error(exc)
 
-    @tool("google_sheets", "core")
+    @tool("google_sheets", "extended")
     async def google_sheets_update_lead_status(
         spreadsheetId: str,
         sheetName: str,

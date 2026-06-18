@@ -96,7 +96,7 @@ def register_calendar_tools(mcp: Any, tool: Callable[[str, str], Callable]) -> N
         except Exception as exc:
             return _tool_error(exc)
 
-    @tool("google_calendar", "core")
+    @tool("google_calendar", "extended")
     async def google_calendar_create_event(
         title: str,
         start: str,
@@ -153,7 +153,7 @@ def register_calendar_tools(mcp: Any, tool: Callable[[str, str], Callable]) -> N
         except Exception as exc:
             return _tool_error(exc)
 
-    @tool("google_calendar", "core")
+    @tool("google_calendar", "extended")
     async def google_calendar_update_event(
         eventId: str,
         calendarId: str = "primary",
@@ -204,7 +204,7 @@ def register_calendar_tools(mcp: Any, tool: Callable[[str, str], Callable]) -> N
         except Exception as exc:
             return _tool_error(exc)
 
-    @tool("google_calendar", "core")
+    @tool("google_calendar", "extended")
     async def google_calendar_delete_event(
         eventId: str,
         calendarId: str = "primary",
@@ -246,7 +246,7 @@ def register_calendar_tools(mcp: Any, tool: Callable[[str, str], Callable]) -> N
         except Exception as exc:
             return _tool_error(exc)
 
-    @tool("google_calendar", "core")
+    @tool("google_calendar", "extended")
     async def google_calendar_create_followup(
         lead: dict[str, Any],
         followUpAt: str,
@@ -254,6 +254,7 @@ def register_calendar_tools(mcp: Any, tool: Callable[[str, str], Callable]) -> N
         description: str | None = None,
         durationMinutes: int = 30,
         dryRun: bool = False,
+        requiresConfirmation: bool = True,
     ) -> dict[str, Any]:
         """Create a Google Calendar follow-up reminder for a lead."""
 
@@ -265,6 +266,7 @@ def register_calendar_tools(mcp: Any, tool: Callable[[str, str], Callable]) -> N
                 "description": description,
                 "durationMinutes": durationMinutes,
                 "dryRun": dryRun,
+                "requiresConfirmation": requiresConfirmation,
             })
             body = build_followup_payload(
                 lead=payload.lead,

@@ -87,3 +87,10 @@ class CreateFollowUpInput(ToolInput):
     description: str | None = Field(default=None, max_length=5000)
     durationMinutes: int = Field(default=30, ge=5, le=480)
     dryRun: bool = False
+    requiresConfirmation: bool = True
+
+    @model_validator(mode="after")
+    def require_update_and_confirmation(self) -> "CreateFollowUpInput":
+        if not self.dryRun and not self.requiresConfirmation:
+            raise ValueError("requiresConfirmation must be true for follow-up creation.")
+        return self

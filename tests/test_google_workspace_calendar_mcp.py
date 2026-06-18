@@ -21,7 +21,7 @@ def _tool_payload(result) -> dict:
 
 @pytest.mark.asyncio
 async def test_google_workspace_mcp_subprocess_lists_calendar_tools() -> None:
-    async with MCPManager("google", GOOGLE_CALENDAR_CREDENTIALS) as manager:
+    async with MCPManager("google_workspace", GOOGLE_CALENDAR_CREDENTIALS) as manager:
         tool_names = {tool.name for tool in manager._tools}
         metadata = await manager.get_tools_metadata()
 
@@ -32,7 +32,7 @@ async def test_google_workspace_mcp_subprocess_lists_calendar_tools() -> None:
 
 @pytest.mark.asyncio
 async def test_calendar_create_event_dry_run_does_not_require_google_call() -> None:
-    async with MCPManager("google", GOOGLE_CALENDAR_CREDENTIALS) as manager:
+    async with MCPManager("google_workspace", GOOGLE_CALENDAR_CREDENTIALS) as manager:
         result = await manager.call_tool(
             "google_calendar_create_event",
             {
@@ -53,7 +53,7 @@ async def test_calendar_create_event_dry_run_does_not_require_google_call() -> N
 
 @pytest.mark.asyncio
 async def test_calendar_delete_requires_destructive_tools_enabled() -> None:
-    async with MCPManager("google", GOOGLE_CALENDAR_CREDENTIALS) as manager:
+    async with MCPManager("google_workspace", GOOGLE_CALENDAR_CREDENTIALS) as manager:
         result = await manager.call_tool(
             "google_calendar_delete_event",
             {
