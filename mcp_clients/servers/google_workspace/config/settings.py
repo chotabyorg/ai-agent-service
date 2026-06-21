@@ -7,13 +7,17 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 SHEETS_SCOPE = "https://www.googleapis.com/auth/spreadsheets"
+SHEETS_READONLY_SCOPE = "https://www.googleapis.com/auth/spreadsheets.readonly"
 CALENDAR_SCOPE = "https://www.googleapis.com/auth/calendar"
+CALENDAR_READONLY_SCOPE = "https://www.googleapis.com/auth/calendar.readonly"
+CALENDAR_EVENTS_READONLY_SCOPE = "https://www.googleapis.com/auth/calendar.events.readonly"
 GMAIL_READONLY_SCOPE = "https://www.googleapis.com/auth/gmail.readonly"
 GMAIL_COMPOSE_SCOPE = "https://www.googleapis.com/auth/gmail.compose"
 GMAIL_SEND_SCOPE = "https://www.googleapis.com/auth/gmail.send"
 DRIVE_FILE_SCOPE = "https://www.googleapis.com/auth/drive.file"
 DRIVE_METADATA_SCOPE = "https://www.googleapis.com/auth/drive.metadata.readonly"
 CONTACTS_SCOPE = "https://www.googleapis.com/auth/contacts"
+CONTACTS_READONLY_SCOPE = "https://www.googleapis.com/auth/contacts.readonly"
 
 
 class GoogleWorkspaceSettings(BaseSettings):

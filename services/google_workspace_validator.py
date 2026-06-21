@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any
@@ -43,7 +44,10 @@ SCOPE_GROUPS: dict[str, set[str]] = {
         "https://www.googleapis.com/auth/drive.file",
         "https://www.googleapis.com/auth/drive",
     },
-    "contacts": {"https://www.googleapis.com/auth/contacts"},
+    "contacts": {
+        "https://www.googleapis.com/auth/contacts",
+        "https://www.googleapis.com/auth/contacts.readonly",
+    },
 }
 
 REQUIRED_FIELDS = frozenset({
@@ -73,6 +77,7 @@ class GoogleCredentialsValidationStatus(Enum):
     INSUFFICIENT_SCOPES = "insufficient_scopes"
     INVALID_FIELD_TYPE = "invalid_field_type"
     UNKNOWN_FIELD = "unknown_field"
+    INVALID_REFRESH_TOKEN = "invalid_refresh_token"
 
 
 @dataclass(slots=True)
@@ -87,7 +92,58 @@ def _parse_scopes(scopes_raw: str) -> list[str]:
     return [scope.strip() for scope in parts if scope.strip()]
 
 
-def validate_google_workspace_credentials(
+async def check_refresh_token(
+    client_id: str,
+    client_secret: str,
+    refresh_token: str,
+) -> bool:
+    try:
+        import httpx
+    except ImportError:
+        return True
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.post(
+                "https://oauth2.googleapis.com/token",
+                data={
+                    "client_id": client_id,
+                    "client_secret": client_secret,
+                    "refresh_token": refresh_token,
+                    "grant_type": "refresh_token",
+                },
+            )
+            return response.status_code == 200
+    except Exception:
+        return True
+
+
+_default_refresh_check = check_refresh_token
+
+
+def set_refresh_check(check: callable) -> None:
+    global _default_refresh_check
+    _default_refresh_check = check
+
+
+async def _validate_refresh_token(
+    client_id: str,
+    client_secret: str,
+    refresh_token: str,
+) -> GoogleCredentialsValidationResult | None:
+    try:
+        is_valid = await _default_refresh_check(client_id, client_secret, refresh_token)
+    except Exception:
+        return None
+    if not is_valid:
+        return GoogleCredentialsValidationResult(
+            status=GoogleCredentialsValidationStatus.INVALID_REFRESH_TOKEN,
+            details="Invalid refresh token. Could not obtain an access token from Google.",
+        )
+    return None
+
+
+async def validate_google_workspace_credentials(
     credentials: dict[str, Any],
 ) -> GoogleCredentialsValidationResult:
     if not isinstance(credentials, dict):
@@ -176,6 +232,12 @@ def validate_google_workspace_credentials(
     token_storage_mode = credentials.get("token_storage_mode")
     if isinstance(token_storage_mode, str) and token_storage_mode.strip():
         normalized["token_storage_mode"] = token_storage_mode.strip()
+
+    refresh_result = await _validate_refresh_token(
+        client_id.strip(), client_secret.strip(), refresh_token.strip()
+    )
+    if refresh_result is not None:
+        return refresh_result
 
     return GoogleCredentialsValidationResult(
         status=GoogleCredentialsValidationStatus.VALID,

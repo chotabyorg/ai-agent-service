@@ -5,8 +5,13 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
-from mcp_clients.servers.google_workspace.auth.oauth import GoogleAuthError, build_credentials
-from mcp_clients.servers.google_workspace.config.settings import CALENDAR_SCOPE, GoogleWorkspaceSettings
+from mcp_clients.servers.google_workspace.auth.oauth import GoogleAuthError, build_credentials, validate_required_scopes
+from mcp_clients.servers.google_workspace.config.settings import (
+    CALENDAR_EVENTS_READONLY_SCOPE,
+    CALENDAR_READONLY_SCOPE,
+    CALENDAR_SCOPE,
+    GoogleWorkspaceSettings,
+)
 
 
 class GoogleCalendarClient:
@@ -27,7 +32,15 @@ class GoogleCalendarClient:
                     recoverable=False,
                 ) from exc
 
-            credentials = build_credentials(self.settings, [CALENDAR_SCOPE])
+            for scope in [CALENDAR_SCOPE, CALENDAR_READONLY_SCOPE, CALENDAR_EVENTS_READONLY_SCOPE]:
+                try:
+                    validate_required_scopes(self.settings.scopes, [scope])
+                    credentials = build_credentials(self.settings, [scope])
+                    break
+                except GoogleAuthError:
+                    continue
+            else:
+                credentials = build_credentials(self.settings, [CALENDAR_SCOPE])
             self._service = build("calendar", "v3", credentials=credentials, cache_discovery=False)
         return self._service
 

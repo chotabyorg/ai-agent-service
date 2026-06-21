@@ -5,8 +5,8 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
-from mcp_clients.servers.google_workspace.auth.oauth import build_credentials
-from mcp_clients.servers.google_workspace.config.settings import SHEETS_SCOPE, GoogleWorkspaceSettings
+from mcp_clients.servers.google_workspace.auth.oauth import GoogleAuthError, build_credentials, validate_required_scopes
+from mcp_clients.servers.google_workspace.config.settings import SHEETS_READONLY_SCOPE, SHEETS_SCOPE, GoogleWorkspaceSettings
 
 
 class GoogleSheetsClient:
@@ -29,7 +29,11 @@ class GoogleSheetsClient:
                     recoverable=False,
                 ) from exc
 
-            credentials = build_credentials(self.settings, [SHEETS_SCOPE])
+            try:
+                validate_required_scopes(self.settings.scopes, [SHEETS_SCOPE])
+                credentials = build_credentials(self.settings, [SHEETS_SCOPE])
+            except GoogleAuthError:
+                credentials = build_credentials(self.settings, [SHEETS_READONLY_SCOPE])
             self._service = build("sheets", "v4", credentials=credentials, cache_discovery=False)
         return self._service
 

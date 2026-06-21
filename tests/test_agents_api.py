@@ -747,7 +747,14 @@ async def test_upsert_google_credentials_missing_required_field_returns_422(api_
     monkeypatch.undo()
 
     from services.google_workspace_validator import validate_google_workspace_credentials as real_validate
+
+    async def always_pass_check(_cid, _csec, _rt):
+        return True
+
     monkeypatch.setattr(agents_module, "validate_google_workspace_credentials", real_validate)
+    import services.google_workspace_validator as gv_module
+    monkeypatch.setattr(gv_module, "check_refresh_token", always_pass_check)
+    monkeypatch.setattr(gv_module, "_default_refresh_check", always_pass_check)
 
     owner_id = uuid4()
     create_resp = await api_client.post(
@@ -777,7 +784,14 @@ async def test_upsert_google_credentials_invalid_scopes_returns_422(api_client, 
     monkeypatch.undo()
 
     from services.google_workspace_validator import validate_google_workspace_credentials as real_validate
+
+    async def always_pass_check(_cid, _csec, _rt):
+        return True
+
     monkeypatch.setattr(agents_module, "validate_google_workspace_credentials", real_validate)
+    import services.google_workspace_validator as gv_module
+    monkeypatch.setattr(gv_module, "check_refresh_token", always_pass_check)
+    monkeypatch.setattr(gv_module, "_default_refresh_check", always_pass_check)
 
     owner_id = uuid4()
     create_resp = await api_client.post(
@@ -810,7 +824,14 @@ async def test_upsert_google_credentials_unknown_field_returns_422(api_client, m
     monkeypatch.undo()
 
     from services.google_workspace_validator import validate_google_workspace_credentials as real_validate
+
+    async def always_pass_check(_cid, _csec, _rt):
+        return True
+
     monkeypatch.setattr(agents_module, "validate_google_workspace_credentials", real_validate)
+    import services.google_workspace_validator as gv_module
+    monkeypatch.setattr(gv_module, "check_refresh_token", always_pass_check)
+    monkeypatch.setattr(gv_module, "_default_refresh_check", always_pass_check)
 
     owner_id = uuid4()
     create_resp = await api_client.post(

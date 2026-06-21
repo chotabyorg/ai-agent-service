@@ -8,7 +8,7 @@ from typing import Any, Callable
 from pydantic import ValidationError
 
 from mcp_clients.servers.google_workspace.auth.oauth import GoogleAuthError
-from mcp_clients.servers.google_workspace.config.settings import CONTACTS_SCOPE, get_google_settings
+from mcp_clients.servers.google_workspace.config.settings import CONTACTS_READONLY_SCOPE, CONTACTS_SCOPE, get_google_settings
 from mcp_clients.servers.google_workspace.google.contacts_client import GoogleContactsClient
 from mcp_clients.servers.google_workspace.schemas.contacts import (
     ContactInput,
@@ -58,7 +58,7 @@ def register_contacts_tools(mcp: Any, tool: Callable[[str, str], Callable]) -> N
             results = await _get_contacts_client().search_contacts(
                 query=payload.query,
                 max_results=payload.maxResults,
-                required_scopes=[CONTACTS_SCOPE],
+                required_scopes=[CONTACTS_READONLY_SCOPE, CONTACTS_SCOPE],
             )
             people = [result.get("person", result) for result in results]
             return success_response(

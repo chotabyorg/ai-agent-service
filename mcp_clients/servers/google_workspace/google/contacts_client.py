@@ -5,8 +5,8 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
-from mcp_clients.servers.google_workspace.auth.oauth import GoogleAuthError, build_credentials
-from mcp_clients.servers.google_workspace.config.settings import GoogleWorkspaceSettings
+from mcp_clients.servers.google_workspace.auth.oauth import GoogleAuthError, build_credentials, validate_required_scopes
+from mcp_clients.servers.google_workspace.config.settings import CONTACTS_READONLY_SCOPE, CONTACTS_SCOPE, GoogleWorkspaceSettings
 
 
 CONTACT_READ_MASK = "names,emailAddresses,phoneNumbers,organizations,urls,biographies"
@@ -30,7 +30,15 @@ class GoogleContactsClient:
                     "google-api-python-client is not installed.",
                     recoverable=False,
                 ) from exc
-            credentials = build_credentials(self.settings, required_scopes)
+            for scope in required_scopes:
+                try:
+                    validate_required_scopes(self.settings.scopes, [scope])
+                    credentials = build_credentials(self.settings, [scope])
+                    break
+                except GoogleAuthError:
+                    continue
+            else:
+                credentials = build_credentials(self.settings, required_scopes)
             self._service = build("people", "v1", credentials=credentials, cache_discovery=False)
         return self._service
 

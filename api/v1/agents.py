@@ -290,13 +290,14 @@ async def upsert_agent_credentials(
             )
 
     elif payload.service_name.strip().lower() == "google_workspace":
-        validation = validate_google_workspace_credentials(payload.credentials)
+        validation = await validate_google_workspace_credentials(payload.credentials)
         if validation.status in {
             GoogleCredentialsValidationStatus.MISSING_REQUIRED_FIELD,
             GoogleCredentialsValidationStatus.INVALID_SCOPES,
             GoogleCredentialsValidationStatus.INSUFFICIENT_SCOPES,
             GoogleCredentialsValidationStatus.INVALID_FIELD_TYPE,
             GoogleCredentialsValidationStatus.UNKNOWN_FIELD,
+            GoogleCredentialsValidationStatus.INVALID_REFRESH_TOKEN,
         }:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,

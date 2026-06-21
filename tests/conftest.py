@@ -167,7 +167,7 @@ def mock_bitrix_webhook_validation(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture(autouse=True)
 def mock_google_workspace_validation(monkeypatch: pytest.MonkeyPatch) -> None:
-    def fake_validate_google_workspace_credentials(
+    async def fake_validate_google_workspace_credentials(
         credentials: dict[str, object],
     ) -> GoogleCredentialsValidationResult:
         normalized_credentials: dict[str, object] = {
