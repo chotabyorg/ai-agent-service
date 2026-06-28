@@ -65,6 +65,19 @@ class Settings(BaseSettings):
         "bitrix": {
             "script_path": "mcp_clients/servers/bitrix_server.py",
             "env_mapping": {"webhook_url": "B24_WEBHOOK_URL"},
+        },
+        "google_workspace": {
+            "script_path": "mcp_clients/servers/google_workspace/server.py",
+            "env_mapping": {
+                "client_id": "GOOGLE_CLIENT_ID",
+                "client_secret": "GOOGLE_CLIENT_SECRET",
+                "refresh_token": "GOOGLE_REFRESH_TOKEN",
+            },
+            "optional_env_mapping": {
+                "scopes": "GOOGLE_SCOPES",
+                "redirect_uri": "GOOGLE_REDIRECT_URI",
+                "token_storage_mode": "GOOGLE_TOKEN_STORAGE_MODE",
+            },
         }
     })
 

@@ -17,6 +17,7 @@
 - Обработка чата через `/v1/chat/completions`.
 - Опциональная подстановка контекста из `knowledge-base-service` перед LLM-вызовом.
 - Изолированный запуск MCP-серверов с динамическим пробросом `env` под каждого агента.
+- Google Workspace MCP server для Google Sheets lead management (Stage 1).
 
 ## Технологический стек
 
@@ -28,6 +29,7 @@
 - OpenAI-compatible API (`openai.AsyncOpenAI`)
 - Model Context Protocol (`mcp`)
 - Bitrix24 MCP server (`fast-bitrix24`)
+- Google API Python Client для Google Workspace MCP
 
 ## Архитектура
 
@@ -79,6 +81,64 @@ ai-agent-service/
 - нет общего глобального `B24_WEBHOOK_URL` для всех клиентов;
 - инструменты одного агента изолированы от другого;
 - секреты пробрасываются только на время конкретной обработки сообщения.
+
+## Google Workspace MCP (Stages 1-4)
+
+Google Workspace MCP server:
+
+```text
+mcp_clients/servers/google_workspace/server.py
+```
+
+Он запускается тем же механизмом `MCPManager`, что и Bitrix MCP: credentials конкретного агента пробрасываются в env только для изолированного subprocess.
+
+Текущий статус:
+
+- Google OAuth 2.0 configuration на refresh token.
+- Google Sheets metadata/tabs/range read.
+- Google Sheets append/update/create spreadsheet/create tab.
+- Lead upsert в Google Sheets.
+- Lead deduplication по `email`, `phone`, `telegram`, `website` или `custom:<field>`.
+- Lead status update с timestamped note.
+- Dry-run режим для write tools.
+- Confirmation gate для `google_sheets_update_range`.
+- Google Calendar list/search/create/update/delete event tools.
+- Follow-up scheduling для лида через Google Calendar.
+- Confirmation + `ENABLE_DESTRUCTIVE_TOOLS=true` gate для удаления Calendar events.
+- Gmail search/read thread/create draft/reply draft tools.
+- Gmail send draft tool с `ENABLE_GMAIL_SEND=true`, `requiresConfirmation=true` и отдельным `gmail.send` scope.
+- Google Drive search/create folder/create text file tools.
+- Google Contacts search/upsert tools with dedupe.
+- Final hardening: least-privilege scopes, dry-run write paths, confirmation gates, bounded batch sizes and structured non-secret responses.
+
+В credentials агента для сервиса `google_workspace` нужно сохранить:
+
+```json
+{
+  "client_id": "...",
+  "client_secret": "...",
+  "redirect_uri": "http://localhost:8080/oauth2/callback",
+  "refresh_token": "...",
+  "scopes": "https://www.googleapis.com/auth/spreadsheets https://www.googleapis.com/auth/calendar https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/gmail.compose https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/drive.metadata.readonly https://www.googleapis.com/auth/contacts",
+  "token_storage_mode": "local"
+}
+```
+
+Минимальный локальный запуск MCP server:
+
+```bash
+python3 -m venv .venv
+. .venv/bin/activate
+pip install -r requirements.txt
+python mcp_clients/servers/google_workspace/server.py
+```
+
+Документация:
+
+- `docs/google-oauth-setup.md`
+- `docs/tools.md`
+- `docs/lead-workflows.md`
+- `docs/security-hardening.md`
 
 ## Память диалогов
 

@@ -13,7 +13,13 @@ SUPPORTED_MCP_SERVICES = [
         display_name="Bitrix24 CRM",
         description="Интеграция с вашей CRM Bitrix24",
         required_keys=["webhook_url"],
-    )
+    ),
+    MCPServiceResponse(
+        service_name="google_workspace",
+        display_name="Google Workspace",
+        description="Интеграция с Google Sheets, Calendar, Gmail, Drive и Contacts",
+        required_keys=["client_id", "client_secret", "refresh_token", "scopes"],
+    ),
 ]
 
 

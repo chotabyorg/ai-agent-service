@@ -108,10 +108,20 @@ class AgentCredentialsSummary(BaseModel):
 
 
 class AgentCredentialsResponse(BaseModel):
-    """Serialized agent credentials."""
+    """Serialized agent credentials (safe summary, no raw secrets)."""
 
     model_config = ConfigDict(from_attributes=True)
 
     agent_id: UUID
     service_name: str
-    credentials: dict[str, Any]
+    has_credentials: bool = True
+    credential_keys: list[str] = Field(default_factory=list)
+
+    @classmethod
+    def from_orm_credentials(cls, credentials) -> "AgentCredentialsResponse":
+        return cls(
+            agent_id=credentials.agent_id,
+            service_name=credentials.service_name,
+            has_credentials=True,
+            credential_keys=list(credentials.credentials.keys()) if credentials.credentials else [],
+        )

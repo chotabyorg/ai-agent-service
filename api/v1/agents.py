@@ -25,6 +25,10 @@ from services.bitrix_webhook_validator import (
     BitrixCredentialsValidationStatus,
     validate_bitrix_credentials,
 )
+from services.google_workspace_validator import (
+    GoogleCredentialsValidationStatus,
+    validate_google_workspace_credentials,
+)
 from services.prompt_builder import ChatContext, PromptBuilder
 
 
@@ -285,10 +289,30 @@ async def upsert_agent_credentials(
                 detail="webhook_url is required for Bitrix credentials.",
             )
 
+    elif payload.service_name.strip().lower() == "google_workspace":
+        validation = await validate_google_workspace_credentials(payload.credentials)
+        if validation.status in {
+            GoogleCredentialsValidationStatus.MISSING_REQUIRED_FIELD,
+            GoogleCredentialsValidationStatus.INVALID_SCOPES,
+            GoogleCredentialsValidationStatus.INSUFFICIENT_SCOPES,
+            GoogleCredentialsValidationStatus.INVALID_FIELD_TYPE,
+            GoogleCredentialsValidationStatus.UNKNOWN_FIELD,
+            GoogleCredentialsValidationStatus.INVALID_REFRESH_TOKEN,
+        }:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail=validation.details or "Google Workspace credentials are invalid.",
+            )
+
+        payload.credentials = {
+            **payload.credentials,
+            **(validation.normalized_credentials or {}),
+        }
+
     credentials = await agent_service.upsert_credentials(db, user_id, agent_id, payload)
     if credentials is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Agent not found",
         )
-    return AgentCredentialsResponse.model_validate(credentials)
+    return AgentCredentialsResponse.from_orm_credentials(credentials)
