@@ -1,3 +1,5 @@
+import pytest
+
 from mcp_clients.manager import MCPManager
 
 
@@ -69,8 +71,133 @@ async def test_google_workspace_mcp_subprocess_lists_stage_1_tools() -> None:
     assert metadata["google_sheets_upsert_lead"] == {"category": "google_sheets", "tier": "extended"}
 
 
+async def test_google_workspace_mcp_exposes_only_sheets_tools_for_sheets_readonly_scope() -> None:
+    credentials = {
+        "client_id": "client-id",
+        "client_secret": "client-secret",
+        "refresh_token": "refresh-token",
+        "scopes": "https://www.googleapis.com/auth/spreadsheets.readonly",
+    }
+
+    async with MCPManager("google_workspace", credentials) as manager:
+        tool_names = {tool.name for tool in manager._tools}
+
+    assert tool_names
+    assert all(name.startswith("google_sheets_") for name in tool_names)
+
+
+async def test_google_workspace_mcp_exposes_only_calendar_tools_for_calendar_readonly_scope() -> None:
+    credentials = {
+        "client_id": "client-id",
+        "client_secret": "client-secret",
+        "refresh_token": "refresh-token",
+        "scopes": "https://www.googleapis.com/auth/calendar.readonly",
+    }
+
+    async with MCPManager("google_workspace", credentials) as manager:
+        tool_names = {tool.name for tool in manager._tools}
+
+    assert tool_names
+    assert all(name.startswith("google_calendar_") for name in tool_names)
+
+
+async def test_google_workspace_mcp_exposes_only_contacts_tools_for_contacts_readonly_scope() -> None:
+    credentials = {
+        "client_id": "client-id",
+        "client_secret": "client-secret",
+        "refresh_token": "refresh-token",
+        "scopes": "https://www.googleapis.com/auth/contacts.readonly",
+    }
+
+    async with MCPManager("google_workspace", credentials) as manager:
+        tool_names = {tool.name for tool in manager._tools}
+
+    assert tool_names
+    assert all(name.startswith("google_contacts_") for name in tool_names)
+
+
+async def test_google_workspace_mcp_exposes_only_gmail_tools_for_gmail_readonly_scope() -> None:
+    credentials = {
+        "client_id": "client-id",
+        "client_secret": "client-secret",
+        "refresh_token": "refresh-token",
+        "scopes": "https://www.googleapis.com/auth/gmail.readonly",
+    }
+
+    async with MCPManager("google_workspace", credentials) as manager:
+        tool_names = {tool.name for tool in manager._tools}
+
+    assert tool_names
+    assert all(name.startswith("gmail_") for name in tool_names)
+
+
+async def test_google_workspace_mcp_exposes_only_drive_tools_for_drive_readonly_scope() -> None:
+    credentials = {
+        "client_id": "client-id",
+        "client_secret": "client-secret",
+        "refresh_token": "refresh-token",
+        "scopes": "https://www.googleapis.com/auth/drive.metadata.readonly",
+    }
+
+    async with MCPManager("google_workspace", credentials) as manager:
+        tool_names = {tool.name for tool in manager._tools}
+
+    assert tool_names
+    assert all(name.startswith("google_drive_") for name in tool_names)
+
+
+async def test_google_workspace_default_core_tools_respect_configured_scopes() -> None:
+    credentials = {
+        "client_id": "client-id",
+        "client_secret": "client-secret",
+        "refresh_token": "refresh-token",
+        "scopes": "https://www.googleapis.com/auth/spreadsheets.readonly",
+    }
+
+    async with MCPManager("google_workspace", credentials) as manager:
+        metadata = await manager.get_tools_metadata()
+        default_tool_names = {
+            tool.name
+            for tool in manager._tools
+            if metadata.get(tool.name, {}).get("tier", "core") == "core"
+        }
+
+    assert default_tool_names == {
+        "google_sheets_get_spreadsheet",
+        "google_sheets_list_tabs",
+        "google_sheets_read_range",
+        "google_sheets_search_rows",
+    }
+
+
+@pytest.mark.parametrize(
+    "scope",
+    [
+        "https://www.googleapis.com/auth/calendar.events",
+        "https://www.googleapis.com/auth/gmail.compose",
+        "https://www.googleapis.com/auth/drive.file",
+    ],
+)
+async def test_google_workspace_default_core_tools_exclude_write_only_scopes(scope: str) -> None:
+    credentials = {
+        "client_id": "client-id",
+        "client_secret": "client-secret",
+        "refresh_token": "refresh-token",
+        "scopes": scope,
+    }
+
+    async with MCPManager("google_workspace", credentials) as manager:
+        metadata = await manager.get_tools_metadata()
+        default_tool_names = {
+            tool.name
+            for tool in manager._tools
+            if metadata.get(tool.name, {}).get("tier", "core") == "core"
+        }
+
+    assert default_tool_names == set()
+
+
 def test_build_env_missing_required_field_raises() -> None:
-    import pytest
     minimal = {"client_id": "test", "client_secret": "secret"}
     manager = MCPManager("google_workspace", minimal)
     with pytest.raises(ValueError, match="Missing credential 'refresh_token'"):

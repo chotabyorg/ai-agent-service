@@ -18,7 +18,7 @@ SUPPORTED_MCP_SERVICES = [
         service_name="google_workspace",
         display_name="Google Workspace",
         description="Интеграция с Google Sheets, Calendar, Gmail, Drive и Contacts",
-        required_keys=["client_id", "client_secret", "refresh_token"],
+        required_keys=["client_id", "client_secret", "refresh_token", "scopes"],
     ),
 ]
 

@@ -7,58 +7,20 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any
 
-ALLOWED_GOOGLE_SCOPES = frozenset({
-    "https://www.googleapis.com/auth/spreadsheets",
-    "https://www.googleapis.com/auth/spreadsheets.readonly",
-    "https://www.googleapis.com/auth/calendar",
-    "https://www.googleapis.com/auth/calendar.readonly",
-    "https://www.googleapis.com/auth/gmail.readonly",
-    "https://www.googleapis.com/auth/gmail.compose",
-    "https://www.googleapis.com/auth/gmail.send",
-    "https://www.googleapis.com/auth/drive.file",
-    "https://www.googleapis.com/auth/drive.metadata.readonly",
-    "https://www.googleapis.com/auth/drive",
-    "https://www.googleapis.com/auth/drive.readonly",
-    "https://www.googleapis.com/auth/contacts",
-    "https://www.googleapis.com/auth/contacts.readonly",
-    "https://www.googleapis.com/auth/calendar.events",
-    "https://www.googleapis.com/auth/calendar.events.readonly",
-})
+from mcp_clients.servers.google_workspace.config.settings import (
+    ALLOWED_GOOGLE_SCOPES,
+    GOOGLE_PRODUCT_SCOPES,
+)
 
-SCOPE_GROUPS: dict[str, set[str]] = {
-    "sheets": {"https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/spreadsheets.readonly"},
-    "calendar": {
-        "https://www.googleapis.com/auth/calendar",
-        "https://www.googleapis.com/auth/calendar.readonly",
-        "https://www.googleapis.com/auth/calendar.events",
-        "https://www.googleapis.com/auth/calendar.events.readonly",
-    },
-    "gmail": {
-        "https://www.googleapis.com/auth/gmail.readonly",
-        "https://www.googleapis.com/auth/gmail.compose",
-        "https://www.googleapis.com/auth/gmail.send",
-    },
-    "drive": {
-        "https://www.googleapis.com/auth/drive.metadata.readonly",
-        "https://www.googleapis.com/auth/drive.readonly",
-        "https://www.googleapis.com/auth/drive.file",
-        "https://www.googleapis.com/auth/drive",
-    },
-    "contacts": {
-        "https://www.googleapis.com/auth/contacts",
-        "https://www.googleapis.com/auth/contacts.readonly",
-    },
-}
-
-REQUIRED_FIELDS = frozenset({
+REQUIRED_AUTH_FIELDS = frozenset({
     "client_id",
     "client_secret",
     "refresh_token",
 })
+REQUIRED_FIELDS = REQUIRED_AUTH_FIELDS | {"scopes"}
 
 OPTIONAL_FIELDS = frozenset({
     "redirect_uri",
-    "scopes",
     "token_storage_mode",
 })
 
@@ -152,7 +114,11 @@ async def validate_google_workspace_credentials(
             details="Google Workspace credentials must be a JSON object.",
         )
 
-    missing = [f for f in REQUIRED_FIELDS if not isinstance(credentials.get(f), str) or not credentials[f].strip()]
+    missing = [
+        field
+        for field in REQUIRED_AUTH_FIELDS
+        if not isinstance(credentials.get(field), str) or not credentials[field].strip()
+    ]
     if missing:
         return GoogleCredentialsValidationResult(
             status=GoogleCredentialsValidationStatus.MISSING_REQUIRED_FIELD,
@@ -187,25 +153,26 @@ async def validate_google_workspace_credentials(
     else:
         scopes = []
 
-    if scopes:
-        all_allowed = set(ALLOWED_GOOGLE_SCOPES)
-        unknown = sorted(set(scopes) - all_allowed)
-        if unknown:
-            return GoogleCredentialsValidationResult(
-                status=GoogleCredentialsValidationStatus.INVALID_SCOPES,
-                details=f"Unsupported scopes: {', '.join(unknown)}",
-            )
+    if not scopes:
+        return GoogleCredentialsValidationResult(
+            status=GoogleCredentialsValidationStatus.INSUFFICIENT_SCOPES,
+            details="At least one supported Google Workspace scope is required.",
+        )
 
-        scope_set = set(scopes)
-        for product, valid_scopes in SCOPE_GROUPS.items():
-            if scope_set & valid_scopes:
-                break
-        else:
-            return GoogleCredentialsValidationResult(
-                status=GoogleCredentialsValidationStatus.INSUFFICIENT_SCOPES,
-                details="Provided scopes do not cover any supported Google Workspace product. "
-                        "Minimum: at least one supported scope is required.",
-            )
+    all_allowed = set(ALLOWED_GOOGLE_SCOPES)
+    unknown = sorted(set(scopes) - all_allowed)
+    if unknown:
+        return GoogleCredentialsValidationResult(
+            status=GoogleCredentialsValidationStatus.INVALID_SCOPES,
+            details=f"Unsupported scopes: {', '.join(unknown)}",
+        )
+
+    scope_set = set(scopes)
+    if not any(scope_set & valid_scopes for valid_scopes in GOOGLE_PRODUCT_SCOPES.values()):
+        return GoogleCredentialsValidationResult(
+            status=GoogleCredentialsValidationStatus.INSUFFICIENT_SCOPES,
+            details="Provided scopes do not cover any supported Google Workspace product.",
+        )
 
     all_known_fields = REQUIRED_FIELDS | OPTIONAL_FIELDS
     unknown_keys = sorted(set(credentials.keys()) - all_known_fields)
