@@ -206,6 +206,7 @@ python mcp_clients/servers/google_workspace/server.py
 | `MCP_BITRIX_PATH` | `mcp_clients/servers/bitrix_server.py` | Локальный путь к Bitrix MCP server |
 | `MCP_GOOGLE_PATH` | `mcp_service/google_server.py` | Резервный путь для Google MCP server |
 | `INTERNAL_API_TOKEN` | `""` | Токен для service-to-service вызовов `/internal/*` эндпоинтов. Проверяется через заголовок `X-Service-Token`. Пустое значение отключает доступ (fail-closed). |
+| `ENCRYPTION_KEY` | `""` | Fernet-ключ для шифрования MCP credentials at rest (см. раздел «Encryption-at-rest для MCP credentials»). Сгенерировать: `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`. |
 
 ### Минимальный `.env` пример
 
@@ -436,6 +437,33 @@ curl -X PUT http://localhost:8000/v1/agents/11111111-1111-1111-1111-111111111111
 ```bash
 curl http://localhost:8000/v1/mcp-services
 ```
+
+### Encryption-at-rest для MCP credentials
+
+Credentials агентов (`agent_credentials.credentials`) хранятся в PostgreSQL JSONB в виде
+encrypted envelope. Шифрование симметричное, через Fernet (`services.encryption_service.EncryptionService`),
+ключ читается из env-переменной `ENCRYPTION_KEY`.
+
+- **Формат записи на диске:** `{"__enc__": "v1", "data": "<fernet-token>"}`. Шифруется
+  целиком сериализованный JSON dict с секретами — на диске нет ни одного plaintext
+  значения (`webhook_url`, `client_secret`, `refresh_token` и т. п.).
+- **Запись:** `PUT /v1/agents/{agent_id}/credentials` всегда сохраняет новый envelope —
+  plaintext в БД больше не попадает.
+- **Чтение:** `services.credentials_cipher.decrypt_credentials` вызывается во всех
+  read-путях (`api/v1/tools.py`, `services/llm_service.py`, `schemas/agent.AgentCredentialsResponse`)
+  перед тем, как передать credentials в `MCPManager` или сериализовать ответ API.
+- **Ответы API** содержат только `service_name`, `has_credentials` и `credential_keys`
+  (имена полей без значений). Сырые секреты наружу не отдаются.
+- **Backward compatibility:** старые plaintext-строки (`{"webhook_url": "..."}`) читаются
+  прозрачно — `is_encrypted_envelope` определяет формат по наличию ключа `__enc__`.
+  Это значит, что без миграции данные продолжают работать.
+- **Миграция legacy-строк:** Alembic-ревизия `d5e6f7g8h9i0_encrypt_agent_credentials`
+  идемпотентно перешифровывает существующие plaintext-строки в envelope формат;
+  `downgrade` восстанавливает plaintext.
+
+> **Внимание:** без валидного `ENCRYPTION_KEY` сервис не сможет ни записать, ни прочитать
+> credentials. Ключ должен быть одинаковым на всех инстансах ai-agent-service одного окружения
+> и храниться в secret store, а не в репозитории.
 
 ### Models API
 

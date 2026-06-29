@@ -1,6 +1,7 @@
 """Business logic for agent configuration management."""
 
 from collections.abc import Sequence
+from typing import Any
 from uuid import UUID
 
 from sqlalchemy import func, select, update
@@ -8,6 +9,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.agent import AgentCredentials, AgentTemplate
 from schemas.agent import AgentCreate, AgentCredentialsCreate, AgentUpdate
+from services.credentials_cipher import (
+    decrypt_credentials,
+    encrypt_credentials,
+)
 from services.prompt_builder import PromptBuilder
 
 
@@ -111,20 +116,40 @@ class AgentService:
         if agent is None:
             return None
 
+        encrypted_payload = encrypt_credentials(payload.credentials)
+
         credentials = await session.get(
             AgentCredentials,
             {"agent_id": agent_id, "service_name": payload.service_name},
         )
 
         if credentials is None:
-            credentials = AgentCredentials(agent_id=agent_id, **payload.model_dump())
+            credentials = AgentCredentials(
+                agent_id=agent_id,
+                service_name=payload.service_name,
+                credentials=encrypted_payload,
+            )
             session.add(credentials)
         else:
-            credentials.credentials = payload.credentials
+            credentials.credentials = encrypted_payload
 
         await session.commit()
         await session.refresh(credentials)
         return credentials
+
+    @staticmethod
+    def decrypt_credentials_record(
+        record: AgentCredentials | None,
+    ) -> dict[str, Any]:
+        """Return the plaintext credential dict for an :class:`AgentCredentials`.
+
+        Supports both new encrypted envelopes and legacy plaintext rows so the
+        same call site works during and after the encryption rollout.
+        """
+
+        if record is None:
+            return {}
+        return decrypt_credentials(record.credentials)
 
     async def delete_agent(
         self,

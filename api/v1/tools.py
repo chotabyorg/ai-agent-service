@@ -37,9 +37,10 @@ async def _get_owned_credentials(
 
 
 async def _build_tool_list(credentials: AgentCredentials) -> list[ToolInfo]:
+    plaintext_credentials = AgentService.decrypt_credentials_record(credentials)
     async with MCPManager(
         service_name=credentials.service_name,
-        credentials=credentials.credentials,
+        credentials=plaintext_credentials,
     ) as manager:
         openai_tools = manager.get_openai_tools()
         metadata = await manager.get_tools_metadata()
