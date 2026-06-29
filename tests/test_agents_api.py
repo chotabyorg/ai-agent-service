@@ -9,6 +9,7 @@ from services.bitrix_webhook_validator import (
     BitrixCredentialsValidationResult,
     BitrixCredentialsValidationStatus,
 )
+from services.credentials_cipher import decrypt_credentials
 from services.google_workspace_validator import (
     GoogleCredentialsValidationResult,
     GoogleCredentialsValidationStatus,
@@ -496,8 +497,9 @@ async def test_upsert_bitrix_credentials_persists_normalized_webhook_url(
     async with db_session() as session:
         record = await session.get(AgentCredentials, {"agent_id": UUID(agent_id), "service_name": "bitrix"})
     assert record is not None
-    assert record.credentials["webhook_url"] == "https://portal.bitrix24.com/rest/1/secret123/"
-    assert record.credentials["portal_url"] == "https://portal.bitrix24.com"
+    stored = decrypt_credentials(record.credentials)
+    assert stored["webhook_url"] == "https://portal.bitrix24.com/rest/1/secret123/"
+    assert stored["portal_url"] == "https://portal.bitrix24.com"
 
 
 @pytest.mark.integration
@@ -532,7 +534,10 @@ async def test_multiple_credential_services_are_persisted_for_same_agent(api_cli
             select(AgentCredentials).where(AgentCredentials.agent_id == UUID(agent_id))
         )
         credentials = records.scalars().all()
-    assert {(item.service_name, json.dumps(item.credentials, sort_keys=True)) for item in credentials} == {
+    assert {
+        (item.service_name, json.dumps(decrypt_credentials(item.credentials), sort_keys=True))
+        for item in credentials
+    } == {
         ("bitrix", json.dumps({"webhook_url": "https://example.bitrix/rest"}, sort_keys=True)),
         ("custom", json.dumps({"token": "tenant-secret"}, sort_keys=True)),
     }
@@ -735,9 +740,10 @@ async def test_upsert_google_credentials_persists_in_db(api_client, db_session) 
     async with db_session() as session:
         record = await session.get(AgentCredentials, {"agent_id": UUID(agent_id), "service_name": "google_workspace"})
     assert record is not None
-    assert record.credentials["client_id"] == "test-client-id.apps.googleusercontent.com"
-    assert record.credentials["client_secret"] == "GOCSPX-test-secret-123"
-    assert record.credentials["refresh_token"] == "1//test-refresh-token-abc"
+    stored = decrypt_credentials(record.credentials)
+    assert stored["client_id"] == "test-client-id.apps.googleusercontent.com"
+    assert stored["client_secret"] == "GOCSPX-test-secret-123"
+    assert stored["refresh_token"] == "1//test-refresh-token-abc"
 
 
 @pytest.mark.integration
@@ -892,8 +898,8 @@ async def test_mixed_bitrix_and_google_credentials_for_same_agent(api_client, db
         google_record = await session.get(AgentCredentials, {"agent_id": UUID(agent_id), "service_name": "google_workspace"})
     assert bitrix_record is not None
     assert google_record is not None
-    assert bitrix_record.credentials.get("webhook_url") is not None
-    assert google_record.credentials.get("client_id") is not None
+    assert decrypt_credentials(bitrix_record.credentials).get("webhook_url") is not None
+    assert decrypt_credentials(google_record.credentials).get("client_id") is not None
 
 
 @pytest.mark.integration
@@ -918,3 +924,85 @@ async def test_put_credentials_does_not_return_secrets_in_response(api_client) -
     assert "credentials" not in data
     assert data["has_credentials"] is True
     assert "credential_keys" in data
+
+
+@pytest.mark.integration
+async def test_credentials_are_encrypted_at_rest(api_client, db_session) -> None:
+    """New credentials must land in JSONB as an encrypted envelope, never plaintext."""
+    owner_id = uuid4()
+    create_resp = await api_client.post(
+        "/v1/agents/", json=build_agent_payload(), headers=build_headers(owner_id)
+    )
+    agent_id = create_resp.json()["id"]
+
+    secret_url = "https://leak-detector.bitrix24.ru/rest/1/super-secret-token/"
+    put_resp = await api_client.put(
+        f"/v1/agents/{agent_id}/credentials",
+        json={
+            "service_name": "bitrix",
+            "credentials": {"webhook_url": secret_url},
+        },
+        headers=build_headers(owner_id),
+    )
+    assert put_resp.status_code == 200
+
+    async with db_session() as session:
+        record = await session.get(
+            AgentCredentials,
+            {"agent_id": UUID(agent_id), "service_name": "bitrix"},
+        )
+    assert record is not None
+
+    stored = record.credentials
+    assert isinstance(stored, dict)
+    assert stored.get("__enc__") == "v1"
+    assert "data" in stored and isinstance(stored["data"], str)
+    # Plaintext secret must not be present anywhere in the stored JSONB blob.
+    assert secret_url not in json.dumps(stored)
+    assert "super-secret-token" not in json.dumps(stored)
+
+    # Round-trip through the cipher must yield the original secret.
+    assert decrypt_credentials(stored).get("webhook_url") == secret_url
+
+
+@pytest.mark.integration
+async def test_legacy_plaintext_credentials_remain_readable(api_client, db_session) -> None:
+    """Backward compatibility: legacy plaintext rows must still be readable via the API."""
+    owner_id = uuid4()
+    create_resp = await api_client.post(
+        "/v1/agents/", json=build_agent_payload(), headers=build_headers(owner_id)
+    )
+    agent_id = create_resp.json()["id"]
+
+    legacy_plaintext = {"webhook_url": "https://legacy.bitrix/rest/legacy-token/"}
+    async with db_session() as session:
+        session.add(
+            AgentCredentials(
+                agent_id=UUID(agent_id),
+                service_name="bitrix",
+                credentials=legacy_plaintext,
+            )
+        )
+        await session.commit()
+
+    list_resp = await api_client.get(
+        f"/v1/agents/{agent_id}/credentials", headers=build_headers(owner_id)
+    )
+    assert list_resp.status_code == 200
+    items = list_resp.json()
+    assert any(item["service_name"] == "bitrix" for item in items)
+    bitrix_item = next(item for item in items if item["service_name"] == "bitrix")
+    assert bitrix_item["has_credentials"] is True
+    assert "webhook_url" in bitrix_item["credential_keys"]
+    # Safe response must not echo the raw secret.
+    assert "legacy-token" not in json.dumps(items)
+
+    async with db_session() as session:
+        record = await session.get(
+            AgentCredentials,
+            {"agent_id": UUID(agent_id), "service_name": "bitrix"},
+        )
+    assert record is not None
+    # Legacy row stays plaintext on disk until it is rewritten via the API or
+    # the encrypt-in-place migration; the decrypt helper handles both shapes.
+    assert decrypt_credentials(record.credentials) == legacy_plaintext

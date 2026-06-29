@@ -119,9 +119,14 @@ class AgentCredentialsResponse(BaseModel):
 
     @classmethod
     def from_orm_credentials(cls, credentials) -> "AgentCredentialsResponse":
+        # Lazy import keeps the schema module free of crypto/service deps and
+        # avoids circular imports between schemas and services.
+        from services.credentials_cipher import decrypt_credentials
+
+        plaintext = decrypt_credentials(credentials.credentials)
         return cls(
             agent_id=credentials.agent_id,
             service_name=credentials.service_name,
             has_credentials=True,
-            credential_keys=list(credentials.credentials.keys()) if credentials.credentials else [],
+            credential_keys=list(plaintext.keys()),
         )
