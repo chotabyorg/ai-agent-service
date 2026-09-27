@@ -39,6 +39,72 @@ def _make_agent(user_id: UUID, *, name: str, is_active: bool) -> AgentTemplate:
     )
 
 
+@pytest.mark.integration
+async def test_ownership_check_returns_204_for_owner(
+    api_client,
+    db_session,
+    internal_token: str,
+) -> None:
+    owner_id = uuid4()
+    agent = _make_agent(owner_id, name="owned", is_active=True)
+    async with db_session() as session:
+        session.add(agent)
+        await session.commit()
+        agent_id = agent.id
+
+    response = await api_client.post(
+        "/internal/v1/agents/ownership-check",
+        json={"agent_id": str(agent_id), "owner_id": str(owner_id)},
+        headers=_auth_headers(),
+    )
+
+    assert response.status_code == 204
+    assert response.content == b""
+
+
+@pytest.mark.integration
+async def test_ownership_check_returns_same_404_for_foreign_and_unknown_agents(
+    api_client,
+    db_session,
+    internal_token: str,
+) -> None:
+    owner_id = uuid4()
+    foreign_owner_id = uuid4()
+    agent = _make_agent(owner_id, name="owned", is_active=True)
+    async with db_session() as session:
+        session.add(agent)
+        await session.commit()
+        agent_id = agent.id
+
+    foreign_response = await api_client.post(
+        "/internal/v1/agents/ownership-check",
+        json={"agent_id": str(agent_id), "owner_id": str(foreign_owner_id)},
+        headers=_auth_headers(),
+    )
+    unknown_response = await api_client.post(
+        "/internal/v1/agents/ownership-check",
+        json={"agent_id": str(uuid4()), "owner_id": str(foreign_owner_id)},
+        headers=_auth_headers(),
+    )
+
+    assert foreign_response.status_code == unknown_response.status_code == 404
+    assert foreign_response.json() == unknown_response.json() == {"detail": "Agent not found"}
+
+
+@pytest.mark.integration
+async def test_ownership_check_requires_service_token(
+    api_client,
+    internal_token: str,
+) -> None:
+    response = await api_client.post(
+        "/internal/v1/agents/ownership-check",
+        json={"agent_id": str(uuid4()), "owner_id": str(uuid4())},
+    )
+
+    assert response.status_code == 401
+    assert response.json() == {"detail": "Invalid service token"}
+
+
 # ==================== GET /internal/v1/agents/count ====================
 
 

@@ -22,3 +22,10 @@ class DeactivateAllResponse(BaseModel):
     """Number of agents that were deactivated."""
 
     deactivated: int = Field(ge=0)
+
+
+class AgentOwnershipCheckRequest(BaseModel):
+    """Check agent ownership for an authenticated internal caller."""
+
+    agent_id: UUID
+    owner_id: UUID

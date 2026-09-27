@@ -443,12 +443,17 @@ curl http://localhost:8000/v1/mcp-services
 
 ### Internal API (service-to-service)
 
-Эндпоинты под префиксом `/internal/v1` предназначены для вызовов из других внутренних сервисов (например, `subscription-service`) и **не проходят через API Gateway**. Каждый запрос должен содержать заголовок `X-Service-Token` со значением, равным `INTERNAL_API_TOKEN`. Сравнение выполняется через `secrets.compare_digest` для защиты от timing-атак. Если `INTERNAL_API_TOKEN` не задан на сервере — любой запрос отклоняется (fail-closed).
+Эндпоинты под префиксом `/internal/v1` предназначены для вызовов из других внутренних сервисов (например, `subscription-service` и `control-plane-service`) и **не проходят через API Gateway**. Каждый запрос должен содержать заголовок `X-Service-Token` со значением, равным `INTERNAL_API_TOKEN`. Сравнение выполняется через `secrets.compare_digest` для защиты от timing-атак. Если `INTERNAL_API_TOKEN` не задан на сервере — любой запрос отклоняется (fail-closed).
 
 - `GET /internal/v1/agents/count?user_id=<uuid>` — вернуть количество агентов пользователя.
   - Response `200`: `{ "total": int, "active": int }` — `total` считает всех агентов пользователя, `active` — только тех, у кого `is_active = true`.
   - `400` — если `user_id` не UUID.
   - `401` — если заголовок `X-Service-Token` отсутствует или не совпадает.
+- `POST /internal/v1/agents/ownership-check` — проверить пару владельца и агента по JSON-телу `{ "agent_id": "<uuid>", "owner_id": "<uuid>" }`.
+  - Response `204` — агент принадлежит указанному владельцу; тело ответа пустое.
+  - `404` — агент не существует или принадлежит другому владельцу; оба случая имеют одинаковый ответ.
+  - `401` — если заголовок `X-Service-Token` отсутствует или не совпадает.
+  - `422` — если `agent_id` или `owner_id` не UUID.
 - `POST /internal/v1/agents/deactivate-all` — массово деактивировать всех агентов пользователя.
   - Request body: `{ "user_id": "<uuid>" }`.
   - Response `200`: `{ "deactivated": int }` — количество записей, у которых `is_active` переведён с `true` на `false`. Если активных нет — возвращает `{ "deactivated": 0 }`, а не 404.
