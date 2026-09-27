@@ -160,6 +160,39 @@ async def test_chat_creates_and_reuses_session_key(api_client, db_session, llm_c
 
 
 @pytest.mark.integration
+async def test_chat_rejects_agent_owned_by_another_tenant_before_processing(
+    api_client,
+    db_session,
+    llm_controller,
+) -> None:
+    owner_id = uuid4()
+    other_owner_id = uuid4()
+    agent = await create_agent(
+        api_client,
+        db_session_factory=db_session,
+        owner_id=owner_id,
+    )
+
+    response = await api_client.post(
+        "/v1/chat/completions",
+        json={
+            "agent_id": agent["id"],
+            "external_client_id": "telegram:cross-tenant",
+            "channel": "telegram",
+            "message": "Should not reach the LLM",
+        },
+        headers={"X-User-Id": str(other_owner_id)},
+    )
+
+    assert response.status_code == 404
+    assert response.json() == {"detail": "Agent not found."}
+    assert llm_controller.chat.completions.calls == []
+    async with db_session() as session:
+        sessions = await session.execute(select(ConversationSession))
+        assert sessions.scalars().all() == []
+
+
+@pytest.mark.integration
 async def test_chat_uses_privacy_proxy_when_enabled(
     api_client,
     db_session,

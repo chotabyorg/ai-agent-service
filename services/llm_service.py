@@ -317,8 +317,13 @@ class LLMService:
         external_client_id: str,
         channel: str,
         user_message: str,
+        user_id: UUID | None = None,
     ) -> ChatProcessingResult:
-        agent = await self.agent_service.get_agent_by_id(db_session, agent_id)
+        agent = await self.agent_service.get_agent_by_id(
+            db_session,
+            agent_id,
+            user_id=user_id,
+        )
         if agent is None:
             raise AgentNotFoundError("Agent not found.")
         if not agent.is_active:

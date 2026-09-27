@@ -52,6 +52,12 @@ class Settings(BaseSettings):
 
     internal_api_token: str = Field(default="")
 
+    # Dedicated credential for callers of /v1/chat/completions. It is
+    # intentionally independent from INTERNAL_API_TOKEN, which protects the
+    # existing management endpoints.
+    chat_s2s_token: SecretStr = Field(default="")
+    chat_s2s_auth_required: bool = Field(default=False)
+
     knowledge_base_enabled: bool = Field(default=False)
     knowledge_base_service_url: str = Field(default="http://knowledge-base-service:8000")
     knowledge_base_timeout_seconds: float = Field(default=2.0)
