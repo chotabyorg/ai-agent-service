@@ -2,7 +2,7 @@
 
 from functools import lru_cache
 
-from pydantic import Field, SecretStr
+from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -57,6 +57,16 @@ class Settings(BaseSettings):
     # existing management endpoints.
     chat_s2s_token: SecretStr = Field(default="")
     chat_s2s_auth_required: bool = Field(default=False)
+
+    @model_validator(mode="after")
+    def require_chat_s2s_token_when_auth_is_strict(self) -> "Settings":
+        """Fail startup if strict chat auth is enabled without its credential."""
+        token = self.chat_s2s_token.get_secret_value().strip()
+        if self.chat_s2s_auth_required and not token:
+            raise ValueError(
+                "CHAT_S2S_TOKEN must be configured when CHAT_S2S_AUTH_REQUIRED is enabled"
+            )
+        return self
 
     knowledge_base_enabled: bool = Field(default=False)
     knowledge_base_service_url: str = Field(default="http://knowledge-base-service:8000")

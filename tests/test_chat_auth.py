@@ -3,9 +3,31 @@ from uuid import uuid4
 
 import pytest
 from fastapi import HTTPException
-from pydantic import SecretStr
+from pydantic import SecretStr, ValidationError
 
 import api.v1.chat as chat_route
+from core.config import Settings
+
+
+def test_strict_chat_auth_rejects_empty_token_without_exposing_it() -> None:
+    with pytest.raises(ValidationError) as exc_info:
+        Settings(
+            _env_file=None,
+            chat_s2s_auth_required=True,
+            chat_s2s_token="",
+        )
+
+    assert "CHAT_S2S_TOKEN must be configured" in str(exc_info.value)
+
+
+def test_compatibility_chat_auth_accepts_empty_token() -> None:
+    settings = Settings(
+        _env_file=None,
+        chat_s2s_auth_required=False,
+        chat_s2s_token="",
+    )
+
+    assert settings.chat_s2s_token.get_secret_value() == ""
 
 
 @pytest.mark.asyncio
