@@ -6,11 +6,12 @@ Secured by the X-Service-Token header. Not exposed through the public gateway.
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.dependencies import get_db, verify_service_token
 from schemas.internal import (
+    AgentOwnershipCheckRequest,
     AgentCountResponse,
     DeactivateAllRequest,
     DeactivateAllResponse,
@@ -24,6 +25,25 @@ router = APIRouter(
 )
 agent_service = AgentService()
 DbSession = Annotated[AsyncSession, Depends(get_db)]
+
+
+@router.post("/agents/ownership-check", status_code=status.HTTP_204_NO_CONTENT)
+async def internal_check_agent_ownership(
+    payload: AgentOwnershipCheckRequest,
+    db: DbSession,
+) -> Response:
+    """Confirm that an agent belongs to the requested owner, without disclosing either."""
+    agent = await agent_service.get_agent_by_id(
+        db,
+        payload.agent_id,
+        user_id=payload.owner_id,
+    )
+    if agent is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Agent not found",
+        )
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.get("/agents/count", response_model=AgentCountResponse)
