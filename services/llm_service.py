@@ -21,6 +21,7 @@ from openai import (
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from mcp_clients.manager import MCPManager
+from services.chat_diagnostics import ChatFailureStage, set_chat_failure_stage
 from services.agent_service import AgentService
 from services.encryption_service import EncryptionService
 from services.history_service import HistoryService
@@ -319,6 +320,7 @@ class LLMService:
         user_message: str,
         user_id: UUID | None = None,
     ) -> ChatProcessingResult:
+        set_chat_failure_stage(ChatFailureStage.AGENT_LOOKUP)
         agent = await self.agent_service.get_agent_by_id(
             db_session,
             agent_id,
@@ -329,10 +331,12 @@ class LLMService:
         if not agent.is_active:
             raise AgentInactiveError("Agent is inactive.")
 
+        set_chat_failure_stage(ChatFailureStage.AGENT_CONFIGURATION)
         agent_api_key = self._get_agent_api_key(agent)
         if not agent_api_key:
             raise AgentNoApiKeyError("Agent has no OpenRouter API key configured.")
 
+        set_chat_failure_stage(ChatFailureStage.SESSION_SETUP)
         conversation_session = await self.session_service.get_or_create_session(
             db_session,
             agent_id=agent_id,
@@ -356,6 +360,7 @@ class LLMService:
                 api_key=agent_api_key,
             )
 
+        set_chat_failure_stage(ChatFailureStage.CONTEXT_LOAD)
         credentials_records = await self.agent_service.get_credentials(db_session, agent_id)
         history = await self.history_service.load_history(session_id)
 
@@ -376,6 +381,7 @@ class LLMService:
 
         executed_calls: set[str] = set()
 
+        set_chat_failure_stage(ChatFailureStage.MCP_SETUP)
         async with AsyncExitStack() as stack:
             tool_registry: dict[str, MCPManager] = {}
             openai_tools: list[dict[str, object]] = []
@@ -406,6 +412,7 @@ class LLMService:
                     openai_tools.append(tool)
 
             for _ in range(self.MAX_TOOL_STEPS):
+                set_chat_failure_stage(ChatFailureStage.LLM_REQUEST)
                 try:
                     response = await llm_client.chat.completions.create(
                         model=agent.model_name or self.settings.llm_default_model,
@@ -443,6 +450,7 @@ class LLMService:
                 except PrivacyProxyConnectionError as exc:
                     raise ChatProcessingError(str(exc))
 
+                set_chat_failure_stage(ChatFailureStage.RESPONSE_PROCESSING)
                 message = response.choices[0].message
                 if not getattr(message, "tool_calls", None):
                     raw_answer = message.content or "I processed your request."
@@ -454,11 +462,14 @@ class LLMService:
                         {"role": "user", "content": user_message},
                         {"role": "assistant", "content": clean_answer},
                     ]
+                    set_chat_failure_stage(ChatFailureStage.HISTORY_PERSIST)
                     await self.history_service.save_history(session_id, updated_history)
+                    set_chat_failure_stage(ChatFailureStage.MCP_CLEANUP)
                     return ChatProcessingResult(session_id=session_id, answer=clean_answer)
 
                 messages.append(self._assistant_message_to_dict(message))
 
+                set_chat_failure_stage(ChatFailureStage.TOOL_EXECUTION)
                 for tool_call in message.tool_calls:
                     func_name = tool_call.function.name
                     func_args_str = tool_call.function.arguments

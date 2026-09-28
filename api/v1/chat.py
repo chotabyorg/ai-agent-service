@@ -1,15 +1,25 @@
 """REST endpoints for chat completions."""
 
 import hmac
+import logging
 from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Header, HTTPException, status
+from fastapi.exceptions import RequestValidationError
+from fastapi.routing import APIRoute
 from sqlalchemy.ext.asyncio import AsyncSession
+from starlette.requests import Request
+from starlette.responses import PlainTextResponse, Response
 
 from api.dependencies import get_db
 from core.config import get_settings
 from schemas.chat import ChatRequest, ChatResponse
+from services.chat_diagnostics import (
+    ChatDiagnosticContext,
+    bind_chat_diagnostic_context,
+    reset_chat_diagnostic_context,
+)
 from services.llm_service import (
     AgentApiKeyInvalidError,
     AgentInactiveError,
@@ -22,7 +32,48 @@ from services.llm_service import (
 )
 
 
-router = APIRouter()
+logger = logging.getLogger(__name__)
+
+
+def _normalized_exception_type(exc: Exception) -> str:
+    """Return only a bounded Python class name, never exception details."""
+
+    name = type(exc).__name__
+    if name.isascii() and name.isidentifier() and len(name) <= 64:
+        return name
+    return "Exception"
+
+
+class ChatDiagnosticRoute(APIRoute):
+    """Add safe diagnostics while preserving the framework's plain-text 500."""
+
+    def get_route_handler(self):
+        original_handler = super().get_route_handler()
+
+        async def diagnostic_handler(request: Request) -> Response:
+            diagnostics = ChatDiagnosticContext()
+            context_token = bind_chat_diagnostic_context(diagnostics)
+            try:
+                return await original_handler(request)
+            except (HTTPException, RequestValidationError):
+                raise
+            except Exception as exc:
+                logger.error(
+                    "chat_processing_failed failure_stage=%s exception_type=%s",
+                    diagnostics.failure_stage.value,
+                    _normalized_exception_type(exc),
+                )
+                return PlainTextResponse(
+                    "Internal Server Error",
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                )
+            finally:
+                reset_chat_diagnostic_context(context_token)
+
+        return diagnostic_handler
+
+
+router = APIRouter(route_class=ChatDiagnosticRoute)
 llm_service = LLMService()
 DbSession = Annotated[AsyncSession, Depends(get_db)]
 
