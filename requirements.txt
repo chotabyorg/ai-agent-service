@@ -9,7 +9,7 @@ pydantic-settings
 python-dotenv
 redis
 openai
-mcp
+mcp==1.26.0
 fast-bitrix24
 google-api-python-client
 google-auth

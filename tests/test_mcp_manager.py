@@ -107,3 +107,20 @@ async def test_initialize_loads_tools_and_call_tool_routes_to_client_session(
     assert FakeClientSession.instances[0].initialized is True
     assert FakeClientSession.instances[0].calls == [("find_contact", {"phone": "+123"})]
     assert result.content[0].text == '{"ok": true}'
+
+
+@pytest.mark.contract
+@pytest.mark.asyncio
+async def test_bitrix_server_initializes_and_lists_tools_without_network_calls() -> None:
+    manager = MCPManager(
+        "bitrix",
+        {"webhook_url": "https://example.invalid/rest/1/placeholder/"},
+    )
+
+    try:
+        tools = await manager.initialize()
+    finally:
+        await manager.close()
+
+    tool_names = {tool.name for tool in tools}
+    assert {"get_contact", "search_contact"}.issubset(tool_names)

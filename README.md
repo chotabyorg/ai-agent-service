@@ -27,7 +27,7 @@
 - PostgreSQL
 - Redis
 - OpenAI-compatible API (`openai.AsyncOpenAI`)
-- Model Context Protocol (`mcp`)
+- Model Context Protocol (`mcp==1.26.0`). This exact version is pinned because the bundled Bitrix server imports `mcp.server.fastmcp`, which was removed in SDK 2.x; change the pin only with a server migration and stdio handshake coverage.
 - Bitrix24 MCP server (`fast-bitrix24`)
 - Google API Python Client для Google Workspace MCP
 
