@@ -1,7 +1,10 @@
+import asyncio
+from types import SimpleNamespace
 from uuid import UUID, uuid4
 
 import pytest
 from fastapi.testclient import TestClient
+from pydantic import SecretStr
 from redis.exceptions import RedisError
 
 import api.v1.chat as chat_api_module
@@ -10,6 +13,13 @@ import services.llm_service as llm_service_module
 from api.v1.chat import ChatDiagnosticRoute
 from models.agent import AgentTemplate
 from services.encryption_service import EncryptionService
+from services.chat_diagnostics import (
+    ChatDiagnosticContext,
+    ChatFailureStage,
+    bind_chat_diagnostic_context,
+    reset_chat_diagnostic_context,
+    set_chat_failure_stage,
+)
 from tests.fakes import FakeMCPController, ScriptedLLMClient, build_llm_response
 
 
@@ -87,6 +97,72 @@ async def test_request_validation_still_returns_422_without_failure_log(
 
     assert response.status_code == 422
     assert log_calls == []
+
+
+@pytest.mark.diagnostic
+async def test_invalid_s2s_auth_keeps_original_401_without_failure_log(
+    api_client_no_raise,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert_chat_diagnostic_route_installed()
+    monkeypatch.setattr(
+        chat_api_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            chat_s2s_token=SecretStr("expected-chat-token"),
+            chat_s2s_auth_required=True,
+        ),
+    )
+    log_calls = capture_chat_failure_logs(monkeypatch)
+
+    response = await api_client_no_raise.post(
+        "/v1/chat/completions",
+        json={
+            "agent_id": str(uuid4()),
+            "external_client_id": "sentinel-unauthorized-client",
+            "channel": "website",
+            "message": "sentinel-unauthorized-request",
+        },
+        headers={"X-Service-Token": "invalid-sentinel-chat-token"},
+    )
+
+    assert response.status_code == 401
+    assert response.json() == {"detail": "Invalid service token"}
+    assert response.headers["content-type"] == "application/json"
+    assert log_calls == []
+
+
+@pytest.mark.diagnostic
+async def test_chat_diagnostic_contexts_are_isolated_across_awaits() -> None:
+    both_bound = asyncio.Event()
+    bound_count = 0
+
+    async def exercise_context(
+        initial_stage: ChatFailureStage,
+        next_stage: ChatFailureStage,
+    ) -> None:
+        nonlocal bound_count
+        context = ChatDiagnosticContext()
+        token = bind_chat_diagnostic_context(context)
+        try:
+            set_chat_failure_stage(initial_stage)
+            bound_count += 1
+            if bound_count == 2:
+                both_bound.set()
+
+            await both_bound.wait()
+            assert context.failure_stage is initial_stage
+
+            set_chat_failure_stage(next_stage)
+            await asyncio.sleep(0)
+            assert context.failure_stage is next_stage
+        finally:
+            reset_chat_diagnostic_context(token)
+
+    await asyncio.gather(
+        exercise_context(ChatFailureStage.AGENT_LOOKUP, ChatFailureStage.CONTEXT_LOAD),
+        exercise_context(ChatFailureStage.LLM_REQUEST, ChatFailureStage.HISTORY_PERSIST),
+    )
 
 
 async def create_agent(api_client, db_session_factory=None, owner_id=None) -> dict[str, object]:
