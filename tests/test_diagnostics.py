@@ -1,14 +1,22 @@
 import asyncio
+import inspect
 from types import SimpleNamespace
 from uuid import UUID, uuid4
 
 import pytest
 from fastapi.testclient import TestClient
+from mcp.types import ErrorData
 from pydantic import SecretStr
 from redis.exceptions import RedisError
 
+try:
+    from mcp.shared.exceptions import MCPError
+except ImportError:
+    from mcp.shared.exceptions import McpError as MCPError
+
 import api.v1.chat as chat_api_module
 import main
+import mcp_clients.manager as mcp_manager_module
 import services.llm_service as llm_service_module
 from api.v1.chat import ChatDiagnosticRoute
 from models.agent import AgentTemplate
@@ -24,6 +32,14 @@ from tests.fakes import FakeMCPController, ScriptedLLMClient, build_llm_response
 
 
 FAKE_OPENROUTER_KEY = "sk-or-v1-test-key-for-diagnostics"
+
+
+def build_mcp_error(message: str, data: dict[str, str]) -> Exception:
+    """Build the installed MCP SDK's protocol error across supported API versions."""
+
+    if "error" in inspect.signature(MCPError).parameters:
+        return MCPError(ErrorData(code=-32000, message=message, data=data))
+    return MCPError(code=-32000, message=message, data=data)
 
 
 def build_agent_payload() -> dict[str, object]:
@@ -46,13 +62,14 @@ def assert_safe_chat_failure_log(
     *,
     expected_stage: str,
     sensitive_values: list[str],
+    expected_exception_type: str = "RuntimeError",
 ) -> None:
     assert len(log_calls) == 1
     args, kwargs = log_calls[0]
     assert args == (
         "chat_processing_failed failure_stage=%s exception_type=%s",
         expected_stage,
-        "RuntimeError",
+        expected_exception_type,
     )
     assert kwargs == {}
     assert "exc_info" not in kwargs
@@ -160,8 +177,8 @@ async def test_chat_diagnostic_contexts_are_isolated_across_awaits() -> None:
             reset_chat_diagnostic_context(token)
 
     await asyncio.gather(
-        exercise_context(ChatFailureStage.AGENT_LOOKUP, ChatFailureStage.CONTEXT_LOAD),
-        exercise_context(ChatFailureStage.LLM_REQUEST, ChatFailureStage.HISTORY_PERSIST),
+        exercise_context(ChatFailureStage.MCP_INITIALIZE, ChatFailureStage.MCP_LIST_TOOLS),
+        exercise_context(ChatFailureStage.LLM_REQUEST, ChatFailureStage.MCP_METADATA_READ),
     )
 
 
@@ -335,6 +352,119 @@ async def test_mcp_init_generic_exception_results_in_http_500(
         expected_stage="mcp_setup",
         sensitive_values=[
             exception_text,
+            request_text,
+            external_client_id,
+            str(owner_id),
+            agent["id"],
+            credential_value,
+            FAKE_OPENROUTER_KEY,
+        ],
+    )
+
+
+@pytest.mark.diagnostic
+@pytest.mark.parametrize(
+    ("failed_operation", "expected_stage"),
+    [
+        ("initialize", ChatFailureStage.MCP_INITIALIZE.value),
+        ("list_tools", ChatFailureStage.MCP_LIST_TOOLS.value),
+        ("metadata_read", ChatFailureStage.MCP_METADATA_READ.value),
+    ],
+)
+async def test_mcp_rpc_failures_log_only_phase_and_exception_class(
+    failed_operation: str,
+    expected_stage: str,
+    api_client_no_raise,
+    db_session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert_chat_diagnostic_route_installed()
+    owner_id = uuid4()
+    agent = await create_agent(
+        api_client_no_raise,
+        db_session_factory=db_session,
+        owner_id=owner_id,
+    )
+    credential_value = "https://sentinel.bitrix.invalid/webhook"
+    credentials_response = await api_client_no_raise.put(
+        f"/v1/agents/{agent['id']}/credentials",
+        json={
+            "service_name": "bitrix",
+            "credentials": {"webhook_url": credential_value},
+        },
+        headers=build_headers(owner_id),
+    )
+    assert credentials_response.status_code == 200
+
+    error_message = "sentinel-mcp-error-message"
+    error_data = {"credential": "sentinel-mcp-error-data"}
+    mcp_error = build_mcp_error(error_message, error_data)
+
+    class FakeTransport:
+        async def __aenter__(self):
+            return object(), object()
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+    class FakeClientSession:
+        def __init__(self, read_stream, write_stream) -> None:
+            self.read_stream = read_stream
+            self.write_stream = write_stream
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        async def initialize(self):
+            if failed_operation == "initialize":
+                raise mcp_error
+
+        async def list_tools(self):
+            if failed_operation == "list_tools":
+                raise mcp_error
+            return SimpleNamespace(tools=[])
+
+        async def read_resource(self, uri: str):
+            assert uri == "tools://metadata"
+            if failed_operation == "metadata_read":
+                raise mcp_error
+            return SimpleNamespace(contents=[])
+
+    monkeypatch.setattr(mcp_manager_module, "stdio_client", lambda params: FakeTransport())
+    monkeypatch.setattr(mcp_manager_module, "ClientSession", FakeClientSession)
+
+    controller = ScriptedLLMClient()
+    controller.chat.completions.queue(build_llm_response(content="unused"))
+    monkeypatch.setattr(llm_service_module, "AsyncOpenAI", lambda **kwargs: controller)
+
+    request_text = "sentinel-mcp-request-message"
+    external_client_id = "sentinel-mcp-external-client"
+    log_calls = capture_chat_failure_logs(monkeypatch)
+    response = await api_client_no_raise.post(
+        "/v1/chat/completions",
+        json={
+            "agent_id": agent["id"],
+            "external_client_id": external_client_id,
+            "channel": "telegram",
+            "message": request_text,
+        },
+        headers=build_headers(owner_id),
+    )
+
+    assert response.status_code == 500
+    assert response.text == "Internal Server Error"
+    assert response.headers["content-type"] == "text/plain; charset=utf-8"
+    assert controller.chat.completions.calls == []
+    assert_safe_chat_failure_log(
+        log_calls,
+        expected_stage=expected_stage,
+        expected_exception_type=type(mcp_error).__name__,
+        sensitive_values=[
+            error_message,
+            "sentinel-mcp-error-data",
             request_text,
             external_client_id,
             str(owner_id),
