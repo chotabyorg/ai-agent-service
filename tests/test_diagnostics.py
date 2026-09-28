@@ -35,12 +35,16 @@ from tests.fakes import FakeMCPController, ScriptedLLMClient, build_llm_response
 FAKE_OPENROUTER_KEY = "sk-or-v1-test-key-for-diagnostics"
 
 
-def build_mcp_error(message: str, data: dict[str, str]) -> Exception:
+def build_mcp_error(
+    message: str,
+    data: dict[str, str],
+    code: int = -32000,
+) -> Exception:
     """Build the installed MCP SDK's protocol error across supported API versions."""
 
     if "error" in inspect.signature(MCPError).parameters:
-        return MCPError(ErrorData(code=-32000, message=message, data=data))
-    return MCPError(code=-32000, message=message, data=data)
+        return MCPError(ErrorData(code=code, message=message, data=data))
+    return MCPError(code=code, message=message, data=data)
 
 
 def build_agent_payload() -> dict[str, object]:
@@ -64,14 +68,23 @@ def assert_safe_chat_failure_log(
     expected_stage: str,
     sensitive_values: list[str],
     expected_exception_type: str = "RuntimeError",
+    expected_mcp_error_code: int | None = None,
 ) -> None:
     assert len(log_calls) == 1
     args, kwargs = log_calls[0]
-    assert args == (
-        "chat_processing_failed failure_stage=%s exception_type=%s",
-        expected_stage,
-        expected_exception_type,
-    )
+    if expected_mcp_error_code is None:
+        assert args == (
+            "chat_processing_failed failure_stage=%s exception_type=%s",
+            expected_stage,
+            expected_exception_type,
+        )
+    else:
+        assert args == (
+            "chat_processing_failed failure_stage=%s exception_type=%s mcp_error_code=%d",
+            expected_stage,
+            expected_exception_type,
+            expected_mcp_error_code,
+        )
     assert kwargs == {}
     assert "exc_info" not in kwargs
     assert "stack_info" not in kwargs
@@ -449,9 +462,19 @@ async def test_mcp_init_generic_exception_results_in_http_500(
         ("metadata_read", ChatFailureStage.MCP_METADATA_READ.value),
     ],
 )
-async def test_mcp_rpc_failures_log_only_phase_and_exception_class(
+@pytest.mark.parametrize(
+    ("mcp_error_code", "expected_logged_code"),
+    [
+        (-32000, -32000),
+        (408, 408),
+        (None, None),
+    ],
+)
+async def test_mcp_rpc_failures_log_phase_class_and_optional_integer_code(
     failed_operation: str,
     expected_stage: str,
+    mcp_error_code: int | None,
+    expected_logged_code: int | None,
     api_client_no_raise,
     db_session,
     monkeypatch: pytest.MonkeyPatch,
@@ -476,7 +499,13 @@ async def test_mcp_rpc_failures_log_only_phase_and_exception_class(
 
     error_message = "sentinel-mcp-error-message"
     error_data = {"credential": "sentinel-mcp-error-data"}
-    mcp_error = build_mcp_error(error_message, error_data)
+    mcp_error = build_mcp_error(
+        error_message,
+        error_data,
+        code=mcp_error_code if mcp_error_code is not None else -32000,
+    )
+    if mcp_error_code is None:
+        mcp_error.error = SimpleNamespace(message=error_message, data=error_data)
 
     class FakeTransport:
         async def __aenter__(self):
@@ -540,6 +569,7 @@ async def test_mcp_rpc_failures_log_only_phase_and_exception_class(
         log_calls,
         expected_stage=expected_stage,
         expected_exception_type=type(mcp_error).__name__,
+        expected_mcp_error_code=expected_logged_code,
         sensitive_values=[
             error_message,
             "sentinel-mcp-error-data",
@@ -551,6 +581,49 @@ async def test_mcp_rpc_failures_log_only_phase_and_exception_class(
             FAKE_OPENROUTER_KEY,
         ],
     )
+
+
+@pytest.mark.diagnostic
+@pytest.mark.parametrize(
+    ("candidate_code", "expected_code"),
+    [
+        (-(2**31), -(2**31)),
+        (2**31 - 1, 2**31 - 1),
+        (True, None),
+        (2**31, None),
+        (-(2**31) - 1, None),
+        ("-32000", None),
+        (None, None),
+    ],
+)
+def test_mcp_error_code_requires_bounded_exact_integer(
+    candidate_code: object,
+    expected_code: int | None,
+) -> None:
+    mcp_error = build_mcp_error("sentinel-error-message", {"key": "sentinel-error-data"})
+    if candidate_code is None:
+        mcp_error.error = SimpleNamespace()
+    else:
+        mcp_error.error = SimpleNamespace(code=candidate_code)
+
+    assert chat_api_module._mcp_error_code(mcp_error) == expected_code
+
+
+@pytest.mark.diagnostic
+def test_mcp_error_code_supports_legacy_structured_code_attribute() -> None:
+    mcp_error = build_mcp_error("sentinel-error-message", {"key": "sentinel-error-data"})
+    mcp_error.error = SimpleNamespace()
+    mcp_error.code = 408
+
+    assert chat_api_module._mcp_error_code(mcp_error) == 408
+
+
+@pytest.mark.diagnostic
+def test_mcp_error_code_is_not_extracted_from_unrecognized_exception() -> None:
+    error = RuntimeError("sentinel-error-message")
+    error.error = SimpleNamespace(code=-32000)
+
+    assert chat_api_module._mcp_error_code(error) is None
 
 
 @pytest.mark.diagnostic

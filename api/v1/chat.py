@@ -12,6 +12,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.requests import Request
 from starlette.responses import PlainTextResponse, Response
 
+try:
+    from mcp.shared.exceptions import MCPError as _MCPError
+except ImportError:
+    from mcp.shared.exceptions import McpError as _MCPError
+
 from api.dependencies import get_db
 from core.config import get_settings
 from schemas.chat import ChatRequest, ChatResponse
@@ -34,6 +39,9 @@ from services.llm_service import (
 
 logger = logging.getLogger(__name__)
 
+_MCP_ERROR_CODE_MIN = -(2**31)
+_MCP_ERROR_CODE_MAX = 2**31 - 1
+
 
 def _normalized_exception_type(exc: Exception) -> str:
     """Return only a bounded Python class name, never exception details."""
@@ -42,6 +50,25 @@ def _normalized_exception_type(exc: Exception) -> str:
     if name.isascii() and name.isidentifier() and len(name) <= 64:
         return name
     return "Exception"
+
+
+def _mcp_error_code(exc: Exception) -> int | None:
+    """Extract only a bounded integer code from a recognized MCP exception."""
+
+    if not isinstance(exc, _MCPError):
+        return None
+
+    try:
+        error_data = getattr(exc, "error", None)
+        code = getattr(error_data, "code", None) if error_data is not None else None
+        if code is None:
+            code = getattr(exc, "code", None)
+    except Exception:
+        return None
+
+    if type(code) is not int or not _MCP_ERROR_CODE_MIN <= code <= _MCP_ERROR_CODE_MAX:
+        return None
+    return code
 
 
 class ChatDiagnosticRoute(APIRoute):
@@ -67,11 +94,20 @@ class ChatDiagnosticRoute(APIRoute):
             except RequestValidationError:
                 raise
             except Exception as exc:
-                logger.error(
-                    "chat_processing_failed failure_stage=%s exception_type=%s",
-                    diagnostics.failure_stage.value,
-                    _normalized_exception_type(exc),
-                )
+                mcp_error_code = _mcp_error_code(exc)
+                if mcp_error_code is None:
+                    logger.error(
+                        "chat_processing_failed failure_stage=%s exception_type=%s",
+                        diagnostics.failure_stage.value,
+                        _normalized_exception_type(exc),
+                    )
+                else:
+                    logger.error(
+                        "chat_processing_failed failure_stage=%s exception_type=%s mcp_error_code=%d",
+                        diagnostics.failure_stage.value,
+                        _normalized_exception_type(exc),
+                        mcp_error_code,
+                    )
                 return PlainTextResponse(
                     "Internal Server Error",
                     status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
