@@ -13,6 +13,14 @@ from mcp.client.stdio import StdioServerParameters, stdio_client
 from core.config import get_settings
 
 
+def _set_chat_failure_stage(stage: str) -> None:
+    """Set a chat phase without importing the eager services package at module load."""
+
+    from services.chat_diagnostics import ChatFailureStage, set_chat_failure_stage
+
+    set_chat_failure_stage(ChatFailureStage(stage))
+
+
 class MCPManager:
     """Manage a single isolated MCP server subprocess."""
 
@@ -73,8 +81,10 @@ class MCPManager:
         server_params = self._build_server_params()
         read_stream, write_stream = await self.stack.enter_async_context(stdio_client(server_params))
         self.session = await self.stack.enter_async_context(ClientSession(read_stream, write_stream))
+        _set_chat_failure_stage("mcp_initialize")
         await self.session.initialize()
 
+        _set_chat_failure_stage("mcp_list_tools")
         server_tools = await self.session.list_tools()
         self._tools = list(server_tools.tools)
         return self._tools
@@ -118,6 +128,7 @@ class MCPManager:
         """Читает tools://metadata из MCP-сервера."""
         if self.session is None:
             raise RuntimeError("MCP session is not initialized.")
+        _set_chat_failure_stage("mcp_metadata_read")
         result = await self.session.read_resource("tools://metadata")
         content = result.contents[0].text if result.contents else "{}"
         return json.loads(content)
