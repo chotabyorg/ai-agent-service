@@ -1,13 +1,16 @@
 """Business logic for agent configuration management."""
 
 from collections.abc import Sequence
+from typing import Any
 from uuid import UUID
 
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from core.config import get_settings
 from models.agent import AgentCredentials, AgentTemplate
 from schemas.agent import AgentCreate, AgentCredentialsCreate, AgentUpdate
+from services.credentials_cipher import decrypt_credentials, encrypt_credentials
 from services.prompt_builder import PromptBuilder
 
 
@@ -111,20 +114,36 @@ class AgentService:
         if agent is None:
             return None
 
+        stored_credentials: dict[str, Any] | list[Any] = payload.credentials
+        if get_settings().mcp_credentials_encryption_enabled:
+            stored_credentials = encrypt_credentials(payload.credentials)
+
         credentials = await session.get(
             AgentCredentials,
             {"agent_id": agent_id, "service_name": payload.service_name},
         )
 
         if credentials is None:
-            credentials = AgentCredentials(agent_id=agent_id, **payload.model_dump())
+            credentials = AgentCredentials(
+                agent_id=agent_id,
+                service_name=payload.service_name,
+                credentials=stored_credentials,
+            )
             session.add(credentials)
         else:
-            credentials.credentials = payload.credentials
+            credentials.credentials = stored_credentials
 
         await session.commit()
         await session.refresh(credentials)
         return credentials
+
+    @staticmethod
+    def decrypt_credentials_record(record: AgentCredentials | None) -> dict[str, Any]:
+        """Return credentials as a dictionary for legacy or encrypted rows."""
+
+        if record is None:
+            return {}
+        return decrypt_credentials(record.credentials)
 
     async def delete_agent(
         self,
