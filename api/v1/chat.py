@@ -55,7 +55,16 @@ class ChatDiagnosticRoute(APIRoute):
             context_token = bind_chat_diagnostic_context(diagnostics)
             try:
                 return await original_handler(request)
-            except (HTTPException, RequestValidationError):
+            except HTTPException as exc:
+                if exc.status_code >= status.HTTP_500_INTERNAL_SERVER_ERROR:
+                    logger.error(
+                        "chat_processing_failed failure_stage=%s exception_type=%s status_code=%d",
+                        diagnostics.failure_stage.value,
+                        _normalized_exception_type(exc),
+                        exc.status_code,
+                    )
+                raise
+            except RequestValidationError:
                 raise
             except Exception as exc:
                 logger.error(

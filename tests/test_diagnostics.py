@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from uuid import UUID, uuid4
 
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from mcp.types import ErrorData
 from pydantic import SecretStr
@@ -145,6 +146,83 @@ async def test_invalid_s2s_auth_keeps_original_401_without_failure_log(
 
     assert response.status_code == 401
     assert response.json() == {"detail": "Invalid service token"}
+    assert response.headers["content-type"] == "application/json"
+    assert log_calls == []
+
+
+@pytest.mark.diagnostic
+async def test_http_500_keeps_original_response_and_logs_only_safe_fields(
+    api_client_no_raise,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert_chat_diagnostic_route_installed()
+    exception_detail = "sentinel-internal-http-error-detail"
+
+    async def fail_with_http_500(*args, **kwargs):
+        raise HTTPException(status_code=500, detail=exception_detail)
+
+    monkeypatch.setattr(
+        chat_api_module.llm_service,
+        "process_chat_message",
+        fail_with_http_500,
+    )
+    log_calls = capture_chat_failure_logs(monkeypatch)
+
+    response = await api_client_no_raise.post(
+        "/v1/chat/completions",
+        json={
+            "agent_id": str(uuid4()),
+            "external_client_id": "sentinel-http-500-client",
+            "channel": "website",
+            "message": "sentinel-http-500-request",
+        },
+    )
+
+    assert response.status_code == 500
+    assert response.json() == {"detail": exception_detail}
+    assert response.headers["content-type"] == "application/json"
+    assert len(log_calls) == 1
+    args, kwargs = log_calls[0]
+    assert args == (
+        "chat_processing_failed failure_stage=%s exception_type=%s status_code=%d",
+        "request",
+        "HTTPException",
+        500,
+    )
+    assert kwargs == {}
+    assert exception_detail not in repr((args, kwargs))
+
+
+@pytest.mark.diagnostic
+async def test_http_4xx_keeps_original_response_without_failure_log(
+    api_client_no_raise,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert_chat_diagnostic_route_installed()
+    exception_detail = "sentinel-client-http-error-detail"
+
+    async def fail_with_http_4xx(*args, **kwargs):
+        raise HTTPException(status_code=429, detail=exception_detail)
+
+    monkeypatch.setattr(
+        chat_api_module.llm_service,
+        "process_chat_message",
+        fail_with_http_4xx,
+    )
+    log_calls = capture_chat_failure_logs(monkeypatch)
+
+    response = await api_client_no_raise.post(
+        "/v1/chat/completions",
+        json={
+            "agent_id": str(uuid4()),
+            "external_client_id": "sentinel-http-4xx-client",
+            "channel": "website",
+            "message": "sentinel-http-4xx-request",
+        },
+    )
+
+    assert response.status_code == 429
+    assert response.json() == {"detail": exception_detail}
     assert response.headers["content-type"] == "application/json"
     assert log_calls == []
 
