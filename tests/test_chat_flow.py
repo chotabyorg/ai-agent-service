@@ -1358,6 +1358,39 @@ async def test_multiple_credentials_are_loaded_for_chat_flow(
 
 
 @pytest.mark.integration
+async def test_chat_decrypts_encrypted_mcp_credentials(
+    api_client, db_session, llm_controller, mcp_controller, monkeypatch
+) -> None:
+    from core.config import get_settings
+
+    secret = "test-only-chat-mcp-secret"
+    monkeypatch.setattr(get_settings(), "mcp_credentials_encryption_enabled", True)
+    mcp_controller.tools_by_service["custom"] = []
+    llm_controller.chat.completions.queue(build_llm_response(content="Ready"))
+    agent = await create_agent(api_client, db_session_factory=db_session)
+    await store_credentials(
+        api_client,
+        agent["id"],
+        "custom",
+        {"token": secret},
+        owner_id=UUID(agent["user_id"]),
+    )
+
+    response = await api_client.post(
+        "/v1/chat/completions",
+        json={
+            "agent_id": agent["id"],
+            "external_client_id": "encrypted-credential-test",
+            "channel": "telegram",
+            "message": "Hello",
+        },
+    )
+
+    assert response.status_code == 200
+    assert mcp_controller.init_calls[0]["credentials"] == {"token": secret}
+
+
+@pytest.mark.integration
 async def test_chat_without_key_returns_400(api_client, llm_controller) -> None:
     """Agent with is_active=True but no key should get 400."""
     # Create agent with is_active=True but no key in DB

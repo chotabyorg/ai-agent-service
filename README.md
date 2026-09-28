@@ -199,6 +199,8 @@ The chat endpoint keeps its existing JSON request and response. Trusted callers 
 | `PRIVACY_FILTER_ENABLED` | `false` | Если `true`, все внешние LLM-вызовы идут через privacy-filter-service |
 | `PRIVACY_FILTER_BASE_URL` | `http://privacy-filter-service:8000` | Внутренний URL privacy-filter-service |
 | `PRIVACY_FILTER_TIMEOUT_SECONDS` | `30` | Таймаут запроса к privacy-filter-service |
+| `ENCRYPTION_KEY` | — | Существующий Fernet-ключ для API-ключей моделей и MCP credentials; потеря ключа сделает зашифрованные значения нечитаемыми |
+| `MCP_CREDENTIALS_ENCRYPTION_ENABLED` | `false` | Шифровать новые MCP credentials; включать после выкладки совместимого dual-read образа |
 | `KNOWLEDGE_BASE_ENABLED` | `false` | Временный global feature flag / kill switch для Knowledge Base retrieval |
 | `KNOWLEDGE_BASE_SERVICE_URL` | `http://knowledge-base-service:8000` | Внутренний URL knowledge-base-service |
 | `KNOWLEDGE_BASE_TIMEOUT_SECONDS` | `2.0` | Таймаут internal retrieval запроса |
@@ -365,6 +367,30 @@ make downgrade
 - `make revision msg="message"` — создает новую Alembic-миграцию через `--autogenerate`.
 - `make upgrade` — применяет все миграции до `head`.
 - `make downgrade` — откатывает базу на одну ревизию назад.
+
+### Шифрование MCP credentials
+
+MCP credentials используют существующий `ENCRYPTION_KEY`. Значение должно быть
+одинаковым для всех pod и миграционной Job и сохраненным в backup: потеря ключа
+сделает недоступными как MCP credentials, так и зашифрованные API-ключи моделей.
+Текущая реализация Fernet не поддерживает идентификаторы ключей или автоматическую
+ротацию; перед заменой ключа потребуется отдельная контролируемая расшифровка и
+повторное шифрование всех зависимых значений.
+
+Rollout выполняется двумя этапами, без остановки сервиса:
+
+1. Развернуть образ с чтением legacy JSON objects и версионированных encrypted
+   envelopes, оставив `MCP_CREDENTIALS_ENCRYPTION_ENABLED=false`.
+2. После готовности всех совместимых pod включить flag и запустить отдельную
+   Argo PostSync Job: `python -m scripts.encrypt_mcp_credentials --batch-size 100
+   --max-passes 3`. Job обрабатывает ограниченные batches и безопасно продолжается
+   при повторном запуске; код завершения 0 подтверждает, что plaintext objects не
+   остались. Во время backfill сервис продолжает читать оба формата.
+
+Откат после появления envelopes допустим только на образ, который умеет их читать.
+При откате оставляйте flag включенным, чтобы записи оставались зашифрованными.
+Отключение flag снова пишет plaintext для новых/обновленных строк. Автоматического
+переписывания данных обратно в plaintext нет.
 
 ## Запуск через Docker
 

@@ -55,7 +55,9 @@ class AgentCredentials(Base):
         primary_key=True,
     )
     service_name: Mapped[str] = mapped_column(String(100), primary_key=True)
-    credentials: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    # The JSONB value is either a legacy credentials object or a versioned
+    # encrypted envelope array. Request payloads remain object-only.
+    credentials: Mapped[Any] = mapped_column(JSONB, nullable=False)
     enabled_tools: Mapped[list | None] = mapped_column(JSONB, nullable=True, default=None)
 
     agent: Mapped["AgentTemplate"] = relationship(back_populates="credentials")

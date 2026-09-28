@@ -49,6 +49,7 @@ class Settings(BaseSettings):
     privacy_filter_timeout_seconds: float = Field(default=30.0)
 
     encryption_key: SecretStr = Field(default="")
+    mcp_credentials_encryption_enabled: bool = Field(default=False)
 
     internal_api_token: str = Field(default="")
 

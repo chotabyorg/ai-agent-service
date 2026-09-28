@@ -389,7 +389,9 @@ class LLMService:
             for credentials_record in credentials_records:
                 manager = MCPManager(
                     service_name=credentials_record.service_name,
-                    credentials=credentials_record.credentials,
+                    credentials=self.agent_service.decrypt_credentials_record(
+                        credentials_record
+                    ),
                 )
                 try:
                     await stack.enter_async_context(manager)

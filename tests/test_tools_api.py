@@ -1,7 +1,7 @@
 """Tests for MCP tool filtering endpoints."""
 
 from unittest.mock import AsyncMock, MagicMock
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 
@@ -82,6 +82,7 @@ def _patch_mcp_manager(monkeypatch, *, include_extended: bool = False):
 
     mock_cls = MagicMock(return_value=manager_instance)
     monkeypatch.setattr("api.v1.tools.MCPManager", mock_cls)
+    return mock_cls
 
 
 @pytest.mark.integration
@@ -107,6 +108,42 @@ async def test_get_tools_null_enables_core_only(api_client, monkeypatch) -> None
     assert all(t["enabled"] is True for t in data)
     names = {t["name"] for t in data}
     assert names == {"search_contact", "get_contact", "add_lead"}
+
+
+@pytest.mark.integration
+async def test_get_tools_decrypts_stored_credentials(api_client, db_session, monkeypatch) -> None:
+    from models.agent import AgentCredentials
+    from services.credentials_cipher import encrypt_credentials
+
+    manager_cls = _patch_mcp_manager(monkeypatch)
+    owner_id = uuid4()
+    created = await api_client.post(
+        "/v1/agents/", json=_build_agent_payload(), headers=_headers(owner_id)
+    )
+    agent_id = created.json()["id"]
+    await api_client.put(
+        f"/v1/agents/{agent_id}/credentials",
+        json={"service_name": "bitrix", "credentials": {"webhook_url": "placeholder"}},
+        headers=_headers(owner_id),
+    )
+    async with db_session() as session:
+        record = await session.get(
+            AgentCredentials,
+            {"agent_id": UUID(agent_id), "service_name": "bitrix"},
+        )
+        record.credentials = encrypt_credentials(
+            {"webhook_url": "test-only-encrypted-tool-secret"}
+        )
+        await session.commit()
+
+    response = await api_client.get(
+        f"/v1/agents/{agent_id}/tools/bitrix", headers=_headers(owner_id)
+    )
+
+    assert response.status_code == 200
+    assert manager_cls.call_args.kwargs["credentials"] == {
+        "webhook_url": "test-only-encrypted-tool-secret"
+    }
 
 
 @pytest.mark.integration

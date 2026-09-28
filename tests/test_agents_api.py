@@ -260,6 +260,42 @@ async def test_upsert_credentials_creates_and_updates_single_owned_record(api_cl
 
 
 @pytest.mark.integration
+async def test_encrypted_credentials_write_returns_only_safe_summary(
+    api_client, db_session, monkeypatch, caplog
+) -> None:
+    from core.config import get_settings
+    from services.credentials_cipher import decrypt_credentials, is_encrypted_envelope
+
+    monkeypatch.setattr(get_settings(), "mcp_credentials_encryption_enabled", True)
+    secret = "test-only-mcp-secret-value"
+    owner_id = uuid4()
+    created = await api_client.post(
+        "/v1/agents/", json=build_agent_payload(), headers=build_headers(owner_id)
+    )
+    agent_id = created.json()["id"]
+
+    response = await api_client.put(
+        f"/v1/agents/{agent_id}/credentials",
+        json={"service_name": "bitrix", "credentials": {"webhook_url": secret}},
+        headers=build_headers(owner_id),
+    )
+
+    assert response.status_code == 200
+    assert secret not in response.text
+    assert secret not in caplog.text
+    assert response.json()["credential_keys"] == ["webhook_url"]
+    async with db_session() as session:
+        record = await session.get(
+            AgentCredentials,
+            {"agent_id": UUID(agent_id), "service_name": "bitrix"},
+        )
+    assert record is not None
+    assert is_encrypted_envelope(record.credentials)
+    assert secret not in str(record.credentials)
+    assert decrypt_credentials(record.credentials)["webhook_url"] == secret
+
+
+@pytest.mark.integration
 async def test_upsert_credentials_returns_404_for_missing_or_foreign_agent(api_client) -> None:
     owner_id = uuid4()
     create_response = await api_client.post(
@@ -847,6 +883,7 @@ async def test_upsert_google_credentials_unknown_field_returns_422(api_client, m
                 "client_id": "test.apps.googleusercontent.com",
                 "client_secret": "GOCSPX-secret",
                 "refresh_token": "1//refresh",
+                "scopes": "https://www.googleapis.com/auth/spreadsheets",
                 "private_key": "-----BEGIN PRIVATE KEY-----",
             },
         },
