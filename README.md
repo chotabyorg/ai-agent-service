@@ -149,6 +149,8 @@ python mcp_clients/servers/google_workspace/server.py
 
 ## Основной флоу `/v1/chat/completions`
 
+The chat endpoint keeps its existing JSON request and response. Trusted callers send `X-Service-Token` from the dedicated `CHAT_S2S_TOKEN` and the agent owner in `X-User-Id`; agent lookup is scoped by that owner before a session is created or an LLM/tool call begins. `CHAT_S2S_AUTH_REQUIRED=false` supports rolling out the headers to callers. Production must set it to `true` after the token is installed in KrakenD and every chat caller. This token is separate from `INTERNAL_API_TOKEN`, which continues to protect `/internal/v1/*` endpoints.
+
 1. Найти агента по `agent_id`.
 2. Проверить, что агент активен.
 3. Найти `ConversationSession` по `session_id` и убедиться, что она принадлежит этому агенту.
@@ -206,6 +208,8 @@ python mcp_clients/servers/google_workspace/server.py
 | `MCP_BITRIX_PATH` | `mcp_clients/servers/bitrix_server.py` | Локальный путь к Bitrix MCP server |
 | `MCP_GOOGLE_PATH` | `mcp_service/google_server.py` | Резервный путь для Google MCP server |
 | `INTERNAL_API_TOKEN` | `""` | Токен для service-to-service вызовов `/internal/*` эндпоинтов. Проверяется через заголовок `X-Service-Token`. Пустое значение отключает доступ (fail-closed). |
+| `CHAT_S2S_TOKEN` | `""` | Separate credential for `/v1/chat/completions` callers; do not reuse `INTERNAL_API_TOKEN`. |
+| `CHAT_S2S_AUTH_REQUIRED` | `false` | Compatibility switch; set to `true` only after KrakenD and all chat callers have the dedicated token and owner header. |
 
 ### Минимальный `.env` пример
 
