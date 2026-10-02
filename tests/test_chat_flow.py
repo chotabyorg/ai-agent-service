@@ -21,6 +21,14 @@ from tests.fakes import (
 FAKE_OPENROUTER_KEY = "sk-or-v1-test-key-for-unit-tests"
 
 
+def assert_composed_system_message(message: dict) -> None:
+    assert message["role"] == "system"
+    assert message["content"].startswith("<platform_policy>")
+    assert "<business_prompt>\nBe concise and helpful.\n</business_prompt>" in message["content"]
+    assert "<runtime_capability_context>" in message["content"]
+    assert "<channel_temporal_context>" in message["content"]
+
+
 class FakeKnowledgeBaseClient:
     contexts: list[object] = []
     error: Exception | None = None
@@ -617,8 +625,8 @@ async def test_chat_uses_existing_redis_history_and_strips_thinking_tags(
     assert second.status_code == 200
     assert second.json()["answer"] == "Final answer"
     messages = llm_controller.chat.completions.calls[-1]["messages"]
-    assert messages == [
-        {"role": "system", "content": "Be concise and helpful."},
+    assert_composed_system_message(messages[0])
+    assert messages[1:] == [
         {"role": "user", "content": "Prev user"},
         {"role": "assistant", "content": "Prev assistant"},
         {"role": "user", "content": "New question"},
@@ -653,8 +661,9 @@ async def test_chat_knowledge_base_disabled_preserves_existing_message_order(
 
     assert response.status_code == 200
     assert FakeKnowledgeBaseClient.calls == []
-    assert llm_controller.chat.completions.calls[0]["messages"] == [
-        {"role": "system", "content": "Be concise and helpful."},
+    messages = llm_controller.chat.completions.calls[0]["messages"]
+    assert_composed_system_message(messages[0])
+    assert messages[1:] == [
         {"role": "user", "content": "Hello"},
     ]
     assert llm_controller.chat.completions.calls[0]["max_tokens"] == 1024
@@ -711,7 +720,7 @@ async def test_chat_inserts_knowledge_base_context_after_system_prompt(
     assert FakeKnowledgeBaseClient.calls[0]["agent_id"] == UUID(agent["id"])
     assert FakeKnowledgeBaseClient.calls[0]["query"] == "What is warranty?"
     messages = llm_controller.chat.completions.calls[0]["messages"]
-    assert messages[0] == {"role": "system", "content": "Be concise and helpful."}
+    assert_composed_system_message(messages[0])
     assert messages[1]["role"] == "system"
     assert "<knowledge_base_context>" in messages[1]["content"]
     assert '[1] source="faq.pdf" chunk_index=2 score=0.88' in messages[1]["content"]
@@ -754,8 +763,9 @@ async def test_chat_omits_knowledge_base_message_for_empty_contexts(
 
     assert response.status_code == 200
     assert len(FakeKnowledgeBaseClient.calls) == 1
-    assert llm_controller.chat.completions.calls[0]["messages"] == [
-        {"role": "system", "content": "Be concise and helpful."},
+    messages = llm_controller.chat.completions.calls[0]["messages"]
+    assert_composed_system_message(messages[0])
+    assert messages[1:] == [
         {"role": "user", "content": "Unknown"},
     ]
 
@@ -795,8 +805,9 @@ async def test_chat_knowledge_base_failures_are_fail_open(
 
     assert response.status_code == 200
     assert response.json()["answer"] == "Fallback without KB"
-    assert llm_controller.chat.completions.calls[0]["messages"] == [
-        {"role": "system", "content": "Be concise and helpful."},
+    messages = llm_controller.chat.completions.calls[0]["messages"]
+    assert_composed_system_message(messages[0])
+    assert messages[1:] == [
         {"role": "user", "content": "Hello"},
     ]
 
@@ -1107,8 +1118,9 @@ async def test_chat_ignores_redis_load_failures(api_client, db_session, llm_cont
     )
 
     assert response.status_code == 200
-    assert llm_controller.chat.completions.calls[0]["messages"] == [
-        {"role": "system", "content": "Be concise and helpful."},
+    messages = llm_controller.chat.completions.calls[0]["messages"]
+    assert_composed_system_message(messages[0])
+    assert messages[1:] == [
         {"role": "user", "content": "Hello"},
     ]
 

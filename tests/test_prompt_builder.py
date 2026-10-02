@@ -45,8 +45,8 @@ class TestBuildFromConfigBasic:
         assert "</identity>" in result
         assert "<personality>" in result
         assert "</personality>" in result
-        assert "<tools_guidance>" in result
-        assert "<error_handling>" in result
+        assert "<platform_policy>" in result
+        assert "UNKNOWN_WRITE_RESULT" in result
         assert "<guardrails>" in result
         assert "<platform_rules>" in result
         assert "<output_format>" in result
@@ -57,7 +57,7 @@ class TestBuildIncludesDatetime:
         agent = _make_agent(prompt_config=_minimal_config(), timezone="Europe/Moscow")
         fixed_dt = datetime(2026, 3, 24, 15, 30, tzinfo=pytz.timezone("Europe/Moscow").localize(datetime(2026, 3, 24, 15, 30)).tzinfo)
 
-        with patch("services.prompt_builder.datetime") as mock_dt:
+        with patch("services.prompt_composer.datetime") as mock_dt:
             mock_dt.now.return_value = fixed_dt
             mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
             result = PromptBuilder().build(agent, TELEGRAM_CTX)
@@ -87,14 +87,14 @@ class TestBuildIncludesCapabilities:
         agent = _make_agent(prompt_config=config)
         result = PromptBuilder().build(agent, TELEGRAM_CTX)
 
-        assert "<core_capabilities>" in result
+        assert "<business_responsibilities>" in result
         assert "Запись на приём" in result
         assert "Консультация по ценам" in result
 
     def test_no_capabilities_section_when_empty(self) -> None:
         agent = _make_agent(prompt_config=_minimal_config())
         result = PromptBuilder().build(agent, TELEGRAM_CTX)
-        assert "<core_capabilities>" not in result
+        assert "<business_responsibilities>" not in result
 
 
 class TestBuildIncludesAlgorithms:
@@ -145,12 +145,15 @@ class TestBuildLegacyFallback:
     def test_returns_system_prompt_when_no_config(self) -> None:
         agent = _make_agent(system_prompt="You are a helpful bot.", prompt_config=None)
         result = PromptBuilder().build(agent, TELEGRAM_CTX)
-        assert result == "You are a helpful bot."
+        assert "You are a helpful bot." in result
+        assert result.startswith("<platform_policy>")
+        assert agent.system_prompt == "You are a helpful bot."
 
     def test_returns_empty_when_no_config_and_no_prompt(self) -> None:
         agent = _make_agent(system_prompt=None, prompt_config=None)
         result = PromptBuilder().build(agent, TELEGRAM_CTX)
-        assert result == ""
+        assert "<platform_policy>" in result
+        assert "<runtime_capability_context>" in result
 
 
 class TestBuildGreetingWithCompanyName:
@@ -193,7 +196,9 @@ class TestBuildStaticForPreview:
 
         assert "<identity>" in result
         assert "Acme" in result
-        assert "telegram" in result  # default dummy context uses telegram
+        assert "telegram" not in result
+        assert "Текущая дата" not in result
+        assert "<platform_policy>" not in result
 
     def test_build_static_legacy_fallback(self) -> None:
         agent = _make_agent(system_prompt="Legacy!", prompt_config=None)

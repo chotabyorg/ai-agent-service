@@ -1,6 +1,6 @@
 """Pydantic schemas for structured prompt configuration."""
 
-from pydantic import BaseModel, Field
+from pydantic import AliasChoices, BaseModel, Field
 
 
 class CompanyInfo(BaseModel):
@@ -41,7 +41,11 @@ class PromptConfig(BaseModel):
     version: int = 1
     company: CompanyInfo
     personality: PersonalityConfig = Field(default_factory=PersonalityConfig)
-    capabilities: list[str] = Field(default_factory=list)
+    responsibilities: list[str] = Field(
+        default_factory=list,
+        validation_alias=AliasChoices("responsibilities", "capabilities"),
+        description="Human business responsibilities; legacy capabilities is an input alias, never runtime grants.",
+    )
     data_collection_fields: list[DataCollectionField] = Field(default_factory=list)
     algorithms: list[Algorithm] = Field(default_factory=list)
     greeting_template: str = ""

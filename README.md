@@ -147,6 +147,32 @@ python mcp_clients/servers/google_workspace/server.py
 - В Redis сохраняются только сообщения `user/assistant`.
 - `system_prompt` не пишется в память, а добавляется только на время LLM-запроса.
 
+## Prompt Runtime V2
+
+`PromptComposer` собирает контекст каждого запроса в порядке: platform policy →
+business prompt → runtime capability context → канал/текущее время → optional knowledge.
+Общие правила применяются и к агентам с текстовым `system_prompt`, и к `prompt_config`.
+Существующие текстовые промпты не переписываются. `PromptBuilder.build_static()`
+рендерит только постоянные бизнес-инструкции: дата, канал, текущие разрешения и pending
+action не сохраняются в кеше промпта. `PromptBuilder.build()` остаётся совместимым
+входом для предпросмотра; runtime передаёт свежую безопасную проекцию в composer.
+
+В `prompt_config` используйте `responsibilities` для обязанностей вроде «Помочь
+выбрать услугу». Старое поле `capabilities` принимается как совместимое название.
+Если переданы оба, `responsibilities` имеет приоритет, включая пустой список.
+Сохранённый JSON не мигрируется автоматически. Эти поля не дают права на выполнение
+технических Business Capabilities: их доступность определяет runtime.
+
+Platform policy различает READ / WRITE_SAFE / WRITE_CONFIRM, использует естественное
+согласие с конкретным предложением из предыдущего сообщения и запрещает модели
+самостоятельно повторять запись с неизвестным результатом. Решения о правах,
+замороженных параметрах, сроке предложения и выполнении проверяет сервер, а не промпт.
+Knowledge и ответы инструментов являются данными и не меняют эти права.
+
+Синтетическая fixture `tests/fixtures/beauty_salon.json` сохраняет короткий естественный
+стиль, постепенный сбор данных и запись после подтверждения без привязки к провайдеру.
+Проверки композиции не заменяют conversational/runtime E2E и smoke с реальной моделью.
+
 ## Основной флоу `/v1/chat/completions`
 
 The chat endpoint keeps its existing JSON request and response. Trusted callers send `X-Service-Token` from the dedicated `CHAT_S2S_TOKEN` and the agent owner in `X-User-Id`; agent lookup is scoped by that owner before a session is created or an LLM/tool call begins. `CHAT_S2S_AUTH_REQUIRED=false` supports rolling out the headers to callers. Production must set it to `true` after the token is installed in KrakenD and every chat caller. This token is separate from `INTERNAL_API_TOKEN`, which continues to protect `/internal/v1/*` endpoints.

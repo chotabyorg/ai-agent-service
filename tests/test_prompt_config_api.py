@@ -100,6 +100,47 @@ async def test_put_prompt_config_updates_config_and_rebuilds_system_prompt(
     rebuilt_prompt = agent_resp.json()["system_prompt"]
     assert "<identity>" in rebuilt_prompt
     assert "TestCo" in rebuilt_prompt
+    assert "Текущая дата" not in rebuilt_prompt
+    assert "<platform_rules>" not in rebuilt_prompt
+
+
+@pytest.mark.integration
+async def test_responsibilities_config_roundtrips_without_rewriting_legacy_alias(
+    api_client, db_session, fake_redis,
+) -> None:
+    headers = build_headers()
+    agent = await create_agent(api_client, headers)
+    config = {**MINIMAL_PROMPT_CONFIG, "responsibilities": ["Помочь выбрать специалиста"]}
+    response = await api_client.put(
+        f"/v1/agents/{agent['id']}/prompt-config", json=config, headers=headers,
+    )
+    assert response.status_code == 200
+    assert response.json()["prompt_config"] == config
+    preview = await api_client.get(
+        f"/v1/agents/{agent['id']}/prompt-preview", headers=headers,
+    )
+    rendered = preview.json()["rendered_prompt"]
+    assert "Помочь выбрать специалиста" in rendered
+    assert "Консультация" not in rendered
+    assert rendered.startswith("<platform_policy>")
+
+
+@pytest.mark.integration
+async def test_legacy_preview_adds_policy_but_does_not_rewrite_stored_prompt(
+    api_client, db_session, fake_redis,
+) -> None:
+    headers = build_headers()
+    original = "You are our helpful salon assistant."
+    agent = await create_agent(api_client, headers, system_prompt=original)
+    preview = await api_client.get(
+        f"/v1/agents/{agent['id']}/prompt-preview", headers=headers,
+    )
+    assert preview.status_code == 200
+    assert preview.json()["rendered_prompt"].startswith("<platform_policy>")
+    assert original in preview.json()["rendered_prompt"]
+    current = await api_client.get(f"/v1/agents/{agent['id']}", headers=headers)
+    assert current.json()["system_prompt"] == original
+    assert current.json()["prompt_config"] is None
 
 
 @pytest.mark.integration
