@@ -1,6 +1,7 @@
 """REST endpoints for chat completions."""
 
 import hmac
+import json
 import logging
 from typing import Annotated
 from uuid import UUID
@@ -25,6 +26,7 @@ from services.chat_diagnostics import (
     bind_chat_diagnostic_context,
     reset_chat_diagnostic_context,
 )
+from business_capabilities.context import BusinessRuntimeError
 from services.llm_service import (
     AgentApiKeyInvalidError,
     AgentInactiveError,
@@ -123,6 +125,24 @@ llm_service = LLMService()
 DbSession = Annotated[AsyncSession, Depends(get_db)]
 
 
+def authenticated_namespace(settings, supplied):
+    if not supplied:
+        return None
+    try:
+        callers = json.loads(getattr(settings, 'chat_s2s_callers_json', None).get_secret_value()) if getattr(settings, 'chat_s2s_callers_json', None) else {}
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(callers, dict):
+        return None
+    for name, token in callers.items():
+        if isinstance(name, str) and 1 <= len(name) <= 100 and isinstance(token, str) and token and hmac.compare_digest(supplied.encode(), token.encode()):
+            return name
+    token = settings.chat_s2s_token.get_secret_value()
+    if token and hmac.compare_digest(supplied.encode(), token.encode()):
+        return 'shared-s2s'
+    return None
+
+
 async def authenticate_chat_caller(
     x_service_token: Annotated[str | None, Header(alias="X-Service-Token")] = None,
     x_user_id: Annotated[str | None, Header(alias="X-User-Id")] = None,
@@ -135,15 +155,7 @@ async def authenticate_chat_caller(
     and secrets have been deployed.
     """
     settings = get_settings()
-    expected_token = settings.chat_s2s_token.get_secret_value()
-    token_is_valid = bool(
-        expected_token
-        and x_service_token
-        and hmac.compare_digest(
-            x_service_token.encode("utf-8"),
-            expected_token.encode("utf-8"),
-        )
-    )
+    token_is_valid = authenticated_namespace(settings, x_service_token) is not None
 
     if x_service_token and not token_is_valid:
         raise HTTPException(
@@ -175,6 +187,7 @@ async def authenticate_chat_caller(
 @router.post("/completions", response_model=ChatResponse)
 async def create_chat_completion(
     payload: ChatRequest,
+    request: Request,
     user_id: Annotated[UUID | None, Depends(authenticate_chat_caller)],
     db: DbSession,
 ) -> ChatResponse:
@@ -186,7 +199,12 @@ async def create_chat_completion(
             channel=payload.channel,
             user_message=payload.message,
             user_id=user_id,
+            caller_namespace=authenticated_namespace(get_settings(), request.headers.get('X-Service-Token')),
+            event_id=payload.event_id,
         )
+    except BusinessRuntimeError as exc:
+        code = 403 if exc.code in {'PERMISSION_DENIED', 'STALE_BINDING', 'CONNECTION_REVOKED'} else 409 if exc.code in {'OPERATION_IN_PROGRESS', 'IDEMPOTENCY_CONFLICT', 'OPERATION_EXPIRED'} else 503
+        raise HTTPException(code, {'code': exc.code, 'message': 'Business tools are temporarily unavailable.'}) from None
     except AgentNotFoundError as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,

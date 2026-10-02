@@ -69,6 +69,15 @@ class Settings(BaseSettings):
             )
         return self
 
+    # Connection-gated, disabled until dedicated first-party S2S keys are provisioned.
+    business_capabilities_enabled: bool = Field(default=False)
+    business_crm_url: str = Field(default="http://chota-crm-service:8000")
+    business_crm_timeout_seconds: float = Field(default=10.0, ge=0.1, le=60)
+    business_crm_private_key: SecretStr = Field(default="")
+    business_crm_key_id: str = Field(default="")
+    business_config_origins: list[str] = Field(default=["https://chota.by", "https://agents.chota.by"])
+    chat_s2s_callers_json: SecretStr = Field(default="{}")
+
     knowledge_base_enabled: bool = Field(default=False)
     knowledge_base_service_url: str = Field(default="http://knowledge-base-service:8000")
     knowledge_base_timeout_seconds: float = Field(default=2.0)

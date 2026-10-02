@@ -3,7 +3,7 @@
 from typing import Any
 from uuid import UUID, uuid4
 
-from sqlalchemy import Boolean, Float, ForeignKey, String, Text, text
+from sqlalchemy import Boolean, Float, ForeignKey, String, Text, UniqueConstraint, text
 from sqlalchemy.dialects.postgresql import JSONB, UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -14,6 +14,7 @@ class AgentTemplate(Base):
     """Agent configuration stored in PostgreSQL."""
 
     __tablename__ = "agent_templates"
+    __table_args__ = (UniqueConstraint("id", "user_id", name="uq_agent_id_owner"),)
 
     id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid4)
     user_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), nullable=False, index=True)

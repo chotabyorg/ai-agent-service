@@ -572,3 +572,92 @@ curl -X POST http://localhost:8000/v1/chat/completions \
 - `services/llm_service.py` — главный orchestration flow
 - `mcp_clients/manager.py` — isolated MCP subprocess manager
 - `api/v1/chat.py` — Chat API
+
+## Business Capabilities / Prompt Runtime V2
+
+The platform policy now applies to raw `system_prompt` and structured
+`prompt_config` agents. Human business responsibilities are internally named
+`responsibilities`; the existing `capabilities` field is a compatible alias.
+Stored owner prompts are preserved. Fresh runtime permissions, channel, current
+clock/workspace timezone and optional knowledge context are composed for each
+model request. Knowledge and provider text cannot grant authority.
+
+The new path is opt-in: `BUSINESS_CAPABILITIES_ENABLED=false` by default. An agent
+without a `BusinessConfiguration` keeps its existing Bitrix/Google MCP behavior.
+Once an owner connects first-party business tools, all CRM business operations go
+through the canonical runtime; retained Bitrix credentials are never an alternate
+route. Disconnect leaves `runtime_mode=CANONICAL` with no active CRM, and does not
+reactivate dormant Bitrix tools. Google Workspace remains unchanged and separate.
+New signing/ingress secrets are excluded from MCP child environments; the broader
+legacy environment inheritance concern remains deferred.
+
+Owner API (all require owner `X-User-Id` and browser `access_token` cookie):
+
+| Method | `/v1/agents/{agent_id}` suffix | Input / outcome |
+| --- | --- | --- |
+| GET | `/business-tools/workspaces` | Current verified memberships `{items:[{id,name,timezone}]}` |
+| GET | `/business-tools` | `{connected,runtime_mode,workspace,capabilities:[{id,family,risk,enabled,default_enabled}]}` |
+| PUT | `/business-tools` | `{workspace_id}`; first connection enables normal actions except deal create/move; repeat keeps explicit settings |
+| PATCH | `/business-tools` | `{enabled_capabilities:[canonical IDs]}`; explicit `[]` stays empty |
+| DELETE | `/business-tools` | Revoke grant and disconnect; 204 |
+
+Mutations additionally require exact Origin `https://chota.by` or
+`https://agents.chota.by` (configurable, no wildcard). Ownership is checked before
+provider access. An existing different workspace must be disconnected first
+(409 `CONNECTION_CONFLICT`). Unresolved effects block configuration/disconnection
+(409 `UNKNOWN_WRITE_RESULT`). No token, webhook URL or password is accepted.
+
+The code-owned registry contains 18 closed authority-free inputs. Nine operations
+are READ; customer creation, note/inquiry capture and follow-up creation are
+WRITE_SAFE. Booking create/reschedule/cancel and owner-enabled deal create/move
+are WRITE_CONFIRM. Deal writes default disabled; no employee approval is needed.
+LLM function names use deterministic underscore aliases. A typed enumerated
+provider port and strict bounded output DTOs prevent raw provider RPC/payloads.
+The single authoritative CRM connection routes all families; per-capability
+binding rows hold enablement overrides for that connection, not independent
+provider selection. Composite foreign keys enforce connection/agent/owner
+provenance, and a partial unique index enforces one active CRM.
+
+`ChotaCRMAdapter` signs short-lived RS256 assertions with dedicated
+`BUSINESS_CRM_PRIVATE_KEY` and pinned `BUSINESS_CRM_KEY_ID`. CRM verifies current
+membership, exact grant revision and requested scope independently. Configuration
+forwards only the access-token cookie for identity verification; runtime uses no
+browser cookie. Private `/internal/agent/v1` is not a public gateway surface.
+Runtime cannot select workspace, connection or actor through model arguments.
+
+Canonical chat requires an authenticated service credential and matching owner,
+even when `CHAT_S2S_AUTH_REQUIRED=false` keeps legacy rollout compatibility.
+`CHAT_S2S_CALLERS_JSON` optionally supplies separate trusted ingress namespaces;
+the existing shared token has namespace `shared-s2s`. All v1 chat audiences are
+SELF_ASSERTED_CUSTOMER, never inferred STAFF/verified identity from channel text.
+Canonical sessions are isolated by agent, ingress, channel, external subject,
+audience and configuration generation. Grant/member authority is checked before
+history, every model request and final/cached answer. Reconfiguration starts a
+fresh history namespace. Exact supplied phone/email supports useful returning
+customer booking context; private notes/audit/unrelated contacts remain hidden.
+
+A server-owned pending proposal freezes provider-resolved arguments and business
+facts. `business_confirm` takes only its opaque reference and can execute it only
+in a later persisted customer turn; no backend yes-list exists. LLM semantic
+interpretation supports `+`, `ага`, `ок`, `👍`, `давайте`. Changed facts create a new
+proposal; decline cancels; unrelated turns do nothing. A bounded booking+deal
+proposal can share one business confirmation. It is not an atomic cross-command
+transaction; a partial failure reports completed effects honestly.
+
+Writes persist their operation ID before dispatch. WRITE_SAFE logical intents
+bind a persisted turn and normalized payload; WRITE_CONFIRM binds the frozen
+proposal. Payload fingerprints separately guard unresolved retries. UNKNOWN never
+sends a new operation blindly: receipt reconciliation is authoritative. A shared
+agent lock prevents configuration racing past a new DISPATCHING record, and a
+session advisory lock serializes overlapping conversation turns. Optional chat
+`event_id` (1..200 chars) binds trusted event redeliveries and rejects changed
+payload reuse. Existing callers may omit it; their processing turns receive fresh
+server IDs, so transport-level delivery deduplication requires future caller
+adoption. Frozen proposals and provider receipts still prevent repeated effects.
+
+Additive migration `d5e6f7g8h9i0` does not rewrite existing data. Never apply it to
+production as part of this implementation goal. After an approved future rollout,
+run `python -m scripts.prune_business_data` periodically against the configured
+service DB: settled arguments/results, old proposal bodies and saved turn answers
+are redacted after 30 days. Compact replay tombstones remain; unresolved effects
+retain reconciliation evidence. No production schedule is created here.

@@ -28,6 +28,8 @@ from services.history_service import HistoryService
 from services.knowledge_base_client import KnowledgeBaseClient
 from services.knowledge_base_prompt import build_knowledge_base_system_message
 from services.prompt_builder import ChatContext, PromptBuilder
+from services.prompt_composer import PromptComposer
+from business_capabilities.runtime import CapabilityRuntime, conversation_lock
 from services.session_service import SessionService
 
 logger = logging.getLogger(__name__)
@@ -319,6 +321,8 @@ class LLMService:
         channel: str,
         user_message: str,
         user_id: UUID | None = None,
+        caller_namespace: str | None = None,
+        event_id: str | None = None,
     ) -> ChatProcessingResult:
         set_chat_failure_stage(ChatFailureStage.AGENT_LOOKUP)
         agent = await self.agent_service.get_agent_by_id(
@@ -331,167 +335,218 @@ class LLMService:
         if not agent.is_active:
             raise AgentInactiveError("Agent is inactive.")
 
+        await CapabilityRuntime.check_caller(db_session, agent, user_id, caller_namespace)
         set_chat_failure_stage(ChatFailureStage.AGENT_CONFIGURATION)
         agent_api_key = self._get_agent_api_key(agent)
         if not agent_api_key:
             raise AgentNoApiKeyError("Agent has no OpenRouter API key configured.")
 
-        set_chat_failure_stage(ChatFailureStage.SESSION_SETUP)
-        conversation_session = await self.session_service.get_or_create_session(
-            db_session,
-            agent_id=agent_id,
-            external_client_id=external_client_id,
-            channel=channel,
-        )
-        session_id = conversation_session.id
+        async with AsyncExitStack() as business_stack:
+            set_chat_failure_stage(ChatFailureStage.SESSION_SETUP)
+            business = await CapabilityRuntime.open(db_session, self.settings, agent, external_client_id,
+                channel, caller_namespace, user_id, event_id=event_id, user_message=user_message)
+            if business:
+                session_id = business.context.session_id
+                await business_stack.enter_async_context(conversation_lock(db_session, session_id))
+                await business.authorize()
+                if business.turn.answer is not None:
+                    return ChatProcessingResult(session_id=session_id, answer=business.turn.answer)
+            else:
+                conversation_session = await self.session_service.get_or_create_session(
+                    db_session, agent_id=agent_id, external_client_id=external_client_id, channel=channel)
+                session_id = conversation_session.id
 
-        if self.settings.privacy_filter_enabled:
-            llm_client = PrivacyProxyLLMClient(
-                privacy_filter_base_url=self.settings.privacy_filter_base_url,
-                internal_api_token=self.settings.internal_api_token,
-                privacy_filter_timeout_seconds=self.settings.privacy_filter_timeout_seconds,
-                llm_base_url=self.settings.llm_base_url,
-                agent_api_key=agent_api_key,
-                privacy_session_id=session_id,
-            )
-        else:
-            llm_client = AsyncOpenAI(
-                base_url=self.settings.llm_base_url,
-                api_key=agent_api_key,
-            )
-
-        set_chat_failure_stage(ChatFailureStage.CONTEXT_LOAD)
-        credentials_records = await self.agent_service.get_credentials(db_session, agent_id)
-        history = await self.history_service.load_history(session_id)
-
-        chat_context = ChatContext(channel=channel, external_client_id=external_client_id)
-        system_prompt = self.prompt_builder.build(agent, chat_context)
-        knowledge_base_message = await self._build_knowledge_base_message(
-            agent=agent,
-            query=user_message,
-        )
-
-        messages: list[dict[str, object]] = [
-            {"role": "system", "content": system_prompt},
-        ]
-        if knowledge_base_message:
-            messages.append({"role": "system", "content": knowledge_base_message})
-        messages.extend(history)
-        messages.append({"role": "user", "content": user_message})
-
-        executed_calls: set[str] = set()
-
-        set_chat_failure_stage(ChatFailureStage.MCP_SETUP)
-        async with AsyncExitStack() as stack:
-            tool_registry: dict[str, MCPManager] = {}
-            openai_tools: list[dict[str, object]] = []
-
-            for credentials_record in credentials_records:
-                manager = MCPManager(
-                    service_name=credentials_record.service_name,
-                    credentials=self.agent_service.decrypt_credentials_record(
-                        credentials_record
-                    ),
+            if self.settings.privacy_filter_enabled:
+                llm_client = PrivacyProxyLLMClient(
+                    privacy_filter_base_url=self.settings.privacy_filter_base_url,
+                    internal_api_token=self.settings.internal_api_token,
+                    privacy_filter_timeout_seconds=self.settings.privacy_filter_timeout_seconds,
+                    llm_base_url=self.settings.llm_base_url,
+                    agent_api_key=agent_api_key,
+                    privacy_session_id=session_id,
                 )
-                try:
-                    await stack.enter_async_context(manager)
-                except ValueError:
-                    continue
+            else:
+                llm_client = AsyncOpenAI(
+                    base_url=self.settings.llm_base_url,
+                    api_key=agent_api_key,
+                )
 
-                enabled = credentials_record.enabled_tools
-                metadata = await manager.get_tools_metadata()
-                for tool in manager.get_openai_tools():
-                    tool_name = tool["function"]["name"]
-                    if tool_name in tool_registry:
-                        continue
-                    tier = metadata.get(tool_name, {}).get("tier", "core")
-                    if enabled is None:
-                        if tier != "core":
-                            continue
-                    elif "*" not in enabled and tool_name not in enabled:
-                        continue
-                    tool_registry[tool_name] = manager
-                    openai_tools.append(tool)
+            set_chat_failure_stage(ChatFailureStage.CONTEXT_LOAD)
+            credentials_records = await self.agent_service.get_credentials(db_session, agent_id)
+            history = await self.history_service.load_history(session_id)
 
-            for _ in range(self.MAX_TOOL_STEPS):
-                set_chat_failure_stage(ChatFailureStage.LLM_REQUEST)
-                try:
-                    response = await llm_client.chat.completions.create(
-                        model=agent.model_name or self.settings.llm_default_model,
-                        temperature=agent.temperature,
-                        max_tokens=self.settings.llm_max_tokens,
-                        messages=messages,
-                        tools=openai_tools or None,
-                        parallel_tool_calls=False,
-                        extra_headers=self._build_extra_headers(),
+            chat_context = ChatContext(channel=channel, external_client_id=external_client_id)
+            system_prompt = self.prompt_builder.build(agent, chat_context)
+            knowledge_base_message = await self._build_knowledge_base_message(
+                agent=agent,
+                query=user_message,
+            )
+
+            messages: list[dict[str, object]] = [
+                {"role": "system", "content": system_prompt},
+            ]
+            if knowledge_base_message and not business:
+                messages.append({"role": "system", "content": knowledge_base_message})
+            messages.extend(history)
+            messages.append({"role": "user", "content": user_message})
+
+            executed_calls: set[str] = set()
+
+            set_chat_failure_stage(ChatFailureStage.MCP_SETUP)
+            async with AsyncExitStack() as stack:
+                tool_registry: dict[str, MCPManager] = {}
+                openai_tools: list[dict[str, object]] = business.tools() if business else []
+                canonical_names = {t["function"]["name"] for t in openai_tools}
+
+                for credentials_record in credentials_records:
+                    if business and credentials_record.service_name != "google_workspace":
+                        continue
+                    manager = MCPManager(
+                        service_name=credentials_record.service_name,
+                        credentials=self.agent_service.decrypt_credentials_record(
+                            credentials_record
+                        ),
                     )
-                except AuthenticationError:
-                    await self._deactivate_agent(agent, db_session, "OpenRouter API key invalid or revoked")
-                    raise AgentApiKeyInvalidError("OpenRouter key is invalid. Agent deactivated.")
-                except RateLimitError as exc:
-                    error_str = str(exc).lower()
-                    if "402" in error_str or "insufficient" in error_str or "credits" in error_str:
+                    try:
+                        await stack.enter_async_context(manager)
+                    except ValueError:
+                        continue
+
+                    enabled = credentials_record.enabled_tools
+                    metadata = await manager.get_tools_metadata()
+                    for tool in manager.get_openai_tools():
+                        tool_name = tool["function"]["name"]
+                        if tool_name in tool_registry or tool_name in canonical_names:
+                            continue
+                        tier = metadata.get(tool_name, {}).get("tier", "core")
+                        if enabled is None:
+                            if tier != "core":
+                                continue
+                        elif "*" not in enabled and tool_name not in enabled:
+                            continue
+                        tool_registry[tool_name] = manager
+                        openai_tools.append(tool)
+
+                for _ in range(self.MAX_TOOL_STEPS):
+                    if business:
+                        await business.authorize()
+                        prompt_agent = SimpleNamespace(system_prompt=agent.system_prompt, prompt_config=agent.prompt_config,
+                            timezone=getattr(business, 'timezone', agent.timezone), name=agent.name)
+                        messages[0]['content'] = PromptComposer().compose(prompt_agent, chat_context,
+                            runtime_context=await business.prompt_context(), knowledge_context=knowledge_base_message)
+                        # Canonical KB is inside the composed context, not a second instruction message.
+                        openai_tools = business.tools() + [t for t in openai_tools if t['function']['name'] in tool_registry]
+                    set_chat_failure_stage(ChatFailureStage.LLM_REQUEST)
+                    try:
+                        response = await llm_client.chat.completions.create(
+                            model=agent.model_name or self.settings.llm_default_model,
+                            temperature=agent.temperature,
+                            max_tokens=self.settings.llm_max_tokens,
+                            messages=messages,
+                            tools=openai_tools or None,
+                            parallel_tool_calls=False,
+                            extra_headers=self._build_extra_headers(),
+                        )
+                    except AuthenticationError:
+                        await self._deactivate_agent(agent, db_session, "OpenRouter API key invalid or revoked")
+                        raise AgentApiKeyInvalidError("OpenRouter key is invalid. Agent deactivated.")
+                    except RateLimitError as exc:
+                        error_str = str(exc).lower()
+                        if "402" in error_str or "insufficient" in error_str or "credits" in error_str:
+                            await self._deactivate_agent(agent, db_session, "Insufficient funds on OpenRouter")
+                            raise AgentInsufficientFundsError("No funds on OpenRouter. Agent deactivated.")
+                        raise AgentRateLimitError("Rate limit exceeded. Try again later.")
+                    except APITimeoutError:
+                        raise ChatProcessingError("LLM request timed out.")
+                    except APIConnectionError:
+                        raise ChatProcessingError("Cannot connect to OpenRouter.")
+                    except APIError as exc:
+                        logger.error("OpenRouter error for agent %s: %s", agent.id, exc)
+                        raise ChatProcessingError(f"LLM error: {exc.message}")
+                    except PrivacyProxyAuthenticationError:
+                        await self._deactivate_agent(agent, db_session, "OpenRouter API key invalid or revoked")
+                        raise AgentApiKeyInvalidError("OpenRouter key is invalid. Agent deactivated.")
+                    except PrivacyProxyInsufficientFundsError:
                         await self._deactivate_agent(agent, db_session, "Insufficient funds on OpenRouter")
                         raise AgentInsufficientFundsError("No funds on OpenRouter. Agent deactivated.")
-                    raise AgentRateLimitError("Rate limit exceeded. Try again later.")
-                except APITimeoutError:
-                    raise ChatProcessingError("LLM request timed out.")
-                except APIConnectionError:
-                    raise ChatProcessingError("Cannot connect to OpenRouter.")
-                except APIError as exc:
-                    logger.error("OpenRouter error for agent %s: %s", agent.id, exc)
-                    raise ChatProcessingError(f"LLM error: {exc.message}")
-                except PrivacyProxyAuthenticationError:
-                    await self._deactivate_agent(agent, db_session, "OpenRouter API key invalid or revoked")
-                    raise AgentApiKeyInvalidError("OpenRouter key is invalid. Agent deactivated.")
-                except PrivacyProxyInsufficientFundsError:
-                    await self._deactivate_agent(agent, db_session, "Insufficient funds on OpenRouter")
-                    raise AgentInsufficientFundsError("No funds on OpenRouter. Agent deactivated.")
-                except PrivacyProxyRateLimitError:
-                    raise AgentRateLimitError("Rate limit exceeded. Try again later.")
-                except PrivacyProxyConnectionError as exc:
-                    raise ChatProcessingError(str(exc))
+                    except PrivacyProxyRateLimitError:
+                        raise AgentRateLimitError("Rate limit exceeded. Try again later.")
+                    except PrivacyProxyConnectionError as exc:
+                        raise ChatProcessingError(str(exc))
 
-                set_chat_failure_stage(ChatFailureStage.RESPONSE_PROCESSING)
-                message = response.choices[0].message
-                if not getattr(message, "tool_calls", None):
-                    raw_answer = message.content or "I processed your request."
-                    clean_answer = self._strip_thinking_tags(raw_answer)
-                    if not clean_answer:
-                        clean_answer = "I processed your request."
+                    set_chat_failure_stage(ChatFailureStage.RESPONSE_PROCESSING)
+                    message = response.choices[0].message
+                    if not getattr(message, "tool_calls", None):
+                        raw_answer = message.content or "I processed your request."
+                        clean_answer = self._strip_thinking_tags(raw_answer)
+                        if not clean_answer:
+                            clean_answer = "I processed your request."
 
-                    updated_history = history + [
-                        {"role": "user", "content": user_message},
-                        {"role": "assistant", "content": clean_answer},
-                    ]
-                    set_chat_failure_stage(ChatFailureStage.HISTORY_PERSIST)
-                    await self.history_service.save_history(session_id, updated_history)
-                    set_chat_failure_stage(ChatFailureStage.MCP_CLEANUP)
-                    return ChatProcessingResult(session_id=session_id, answer=clean_answer)
+                        if business:
+                            await business.authorize()
+                        updated_history = history + [
+                            {"role": "user", "content": user_message},
+                            {"role": "assistant", "content": clean_answer},
+                        ]
+                        set_chat_failure_stage(ChatFailureStage.HISTORY_PERSIST)
+                        await self.history_service.save_history(session_id, updated_history)
+                        if business:
+                            await business.finish(clean_answer)
+                        set_chat_failure_stage(ChatFailureStage.MCP_CLEANUP)
+                        return ChatProcessingResult(session_id=session_id, answer=clean_answer)
 
-                messages.append(self._assistant_message_to_dict(message))
+                    messages.append(self._assistant_message_to_dict(message))
 
-                set_chat_failure_stage(ChatFailureStage.TOOL_EXECUTION)
-                for tool_call in message.tool_calls:
-                    func_name = tool_call.function.name
-                    func_args_str = tool_call.function.arguments
+                    set_chat_failure_stage(ChatFailureStage.TOOL_EXECUTION)
+                    for tool_call in message.tool_calls:
+                        func_name = tool_call.function.name
+                        func_args_str = tool_call.function.arguments
 
-                    try:
-                        func_args = json.loads(func_args_str)
-                    except json.JSONDecodeError:
-                        func_args = {}
+                        try:
+                            func_args = json.loads(func_args_str)
+                        except json.JSONDecodeError:
+                            func_args = {}
 
-                    call_signature = f"{func_name}:{func_args_str}"
-                    if call_signature in executed_calls:
-                        tool_result_text = json.dumps(
-                            {
-                                "error": (
-                                    "CRITICAL SYSTEM WARNING: identical tool call blocked to prevent "
-                                    "an infinite loop."
+                        call_signature = f"{func_name}:{json.dumps(func_args, sort_keys=True, ensure_ascii=False)}"
+                        if call_signature in executed_calls:
+                            tool_result_text = json.dumps(
+                                {
+                                    "error": (
+                                        "CRITICAL SYSTEM WARNING: identical tool call blocked to prevent "
+                                        "an infinite loop."
+                                    )
+                                },
+                                ensure_ascii=False,
+                            )
+                            messages.append(
+                                {
+                                    "role": "tool",
+                                    "tool_call_id": tool_call.id,
+                                    "name": func_name,
+                                    "content": tool_result_text,
+                                }
+                            )
+                            continue
+
+                        executed_calls.add(call_signature)
+                        manager = tool_registry.get(func_name)
+                        if business and (func_name in canonical_names or func_name.startswith('business_')):
+                            tool_result_text = json.dumps(await business.call(func_name, func_args), ensure_ascii=False)
+                        elif manager is None:
+                            tool_result_text = json.dumps(
+                                {"error": f"Tool '{func_name}' is not available."},
+                                ensure_ascii=False,
+                            )
+                        else:
+                            try:
+                                tool_result = await manager.call_tool(func_name, func_args)
+                                tool_result_text = self._extract_tool_result_content(tool_result)
+                            except Exception as exc:
+                                tool_result_text = json.dumps(
+                                    {"error": f"Tool execution failed: {exc}"},
+                                    ensure_ascii=False,
                                 )
-                            },
-                            ensure_ascii=False,
-                        )
+
                         messages.append(
                             {
                                 "role": "tool",
@@ -500,32 +555,5 @@ class LLMService:
                                 "content": tool_result_text,
                             }
                         )
-                        continue
 
-                    executed_calls.add(call_signature)
-                    manager = tool_registry.get(func_name)
-                    if manager is None:
-                        tool_result_text = json.dumps(
-                            {"error": f"Tool '{func_name}' is not available."},
-                            ensure_ascii=False,
-                        )
-                    else:
-                        try:
-                            tool_result = await manager.call_tool(func_name, func_args)
-                            tool_result_text = self._extract_tool_result_content(tool_result)
-                        except Exception as exc:
-                            tool_result_text = json.dumps(
-                                {"error": f"Tool execution failed: {exc}"},
-                                ensure_ascii=False,
-                            )
-
-                    messages.append(
-                        {
-                            "role": "tool",
-                            "tool_call_id": tool_call.id,
-                            "name": func_name,
-                            "content": tool_result_text,
-                        }
-                    )
-
-        raise ChatProcessingError("Maximum number of LLM tool steps reached.")
+            raise ChatProcessingError("Maximum number of LLM tool steps reached.")

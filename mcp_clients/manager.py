@@ -46,7 +46,8 @@ class MCPManager:
         return config
 
     def _build_env(self) -> dict[str, str]:
-        env = os.environ.copy()
+        env = {key: value for key, value in os.environ.items()
+               if key.upper() not in {"BUSINESS_CRM_PRIVATE_KEY", "CHAT_S2S_CALLERS_JSON"}}
         config = self._get_service_config()
         for cred_key, env_key in config["env_mapping"].items():
             value = self.credentials.get(cred_key)

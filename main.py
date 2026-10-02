@@ -79,3 +79,6 @@ app.include_router(
 @app.get("/health", tags=["health"])
 async def healthcheck() -> dict[str, str]:
     return {"status": "ok"}
+
+from api.v1.business_tools import router as business_tools_router
+app.include_router(business_tools_router, prefix=f"{settings.api_v1_prefix}/agents", tags=["business-tools"])
