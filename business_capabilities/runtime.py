@@ -197,6 +197,7 @@ class CapabilityRuntime:
         """Check uncertain receipts automatically; this never dispatches a write."""
         operations = (await self.db.scalars(select(BusinessOperation).where(BusinessOperation.session_id == self.context.session_id,
             BusinessOperation.state.in_(['UNKNOWN', 'DISPATCHING'])).order_by(BusinessOperation.issued_at).limit(20))).all()
+        reported = set()
         for operation in operations:
             if operation.capability not in self.enabled:
                 continue
@@ -206,7 +207,8 @@ class CapabilityRuntime:
             await self.record_recovery(operation, result)
             self.recovered_outcomes.append(RecoveredOutcomePrompt(tool_name=REGISTRY[operation.capability].tool_name,
                 result=json.dumps(result['data'], ensure_ascii=False, separators=(',', ':'))))
-        await self.settle_pending(self.context.session_id)
+            reported.add(operation.id)
+        await self.settle_pending(self.context.session_id, report_completed=True, reported=reported)
 
     async def record_recovery(self, operation, result):
         """Commit the receipt and this turn's write fence as one durable fact."""
@@ -220,19 +222,41 @@ class CapabilityRuntime:
         # fresh worker. The fence applies to fresh writes, never receipt reads.
         return bool(await self.db.scalar(select(BusinessTurn.write_suppressed).where(BusinessTurn.id == self.turn_id)))
 
-    async def settle_pending(self, session_id):
+    async def settle_pending(self, session_id, *, report_completed=False, reported=frozenset()):
         pending_rows = (await self.db.scalars(select(PendingBusinessAction).where(PendingBusinessAction.session_id == session_id,
             PendingBusinessAction.state.in_(['UNKNOWN', 'DISPATCHING'])))).all()
         for pending in pending_rows:
-            complete = True
+            completed = []
             for action in pending.actions:
                 intent = digest([action['proposal_ref'], action['capability'], digest(action['arguments'])])
                 operation = await self.db.scalar(select(BusinessOperation).where(BusinessOperation.session_id == session_id,
                     BusinessOperation.capability == action['capability'], BusinessOperation.intent_id == intent))
-                complete &= operation is not None and operation.state == 'COMPLETED'
-            if complete:
-                pending.state = 'COMPLETED'
+                if operation is not None and operation.state == 'COMPLETED':
+                    completed.append(operation)
+            if len(completed) != len(pending.actions):
+                continue
+            outcomes = []
+            if report_completed:
+                # The last operation may have committed before the worker could
+                # settle the proposal. Preserve its result instead of silently
+                # dropping it from the next model context or authorizing a repeat.
+                await self.db.execute(update(BusinessTurn).where(BusinessTurn.id == self.turn_id).values(write_suppressed=True))
                 await self.db.commit()
+                for operation in completed:
+                    if operation.capability not in self.enabled:
+                        break
+                    result = operation.result if operation.id in reported else await self.adapter.reconcile(self.context, operation.capability, operation.id)
+                    if result is None or result['status'] != 'OK':
+                        break
+                    outcomes.append((operation, result))
+                if len(outcomes) != len(completed):
+                    continue
+            pending.state = 'COMPLETED'
+            await self.db.commit()
+            for operation, result in outcomes:
+                if operation.id not in reported:
+                    self.recovered_outcomes.append(RecoveredOutcomePrompt(tool_name=REGISTRY[operation.capability].tool_name,
+                        result=json.dumps(result['data'], ensure_ascii=False, separators=(',', ':'))))
 
     async def prompt_context(self):
         await self.recover()
@@ -245,12 +269,18 @@ class CapabilityRuntime:
             progress = await self.pending_progress(pending)
             statuses = {step.status for step in progress}
             partial = statuses == {'COMPLETED', 'UNSTARTED'}
-            state = 'EXPIRED' if 'EXPIRED' in statuses else 'PARTIALLY_COMPLETED' if partial else pending.state
+            approved = pending.confirmed_turn_id is not None and pending.state in {'UNKNOWN', 'DISPATCHING'}
+            unstarted = statuses == {'UNSTARTED'}
+            state = ('EXPIRED' if 'EXPIRED' in statuses else 'PARTIALLY_COMPLETED' if partial
+                else 'APPROVED' if approved and unstarted else pending.state)
             permitted = all(action['capability'] in self.enabled for action in pending.actions)
-            eligible_turn = pending.proposed_turn_id != self.turn_id and not await self.write_is_suppressed()
+            lineage_sessions = select(BusinessConversation.id).where(BusinessConversation.lineage_id == self.lineage_id)
+            unsettled = await self.db.scalar(select(BusinessOperation.id).where(BusinessOperation.session_id.in_(lineage_sessions),
+                BusinessOperation.state.in_(['UNKNOWN', 'DISPATCHING'])).limit(1))
+            eligible_turn = pending.proposed_turn_id != self.turn_id and not await self.write_is_suppressed() and unsettled is None
             proposal = PendingActionPrompt(action_ref=str(pending.id), tool_name='business_confirm', summary=pending.summary,
-                state=state, confirmable=pending.state == 'PROPOSED' and statuses == {'UNSTARTED'} and permitted and eligible_turn,
-                continuable=partial and permitted and eligible_turn and pending.confirmed_turn_id is not None,
+                state=state, confirmable=pending.state == 'PROPOSED' and unstarted and permitted and eligible_turn,
+                continuable=approved and (partial or unstarted) and permitted and eligible_turn,
                 progress=progress)
         return RuntimeCapabilityContext(available=tuple(CapabilityPrompt(tool_name=REGISTRY[c].tool_name, risk=REGISTRY[c].risk.value,
             description=REGISTRY[c].description) for c in sorted(self.enabled)), disabled=tuple(REGISTRY[c].tool_name for c in sorted(REGISTRY.keys() - self.enabled)),

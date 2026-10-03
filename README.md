@@ -681,11 +681,19 @@ continue the remaining leg. Ordinary successful composition still executes both
 confirmed actions together. The model receives bounded per-step progress and a
 `PARTIALLY_COMPLETED`/`continuable` projection for eligible continuation through
 the existing `business_confirm` reference, keeping original facts and consent.
+An interruption after saving consent but before creating the first operation
+projects `APPROVED`: all steps are unstarted, and an eligible later request can
+continue the same single or composed action without asking for duplicate consent.
+An existing DISPATCHING/UNKNOWN operation always remains unresolved until its
+receipt is authoritative; it is never projected as unstarted.
 Genuine unresolved operations, expired unstarted proposals, disabled permissions
 and the recovery-turn fence never expose continuation permission. Provider fact
 and authority validation still applies when the remaining action executes.
-A shared
-agent lock prevents configuration racing past a new DISPATCHING record, and a
+If the final operation completed before the pending proposal could be settled,
+runtime revalidates its receipts under current authority, reports those completed
+outcomes and fences fresh writes in that status turn. Unavailable receipts leave
+the completed steps noncontinuable until a later receipt check succeeds.
+A shared agent lock prevents configuration racing past a new DISPATCHING record, and a
 session advisory lock serializes overlapping conversation turns. Optional chat
 `event_id` (1..200 chars) binds trusted event redeliveries and rejects changed
 payload reuse. Turn insertion is arbitrated again after provider authorization:
