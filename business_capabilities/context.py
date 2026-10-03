@@ -30,7 +30,7 @@ class BusinessRuntimeError(Exception):
 
 def failure(code: str, retry: str = 'NEVER') -> dict:
     messages = {
-        'PREVIOUS_ACTION_COMPLETED': 'A previous action already completed. Do not repeat it; ask for the current request if needed.',
+        'PREVIOUS_ACTION_COMPLETED': 'This turn cannot authorize another write. Use any known result and ask for a new customer request if needed.',
         'STALE_CUSTOMER_CONTEXT': 'Customer details changed. Ask for the current contact details before continuing.',
         'PERMISSION_DENIED': 'This action is currently unavailable.',
         'VALIDATION_ERROR': 'Check the required business details.',

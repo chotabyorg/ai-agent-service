@@ -181,11 +181,22 @@ class CapabilityRuntime:
             result = await self.adapter.reconcile(self.context, operation.capability, operation.id)
             if result['status'] != 'OK':
                 continue
-            operation.state, operation.result = 'COMPLETED', result
+            await self.record_recovery(operation, result)
             self.recovered_outcomes.append(RecoveredOutcomePrompt(tool_name=REGISTRY[operation.capability].tool_name,
                 result=json.dumps(result['data'], ensure_ascii=False, separators=(',', ':'))))
-            await self.db.commit()
         await self.settle_pending(self.context.session_id)
+
+    async def record_recovery(self, operation, result):
+        """Commit the receipt and this turn's write fence as one durable fact."""
+        if operation.state in {'UNKNOWN', 'DISPATCHING'}:
+            await self.db.execute(update(BusinessTurn).where(BusinessTurn.id == self.turn_id).values(write_suppressed=True))
+        operation.state, operation.result = 'COMPLETED', result
+        await self.db.commit()
+
+    async def write_is_suppressed(self):
+        # Read durable state, including when the same event was reopened in a
+        # fresh worker. The fence applies to fresh writes, never receipt reads.
+        return bool(await self.db.scalar(select(BusinessTurn.write_suppressed).where(BusinessTurn.id == self.turn_id)))
 
     async def settle_pending(self, session_id):
         pending_rows = (await self.db.scalars(select(PendingBusinessAction).where(PendingBusinessAction.session_id == session_id,
@@ -210,7 +221,8 @@ class CapabilityRuntime:
         proposal = None
         if pending:
             proposal = PendingActionPrompt(action_ref=str(pending.id), tool_name='business_confirm', summary=pending.summary,
-                state=pending.state, confirmable=pending.state == 'PROPOSED' and pending.proposed_turn_id != self.turn_id)
+                state=pending.state, confirmable=pending.state == 'PROPOSED' and pending.proposed_turn_id != self.turn_id
+                and not await self.write_is_suppressed())
         return RuntimeCapabilityContext(available=tuple(CapabilityPrompt(tool_name=REGISTRY[c].tool_name, risk=REGISTRY[c].risk.value,
             description=REGISTRY[c].description) for c in sorted(self.enabled)), disabled=tuple(REGISTRY[c].tool_name for c in sorted(REGISTRY.keys() - self.enabled)),
             audience=self.context.audience, pending_action=proposal, recovered_outcomes=tuple(self.recovered_outcomes[-2:]))
@@ -317,6 +329,9 @@ class CapabilityRuntime:
         if any(a['capability'] not in self.enabled for a in row.actions):
             return failure('PERMISSION_DENIED')
         if row.state == 'PROPOSED':
+            unsettled = await self.reconcile_unsettled()
+            if unsettled:
+                return unsettled
             row.confirmed_turn_id = self.turn_id
             row.state = 'DISPATCHING'
             await self.db.commit()
@@ -327,7 +342,10 @@ class CapabilityRuntime:
             result = await self.write(action['capability'], action['arguments'], confirmation)
             results.append(result)
             if result['status'] != 'OK':
-                row.state = 'UNKNOWN' if result.get('error', {}).get('retry') == 'RECONCILE' else 'CANCELLED'
+                # A recovery fence pauses an unstarted composition leg without
+                # consuming or replacing the already confirmed frozen proposal.
+                if result.get('error', {}).get('code') != 'PREVIOUS_ACTION_COMPLETED':
+                    row.state = 'UNKNOWN' if result.get('error', {}).get('retry') == 'RECONCILE' else 'CANCELLED'
                 await self.db.commit()
                 return result if len(results) == 1 else {'status': 'ERROR', 'error': result['error'], 'completed_actions': [{'ref': r['data'].get('ref'), 'effect': r['effect'], 'operation_ref': r['operation_ref']} for r in results[:-1]]}
         row.state = 'COMPLETED'
@@ -339,7 +357,6 @@ class CapabilityRuntime:
         lineage_sessions = select(BusinessConversation.id).where(BusinessConversation.lineage_id == self.lineage_id)
         operations = (await self.db.scalars(select(BusinessOperation).where(BusinessOperation.session_id.in_(lineage_sessions),
             BusinessOperation.state.in_(['UNKNOWN', 'DISPATCHING'])))).all()
-        recovered_predecessor = False
         for op in operations:
             if op.id == except_id:
                 continue
@@ -348,15 +365,13 @@ class CapabilityRuntime:
             context = replace(self.context, session_id=op.session_id)
             result = await self.adapter.reconcile(context, op.capability, op.id)
             if result['status'] == 'OK':
-                op.state, op.result = 'COMPLETED', result
-                recovered_predecessor |= op.session_id != self.context.session_id
-                await self.db.commit()
+                await self.record_recovery(op, result)
                 await self.settle_pending(op.session_id)
             else:
                 return failure('UNKNOWN_WRITE_RESULT', 'RECONCILE')
-        if recovered_predecessor:
-            # Suppress this attempted replacement write even after a receipt was
-            # recovered; a new deliberate business request must be assessed later.
+        if await self.write_is_suppressed():
+            # Every subsequent model call/reopened event remains fenced, even
+            # though successful recovery removed the unresolved operation state.
             return failure('PREVIOUS_ACTION_COMPLETED')
         return None
 
@@ -377,6 +392,8 @@ class CapabilityRuntime:
             result = await self.adapter.reconcile(self.context, capability, operation.id)
             if result['status'] != 'OK':
                 return failure('UNKNOWN_WRITE_RESULT', 'RECONCILE')
+            await self.record_recovery(operation, result)
+            return result
         else:
             # Share the owner configuration lock: reconfiguration either observes
             # DISPATCHING, or this writer observes the new generation before send.
@@ -392,6 +409,8 @@ class CapabilityRuntime:
                 CapabilityBinding.enabled.is_(True)))
             if bound is None:
                 raise BusinessRuntimeError('PERMISSION_DENIED')
+            if await self.write_is_suppressed():
+                return failure('PREVIOUS_ACTION_COMPLETED')
             # A redelivery after response loss uses the previous durable operation,
             # even when the ingress did not supply a stable event id.
             uncertain = await self.db.scalar(select(BusinessOperation).where(BusinessOperation.session_id == self.context.session_id,
@@ -401,8 +420,7 @@ class CapabilityRuntime:
                 recovered = await self.adapter.reconcile(self.context, capability, uncertain.id)
                 if recovered['status'] != 'OK':
                     return failure('UNKNOWN_WRITE_RESULT', 'RECONCILE')
-                uncertain.state, uncertain.result = 'COMPLETED', recovered
-                await self.db.commit()
+                await self.record_recovery(uncertain, recovered)
                 return recovered
             unsettled = await self.reconcile_unsettled()
             if unsettled:

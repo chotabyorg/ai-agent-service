@@ -5,7 +5,7 @@ import asyncio
 from alembic import command
 from alembic.config import Config
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.pool import NullPool
 
 from core.config import get_settings
@@ -43,12 +43,49 @@ def test_security_upgrade_retires_old_context_and_preserves_unknown_ledger(postg
             assert await connection.scalar(text('SELECT state FROM pending_business_actions WHERE id=:proposal'), ids) == 'CANCELLED'
             assert await connection.scalar(text('SELECT state FROM business_operations WHERE id=:operation'), ids) == 'UNKNOWN'
             assert await connection.scalar(text('SELECT event_id FROM business_turns WHERE id=:turn'), ids) == 'old-event'
+            assert await connection.scalar(text('SELECT write_suppressed FROM business_turns WHERE id=:turn'), ids) is True
             assert await connection.scalar(text('SELECT system_prompt FROM agent_templates WHERE id=:agent'), ids) == 'untouched'
+    async def seed_pre_fence_turn():
+        from business_capabilities.runtime import digest
+        ids['current_session'], ids['before_g_turn'] = uuid4(), uuid4()
+        ids['subject_hash'] = digest([str(ids['agent']), 'test-ingress', 'website', 'before-g-client', 'SELF_ASSERTED_CUSTOMER'])
+        ids['message_hash'] = digest('Synthetic request')
+        async with engine.begin() as connection:
+            await connection.execute(text("INSERT INTO conversation_sessions(id,agent_id,external_client_id,channel) VALUES(:current_session,:agent,'before-g-client','website')"), ids)
+            await connection.execute(text("INSERT INTO business_conversations(id,agent_id,subject_hash,generation,audience,retired,lineage_id) VALUES(:current_session,:agent,:subject_hash,:generation,'SELF_ASSERTED_CUSTOMER',false,:current_session)"), ids)
+            await connection.execute(text("INSERT INTO business_turns(id,session_id,event_id,message_hash) VALUES(:before_g_turn,:current_session,'before-g-event',:message_hash)"), ids)
+            await connection.execute(text("INSERT INTO capability_bindings(agent_id,capability,connection_id,enabled) VALUES(:agent,'customer.add_note',:connection,true)"), ids)
+    async def verify_migrated_turn_behavior():
+        from core.config import Settings
+        from models.agent import AgentTemplate
+        from business_capabilities.runtime import CapabilityRuntime
+        from tests.test_business_runtime import FakeAdapter
+        provider = FakeAdapter()
+        settings = Settings(_env_file=None, business_capabilities_enabled=True)
+        async with AsyncSession(engine, expire_on_commit=False) as db:
+            agent = await db.get(AgentTemplate, ids['agent'])
+            old = await CapabilityRuntime.open(db, settings, agent, 'before-g-client', 'website', 'test-ingress', ids['owner'],
+                event_id='before-g-event', user_message='Synthetic request', adapter=provider)
+            assert old.turn_id == ids['before_g_turn']
+            args = {'customer_ref': 'synthetic', 'body': 'Synthetic note'}
+            assert (await old.call('customer_add_note', args))['error']['code'] == 'PREVIOUS_ACTION_COMPLETED'
+            assert provider.executions == []
+            fresh = await CapabilityRuntime.open(db, settings, agent, 'before-g-client', 'website', 'test-ingress', ids['owner'],
+                event_id='after-g-event', user_message='New deliberate request', adapter=provider)
+            assert (await fresh.call('customer_add_note', args))['status'] == 'OK'
+            assert len(provider.executions) == 1
     try:
         command.upgrade(config, 'e6f7g8h9i0j1')
         asyncio.run(seed())
         command.upgrade(config, 'head')
         asyncio.run(verify())
+        # The recovery-fence migration is independently reversible with live
+        # canonical rows; neither the older ledger nor context is removed.
+        command.downgrade(config, 'f7g8h9i0j1k2')
+        asyncio.run(seed_pre_fence_turn())
+        command.upgrade(config, 'head')
+        asyncio.run(verify())
+        asyncio.run(verify_migrated_turn_behavior())
     finally:
         asyncio.run(engine.dispose())
         _restore_env(previous)

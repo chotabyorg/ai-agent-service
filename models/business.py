@@ -93,6 +93,8 @@ class BusinessTurn(Base):
     message_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     answer: Mapped[str | None] = mapped_column(String, nullable=True)
+    # Receipt recovery cannot authorize another fresh write in the same turn.
+    write_suppressed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=text('false'))
 
 
 class BusinessConnectionIntent(Base):

@@ -669,7 +669,16 @@ transaction; a partial failure reports completed effects honestly.
 Writes persist their operation ID before dispatch. WRITE_SAFE logical intents
 bind a persisted turn and normalized payload; WRITE_CONFIRM binds the frozen
 proposal. Payload fingerprints separately guard unresolved retries. UNKNOWN never
-sends a new operation blindly: receipt reconciliation is authoritative. A shared
+sends a new operation blindly: receipt reconciliation is authoritative. The runtime
+commits a durable turn flag atomically with each recovered uncertain receipt.
+For the rest of that customer turn, including event redelivery or worker restart,
+fresh proposals and fresh write dispatch return `PREVIOUS_ACTION_COMPLETED`.
+Reads, cancellation and replay of an existing operation's receipt remain allowed.
+A later deliberate customer turn may create a new intent. If a booking+deal
+proposal has an unstarted leg after recovery, the frozen proposal is retained;
+the recovery turn reports its completed leg, and a later customer request may
+continue the remaining leg. Ordinary successful composition still executes both
+confirmed actions together. A shared
 agent lock prevents configuration racing past a new DISPATCHING record, and a
 session advisory lock serializes overlapping conversation turns. Optional chat
 `event_id` (1..200 chars) binds trusted event redeliveries and rejects changed
@@ -677,11 +686,14 @@ payload reuse. Existing callers may omit it; their processing turns receive fres
 server IDs, so transport-level delivery deduplication requires future caller
 adoption. Frozen proposals and provider receipts still prevent repeated effects.
 
-Migrations `d5e6f7g8h9i0` through `f7g8h9i0j1k2` preserve existing agents and
+Migrations `d5e6f7g8h9i0` through `g8h9i0j1k2l3` preserve existing agents and
 credentials. The final security migration retires any pre-barrier canonical
 conversation and preserves its operation lineage, covering evidence the previous
 provider pruner may already have removed. Never apply these to production as part
-of this implementation goal. After an approved future rollout,
+of this implementation goal. The recovery-fence migration suppresses fresh writes
+on previously stored canonical turns, which did not record whether receipt
+recovery occurred; existing receipts and distinct new turns remain available.
+After an approved future rollout,
 run `python -m scripts.prune_business_data` periodically against the configured
 service DB: settled arguments/results, old proposal bodies and saved turn answers
 are redacted after 30 days. Compact replay tombstones remain; unresolved effects
