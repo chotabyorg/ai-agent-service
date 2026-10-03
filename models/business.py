@@ -42,12 +42,14 @@ class CapabilityBinding(Base):
 
 class BusinessConversation(Base):
     __tablename__ = 'business_conversations'
-    __table_args__ = (UniqueConstraint('agent_id', 'subject_hash', 'generation', name='uq_business_conversation_subject'),)
+    __table_args__ = (Index('uq_business_conversation_current', 'agent_id', 'subject_hash', 'generation', unique=True, postgresql_where=text('NOT retired')),)
     id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), ForeignKey('conversation_sessions.id', ondelete='CASCADE'), primary_key=True)
     agent_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), ForeignKey('agent_templates.id', ondelete='CASCADE'), nullable=False)
     subject_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     generation: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), nullable=False)
     audience: Mapped[str] = mapped_column(String(40), nullable=False)
+    retired: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=text('false'))
+    lineage_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), nullable=False, default=uuid4, index=True)
 
 
 class PendingBusinessAction(Base):
@@ -91,3 +93,18 @@ class BusinessTurn(Base):
     message_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     answer: Mapped[str | None] = mapped_column(String, nullable=True)
+
+
+class BusinessConnectionIntent(Base):
+    """Recoverable first connection identity, persisted before provider mutation."""
+    __tablename__ = 'business_connection_intents'
+    __table_args__ = (ForeignKeyConstraint(['agent_id', 'owner_id'],
+        ['agent_templates.id', 'agent_templates.user_id'], ondelete='CASCADE', name='fk_connection_intent_owner'),)
+    agent_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
+    owner_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), nullable=False)
+    connection_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), nullable=False, unique=True)
+    workspace_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), nullable=False)
+    workspace_name: Mapped[str] = mapped_column(String(200), nullable=False)
+    timezone: Mapped[str] = mapped_column(String(100), nullable=False)
+    capabilities: Mapped[list] = mapped_column(JSONB, nullable=False)
+    action: Mapped[str] = mapped_column(String(16), nullable=False, default='CONNECT')

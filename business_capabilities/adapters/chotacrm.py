@@ -58,6 +58,10 @@ class ChotaCRMAdapter:
                                          timeout=self.settings.business_crm_timeout_seconds,
                                          transport=self.transport, follow_redirects=False) as client:
                 response = await client.request(method, path.lstrip('/'), headers=headers, json=body)
+                if method == 'GET' and path == 'context' and response.status_code == 409 and len(response.content) <= 16384:
+                    error = response.json()
+                    if isinstance(error, dict) and error.get('code') == 'STALE_CUSTOMER_CONTEXT':
+                        raise BusinessRuntimeError('STALE_CUSTOMER_CONTEXT')
                 if response.status_code in (401, 403):
                     raise BusinessRuntimeError('PERMISSION_DENIED')
                 if response.status_code == 204:
@@ -114,6 +118,8 @@ class ChotaCRMAdapter:
                                     body={'arguments': arguments, 'turn_id': str(turn_id)})
         if isinstance(result, dict) and result.get('status') == 'ERROR':
             return validate_result(capability, result)
+        if not isinstance(result, dict) or result.get('status') != 'OK' or set(result) != {'status', 'data'}:
+            return failure('PROVIDER_UNAVAILABLE')
         try:
             return {'status': 'OK', 'data': PreparedProposal.model_validate(result['data']).model_dump(mode='json')}
         except (ValueError, KeyError, TypeError):

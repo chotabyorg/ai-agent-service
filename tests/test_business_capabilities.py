@@ -136,3 +136,47 @@ def test_equivalent_offsets_normalize_to_same_business_payload():
     one=normalize_arguments('followup.create',{'customer_ref':'c','title':'Call','due_at':'2026-10-12T18:00:00+03:00'})
     two=normalize_arguments('followup.create',{'customer_ref':'c','title':'Call','due_at':'2026-10-12T15:00:00Z'})
     assert one==two
+
+
+@pytest.mark.parametrize('error',[None,[],"bad",1,{'code':[]},{'code':'NOT_FOUND','secret':'injected'}])
+@pytest.mark.parametrize('write',[False,True])
+def test_malformed_provider_error_shape_is_normalized(error,write):
+    result=validate_result('customer.create' if write else 'catalog.search', {'status':'ERROR','error':error},write=write)
+    # Extra provider error details are discarded; malformed containers cannot escape.
+    if isinstance(error,dict) and error.get('code')=='NOT_FOUND':
+        assert result['error']['code']=='NOT_FOUND'
+    else:
+        assert result['error']['code']==('UNKNOWN_WRITE_RESULT' if write else 'PROVIDER_UNAVAILABLE')
+        assert result['error']['retry']==('RECONCILE' if write else 'NEVER')
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('envelope',[None,[],"bad",{'status':'ERROR','error':None},{'status':'ERROR','error':[]},
+    {'status':'OK','data':None},{'status':'OK','data':[]},{'status':'OTHER','data':{}},{'data':{}}])
+async def test_malformed_prepare_envelope_is_normalized(envelope):
+    adapter=ChotaCRMAdapter(SimpleNamespace())
+    async def request(*args,**kwargs):
+        return envelope
+    adapter.request=request
+    from business_capabilities.context import AgentExecutionContext
+    ctx=AgentExecutionContext(*[uuid4() for _ in range(5)],grant_revision=1,session_id=uuid4(),generation=uuid4())
+    result=await adapter.prepare(ctx,'booking.create',{},uuid4())
+    assert result['error']['code']=='PROVIDER_UNAVAILABLE'
+
+
+def test_cursor_boundary_matches_reference_provider():
+    assert normalize_arguments('catalog.search',{'cursor':'x'*256})['cursor']=='x'*256
+    with pytest.raises(ValidationError):
+        normalize_arguments('catalog.search',{'cursor':'x'*257})
+
+
+@pytest.mark.asyncio
+async def test_adapter_context_identity_invalidation_has_distinct_safe_signal():
+    from business_capabilities.context import BusinessRuntimeError
+    settings=SimpleNamespace(business_capabilities_enabled=True,business_crm_url='http://crm',business_crm_timeout_seconds=1)
+    adapter=ChotaCRMAdapter(settings,transport=httpx.MockTransport(lambda request:httpx.Response(409,json={
+        'code':'STALE_CUSTOMER_CONTEXT','detail':'sensitive upstream text is not forwarded'})))
+    adapter.assertion=lambda *args:'signed-test'
+    ctx=AgentExecutionContext(*[uuid4() for _ in range(5)],grant_revision=1,session_id=uuid4(),generation=uuid4())
+    with pytest.raises(BusinessRuntimeError,match='^STALE_CUSTOMER_CONTEXT$'):
+        await adapter.context(ctx)

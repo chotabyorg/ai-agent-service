@@ -441,3 +441,14 @@ async def test_next_turn_recovers_unknown_without_model_retry_or_second_consent(
     assert len(prompt.recovered_outcomes)==1
     assert 'CONFIRMED' in prompt.recovered_outcomes[0].result
     assert len(setup_business[3].executions)==1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('nested',[None,[],"bad",1])
+async def test_malformed_nested_composition_has_no_effect(setup_business,nested):
+    runtime=await turn(setup_business)
+    result=await runtime.call('business_propose',{'actions':[
+        {'capability':'booking.create','arguments':nested},
+        {'capability':'deal.create','arguments':{'customer_ref':'c'}}]})
+    assert result['error']['code']=='VALIDATION_ERROR'
+    assert setup_business[3].preparations==[] and setup_business[3].executions==[]

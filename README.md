@@ -584,7 +584,7 @@ model request. Knowledge and provider text cannot grant authority.
 
 The new path is opt-in: `BUSINESS_CAPABILITIES_ENABLED=false` by default. An agent
 without a `BusinessConfiguration` keeps its existing Bitrix/Google MCP behavior.
-Once an owner connects first-party business tools, all CRM business operations go
+Once an owner attempts a verified first-party connection, all CRM business operations go
 through the canonical runtime; retained Bitrix credentials are never an alternate
 route. Disconnect leaves `runtime_mode=CANONICAL` with no active CRM, and does not
 reactivate dormant Bitrix tools. Google Workspace remains unchanged and separate.
@@ -596,7 +596,7 @@ Owner API (all require owner `X-User-Id` and browser `access_token` cookie):
 | Method | `/v1/agents/{agent_id}` suffix | Input / outcome |
 | --- | --- | --- |
 | GET | `/business-tools/workspaces` | Current verified memberships `{items:[{id,name,timezone}]}` |
-| GET | `/business-tools` | `{connected,runtime_mode,workspace,capabilities:[{id,family,risk,enabled,default_enabled}]}` |
+| GET | `/business-tools` | `{connected,runtime_mode,pending_connection_action,workspace,capabilities:[{id,family,risk,enabled,default_enabled}]}` |
 | PUT | `/business-tools` | `{workspace_id}`; first connection enables normal actions except deal create/move; repeat keeps explicit settings |
 | PATCH | `/business-tools` | `{enabled_capabilities:[canonical IDs]}`; explicit `[]` stays empty |
 | DELETE | `/business-tools` | Revoke grant and disconnect; 204 |
@@ -606,6 +606,19 @@ Mutations additionally require exact Origin `https://chota.by` or
 provider access. An existing different workspace must be disconnected first
 (409 `CONNECTION_CONFLICT`). Unresolved effects block configuration/disconnection
 (409 `UNKNOWN_WRITE_RESULT`). No token, webhook URL or password is accepted.
+
+Initial connection and disconnection persist an owner/agent/workspace intent
+before requesting a remote grant change. `pending_connection_action` is always
+`CONNECT`, `DISCONNECT` or `null`. Pending CONNECT has `connected=false`; an
+uncertain disconnect can retain `connected=true`. In either pending state all
+capabilities are disabled and chat fails closed before history/model access.
+Repeat PUT with the same workspace recovers the original CONNECT identity; DELETE
+cancels it or retries DISCONNECT. Another workspace or changed pending settings
+returns `CONNECTION_CONFLICT`. Current browser identity and membership are checked
+on connect retry; cancellation rechecks ownership and identity and remains
+possible after membership removal. A pending workspace descriptor is the saved
+previously verified name/timezone, not authority to access current CRM data.
+No cookies are retained. A failed explicit connect still keeps CANONICAL mode.
 
 The code-owned registry contains 18 closed authority-free inputs. Nine operations
 are READ; customer creation, note/inquiry capture and follow-up creation are
@@ -635,6 +648,15 @@ audience and configuration generation. Grant/member authority is checked before
 history, every model request and final/cached answer. Reconfiguration starts a
 fresh history namespace. Exact supplied phone/email supports useful returning
 customer booking context; private notes/audit/unrelated contacts remain hidden.
+Provider `STALE_CUSTOMER_CONTEXT` invalidates a conversation when its previous
+customer evidence is no longer valid, including ambiguous or expired evidence.
+The next request retires that conversation and cancels its unexecuted proposals;
+new history uses a fresh session while old event IDs remain blocked. Old answers,
+pending summaries and recovered private facts never enter the fresh model context.
+Fresh exact lookup remains available. Durable lineage retains previous uncertain
+operations: replacement writes stay blocked, and receipt recovery uses the old
+session authority, never a new operation ID. If that authority can no longer
+reconcile an uncertain effect, it stays blocked for operational investigation.
 
 A server-owned pending proposal freezes provider-resolved arguments and business
 facts. `business_confirm` takes only its opaque reference and can execute it only
@@ -655,8 +677,11 @@ payload reuse. Existing callers may omit it; their processing turns receive fres
 server IDs, so transport-level delivery deduplication requires future caller
 adoption. Frozen proposals and provider receipts still prevent repeated effects.
 
-Additive migration `d5e6f7g8h9i0` does not rewrite existing data. Never apply it to
-production as part of this implementation goal. After an approved future rollout,
+Migrations `d5e6f7g8h9i0` through `f7g8h9i0j1k2` preserve existing agents and
+credentials. The final security migration retires any pre-barrier canonical
+conversation and preserves its operation lineage, covering evidence the previous
+provider pruner may already have removed. Never apply these to production as part
+of this implementation goal. After an approved future rollout,
 run `python -m scripts.prune_business_data` periodically against the configured
 service DB: settled arguments/results, old proposal bodies and saved turn answers
 are redacted after 30 days. Compact replay tombstones remain; unresolved effects

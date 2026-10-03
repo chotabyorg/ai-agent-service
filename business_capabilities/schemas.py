@@ -51,7 +51,7 @@ class Identity(Closed):
 
 class Page(Closed):
     limit: Annotated[int, Field(ge=1, le=20, strict=True)] = 10
-    cursor: Annotated[str, Field(min_length=1, max_length=1024)] | None = None
+    cursor: Ref | None = None
 
 
 class CatalogSearch(Page):

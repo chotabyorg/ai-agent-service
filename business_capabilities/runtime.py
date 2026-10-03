@@ -5,6 +5,7 @@ the server owns everything that can authorize or repeat a side effect.
 """
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
+from dataclasses import replace
 import hashlib
 import json
 from uuid import UUID, uuid4
@@ -12,7 +13,7 @@ from uuid import UUID, uuid4
 from pydantic import ValidationError
 from sqlalchemy import select, text, update
 from models.business import (BusinessConfiguration, IntegrationConnection, CapabilityBinding,
-    BusinessConversation, PendingBusinessAction, BusinessOperation, BusinessTurn)
+    BusinessConversation, PendingBusinessAction, BusinessOperation, BusinessTurn, BusinessConnectionIntent)
 from models.session import ConversationSession
 from models.agent import AgentTemplate
 from business_capabilities.registry import REGISTRY, WIRE_REGISTRY, Risk, control_tools, normalize_arguments
@@ -46,10 +47,11 @@ async def conversation_lock(db, session_id):
 
 
 class CapabilityRuntime:
-    def __init__(self, db, settings, context, turn, *, adapter=None):
+    def __init__(self, db, settings, context, turn, *, adapter=None, lineage_id=None):
         self.db = db
         self.settings = settings
         self.context = context
+        self.lineage_id = lineage_id or context.session_id
         self.turn = turn
         self.turn_id = turn.id
         self.adapter = adapter or ChotaCRMAdapter(settings)
@@ -73,38 +75,63 @@ class CapabilityRuntime:
             raise BusinessRuntimeError('PROVIDER_UNAVAILABLE')
         connection = await db.scalar(select(IntegrationConnection).where(IntegrationConnection.agent_id == agent.id, IntegrationConnection.active.is_(True)))
         subject_hash = digest([str(agent.id), caller_namespace, channel, external_client_id, 'SELF_ASSERTED_CUSTOMER'])
-        # Serialize only new conversation creation. Legacy session rows remain untouched.
         lock_key = int.from_bytes(bytes.fromhex(subject_hash)[:8], 'big', signed=True)
-        await db.execute(text('SELECT pg_advisory_xact_lock(:key)'), {'key': lock_key})
-        conversation = await db.scalar(select(BusinessConversation).where(BusinessConversation.agent_id == agent.id,
-            BusinessConversation.subject_hash == subject_hash, BusinessConversation.generation == config.generation))
-        if conversation is None:
-            session_id = uuid4()
-            db.add(ConversationSession(id=session_id, agent_id=agent.id, external_client_id='business:' + subject_hash, channel=channel))
-            await db.flush()
-            conversation = BusinessConversation(id=session_id, agent_id=agent.id, subject_hash=subject_hash,
-                generation=config.generation, audience='SELF_ASSERTED_CUSTOMER')
-            db.add(conversation)
-            await db.flush()
-        session_id, generation = conversation.id, config.generation
-        # Turn event id, when supplied by a trusted ingress, binds retries to one turn.
+        generation, agent_id, owner_id = config.generation, agent.id, agent.user_id
         event_id = event_id or str(uuid4())
-        turn = await db.scalar(select(BusinessTurn).where(BusinessTurn.session_id == session_id, BusinessTurn.event_id == event_id))
-        if turn is None:
-            turn = BusinessTurn(id=uuid4(), session_id=session_id, event_id=event_id, message_hash=digest(user_message))
-            db.add(turn)
-        elif turn.created_at < utcnow() - timedelta(days=30):
-            raise BusinessRuntimeError('OPERATION_EXPIRED')
-        elif turn.message_hash != digest(user_message):
-            raise BusinessRuntimeError('IDEMPOTENCY_CONFLICT')
-        await db.commit()
-        context = AgentExecutionContext(owner_id=agent.user_id, agent_id=agent.id,
-            connection_id=connection.id if connection else UUID(int=0), workspace_id=connection.workspace_id if connection else UUID(int=0),
-            grant_id=connection.grant_id if connection else UUID(int=0), grant_revision=connection.grant_revision if connection else 0,
-            session_id=session_id, generation=generation)
-        runtime = cls(db, settings, context, turn, adapter=adapter)
-        await runtime.authorize()
-        return runtime
+        for _ in range(2):
+            # Serialize creation/rotation; old rows and operation evidence survive.
+            await db.execute(text('SELECT pg_advisory_xact_lock(:key)'), {'key': lock_key})
+            conversation = await db.scalar(select(BusinessConversation).where(BusinessConversation.agent_id == agent_id,
+                BusinessConversation.subject_hash == subject_hash, BusinessConversation.generation == generation,
+                BusinessConversation.retired.is_(False)).execution_options(populate_existing=True))
+            if conversation is None:
+                ancestor = await db.scalar(select(BusinessConversation).where(BusinessConversation.agent_id == agent_id,
+                    BusinessConversation.subject_hash == subject_hash, BusinessConversation.generation == generation).limit(1))
+                session_id = uuid4()
+                db.add(ConversationSession(id=session_id, agent_id=agent_id, external_client_id='business:' + subject_hash, channel=channel))
+                await db.flush()
+                conversation = BusinessConversation(id=session_id, agent_id=agent_id, subject_hash=subject_hash,
+                    generation=generation, audience='SELF_ASSERTED_CUSTOMER', retired=False,
+                    lineage_id=ancestor.lineage_id if ancestor else session_id)
+                db.add(conversation)
+                await db.flush()
+            session_id, lineage_id = conversation.id, conversation.lineage_id
+            # Do not persist a new turn until customer authority is current: a
+            # first fresh utterance must survive rotation, but old event replay must not.
+            turn = await db.scalar(select(BusinessTurn).where(BusinessTurn.session_id == session_id, BusinessTurn.event_id == event_id))
+            existing_turn = turn is not None
+            if turn is None:
+                turn = BusinessTurn(id=uuid4(), session_id=session_id, event_id=event_id, message_hash=digest(user_message))
+            elif turn.created_at < utcnow() - timedelta(days=30):
+                raise BusinessRuntimeError('OPERATION_EXPIRED')
+            elif turn.message_hash != digest(user_message):
+                raise BusinessRuntimeError('IDEMPOTENCY_CONFLICT')
+            await db.commit()
+            context = AgentExecutionContext(owner_id=owner_id, agent_id=agent_id,
+                connection_id=connection.id if connection else UUID(int=0), workspace_id=connection.workspace_id if connection else UUID(int=0),
+                grant_id=connection.grant_id if connection else UUID(int=0), grant_revision=connection.grant_revision if connection else 0,
+                session_id=session_id, generation=generation)
+            runtime = cls(db, settings, context, turn, adapter=adapter, lineage_id=lineage_id)
+            try:
+                await runtime.authorize()
+            except BusinessRuntimeError as exc:
+                if exc.code != 'STALE_CUSTOMER_CONTEXT':
+                    raise
+                await db.execute(text('SELECT pg_advisory_xact_lock(:key)'), {'key': lock_key})
+                await db.execute(update(BusinessConversation).where(BusinessConversation.id == session_id).values(retired=True))
+                await db.execute(update(PendingBusinessAction).where(PendingBusinessAction.session_id == session_id,
+                    PendingBusinessAction.state == 'PROPOSED').values(state='CANCELLED'))
+                await db.commit()
+                continue
+            retired_event = await db.scalar(select(BusinessTurn.id).join(BusinessConversation, BusinessTurn.session_id == BusinessConversation.id).where(
+                BusinessConversation.lineage_id == lineage_id, BusinessConversation.retired.is_(True), BusinessTurn.event_id == event_id).limit(1))
+            if retired_event:
+                raise BusinessRuntimeError('STALE_CUSTOMER_CONTEXT')
+            if not existing_turn:
+                db.add(turn)
+            await db.commit()
+            return runtime
+        raise BusinessRuntimeError('STALE_CUSTOMER_CONTEXT')
 
     async def authorize(self):
         """Revalidate before history, every model request/reply and every tool."""
@@ -112,6 +139,11 @@ class CapabilityRuntime:
         config = await self.db.get(BusinessConfiguration, self.context.agent_id, populate_existing=True)
         if config is None or config.generation != self.context.generation:
             raise BusinessRuntimeError('STALE_BINDING')
+        if await self.db.get(BusinessConnectionIntent, self.context.agent_id, populate_existing=True):
+            raise BusinessRuntimeError('CONNECTION_PENDING')
+        conversation = await self.db.get(BusinessConversation, self.context.session_id, populate_existing=True)
+        if conversation is None or conversation.retired:
+            raise BusinessRuntimeError('STALE_CUSTOMER_CONTEXT')
         connection = await self.db.scalar(select(IntegrationConnection).where(IntegrationConnection.agent_id == self.context.agent_id,
             IntegrationConnection.active.is_(True)).execution_options(populate_existing=True))
         if connection is None:
@@ -153,12 +185,16 @@ class CapabilityRuntime:
             self.recovered_outcomes.append(RecoveredOutcomePrompt(tool_name=REGISTRY[operation.capability].tool_name,
                 result=json.dumps(result['data'], ensure_ascii=False, separators=(',', ':'))))
             await self.db.commit()
-        pending = await self.pending()
-        if pending and pending.state in {'UNKNOWN', 'DISPATCHING'}:
+        await self.settle_pending(self.context.session_id)
+
+    async def settle_pending(self, session_id):
+        pending_rows = (await self.db.scalars(select(PendingBusinessAction).where(PendingBusinessAction.session_id == session_id,
+            PendingBusinessAction.state.in_(['UNKNOWN', 'DISPATCHING'])))).all()
+        for pending in pending_rows:
             complete = True
             for action in pending.actions:
                 intent = digest([action['proposal_ref'], action['capability'], digest(action['arguments'])])
-                operation = await self.db.scalar(select(BusinessOperation).where(BusinessOperation.session_id == self.context.session_id,
+                operation = await self.db.scalar(select(BusinessOperation).where(BusinessOperation.session_id == session_id,
                     BusinessOperation.capability == action['capability'], BusinessOperation.intent_id == intent))
                 complete &= operation is not None and operation.state == 'COMPLETED'
             if complete:
@@ -167,6 +203,9 @@ class CapabilityRuntime:
 
     async def prompt_context(self):
         await self.recover()
+        # Receipt recovery can await provider access; recheck its customer context
+        # before exposing recovered facts or a pending summary to the model.
+        await self.authorize()
         pending = await self.pending()
         proposal = None
         if pending:
@@ -194,7 +233,8 @@ class CapabilityRuntime:
                 actions = arguments['actions']
                 if not isinstance(actions, list) or not 1 <= len(actions) <= 2:
                     return failure('VALIDATION_ERROR')
-                if any(not isinstance(a, dict) or set(a) != {'capability', 'arguments'} for a in actions):
+                if any(not isinstance(a, dict) or set(a) != {'capability', 'arguments'}
+                       or not isinstance(a['capability'], str) or not isinstance(a['arguments'], dict) for a in actions):
                     return failure('VALIDATION_ERROR')
                 if len(actions) == 2 and {a['capability'] for a in actions} != {'booking.create', 'deal.create'}:
                     return failure('VALIDATION_ERROR')
@@ -296,18 +336,28 @@ class CapabilityRuntime:
             {'status': 'OK', 'ref': r['data'].get('ref'), 'effect': r['effect'], 'operation_ref': r['operation_ref']} for r in results]}}
 
     async def reconcile_unsettled(self, *, except_id=None):
-        operations = (await self.db.scalars(select(BusinessOperation).where(BusinessOperation.session_id == self.context.session_id,
+        lineage_sessions = select(BusinessConversation.id).where(BusinessConversation.lineage_id == self.lineage_id)
+        operations = (await self.db.scalars(select(BusinessOperation).where(BusinessOperation.session_id.in_(lineage_sessions),
             BusinessOperation.state.in_(['UNKNOWN', 'DISPATCHING'])))).all()
+        recovered_predecessor = False
         for op in operations:
             if op.id == except_id:
                 continue
-            result = await self.adapter.reconcile(self.context, op.capability, op.id)
+            # Reconciliation stays in the original provider session. It cannot
+            # mint a new mutation or expose retired customer facts to the model.
+            context = replace(self.context, session_id=op.session_id)
+            result = await self.adapter.reconcile(context, op.capability, op.id)
             if result['status'] == 'OK':
                 op.state, op.result = 'COMPLETED', result
+                recovered_predecessor |= op.session_id != self.context.session_id
                 await self.db.commit()
+                await self.settle_pending(op.session_id)
             else:
-                # A missing/revoked/malformed receipt is not evidence of no mutation.
                 return failure('UNKNOWN_WRITE_RESULT', 'RECONCILE')
+        if recovered_predecessor:
+            # Suppress this attempted replacement write even after a receipt was
+            # recovered; a new deliberate business request must be assessed later.
+            return failure('PREVIOUS_ACTION_COMPLETED')
         return None
 
     async def write(self, capability, arguments, confirmation=None):
@@ -335,6 +385,8 @@ class CapabilityRuntime:
             current = await self.db.get(BusinessConfiguration, self.context.agent_id, populate_existing=True)
             if current is None or current.generation != self.context.generation:
                 raise BusinessRuntimeError('STALE_BINDING')
+            if await self.db.get(BusinessConnectionIntent, self.context.agent_id, populate_existing=True):
+                raise BusinessRuntimeError('CONNECTION_PENDING')
             bound = await self.db.scalar(select(CapabilityBinding).where(CapabilityBinding.agent_id == self.context.agent_id,
                 CapabilityBinding.connection_id == self.context.connection_id, CapabilityBinding.capability == capability,
                 CapabilityBinding.enabled.is_(True)))

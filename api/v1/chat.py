@@ -203,7 +203,7 @@ async def create_chat_completion(
             event_id=payload.event_id,
         )
     except BusinessRuntimeError as exc:
-        code = 403 if exc.code in {'PERMISSION_DENIED', 'STALE_BINDING', 'CONNECTION_REVOKED'} else 409 if exc.code in {'OPERATION_IN_PROGRESS', 'IDEMPOTENCY_CONFLICT', 'OPERATION_EXPIRED'} else 503
+        code = 403 if exc.code in {'PERMISSION_DENIED', 'STALE_BINDING', 'CONNECTION_REVOKED'} else 409 if exc.code in {'OPERATION_IN_PROGRESS', 'IDEMPOTENCY_CONFLICT', 'OPERATION_EXPIRED', 'STALE_CUSTOMER_CONTEXT'} else 503
         raise HTTPException(code, {'code': exc.code, 'message': 'Business tools are temporarily unavailable.'}) from None
     except AgentNotFoundError as exc:
         raise HTTPException(
