@@ -31,6 +31,14 @@ class CapabilityPrompt(BaseModel):
     description: str = Field(default="", max_length=500)
 
 
+class PendingActionProgress(BaseModel):
+    """Bounded display state for each leg; no provider arguments or receipt body."""
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    step: int = Field(ge=1, le=2)
+    tool_name: str = Field(pattern=r"^[a-z][a-z0-9_]{0,63}$")
+    status: Literal["COMPLETED", "UNSTARTED", "UNRESOLVED", "FAILED", "EXPIRED"]
+
+
 class PendingActionPrompt(BaseModel):
     """Display-only projection of one persisted action; no frozen arguments."""
 
@@ -39,8 +47,10 @@ class PendingActionPrompt(BaseModel):
     action_ref: str = Field(min_length=1, max_length=128, pattern=r"^[a-zA-Z0-9_-]+$")
     tool_name: str = Field(pattern=r"^[a-z][a-z0-9_]{0,63}$")
     summary: str = Field(min_length=1, max_length=8000)
-    state: Literal["PROPOSED", "APPROVED", "DISPATCHING", "UNKNOWN", "EXPIRED", "CANCELLED"] = "PROPOSED"
+    state: Literal["PROPOSED", "APPROVED", "DISPATCHING", "UNKNOWN", "PARTIALLY_COMPLETED", "EXPIRED", "CANCELLED"] = "PROPOSED"
     confirmable: bool = False
+    continuable: bool = False
+    progress: tuple[PendingActionProgress, ...] = Field(default=(), max_length=2)
 
 
 class RecoveredOutcomePrompt(BaseModel):
@@ -70,6 +80,7 @@ PLATFORM_POLICY = """<platform_policy>
 - Для pending action оцени смысл следующей реплики клиента в контексте предложения: «+», «ага», «👍», «давайте» и другое естественное согласие подходят. Подтверждай только существующее доступное к подтверждению предложение из более раннего customer turn. Не подтверждай предложение в том же turn, в котором оно создано.
 - Если клиент изменил существенные параметры («да, только лучше в 19»), не подтверждай старое действие: предложи новое с изменениями. При отказе отмени предложение, при постороннем сообщении не исполняй его. Не меняй frozen arguments при подтверждении; просроченное предложение требует нового согласования.
 - Для одной подтверждённой бизнес-операции не проси два одинаковых подтверждения, если runtime уже разрешает её составные действия. Отсутствие такого разрешения нельзя додумывать.
+- PARTIALLY_COMPLETED описывает уже подтверждённое составное действие: progress отличает выполненное (COMPLETED) от ещё не начатого (UNSTARTED). Только при continuable=true и просьбе клиента продолжить используй business_confirm с прежним action_ref: runtime выполнит только ещё не начатые части, сохранив прежнее согласие. Не создавай предложение заново и не повторяй выполненную часть. При continuable=false сообщи известный результат и оставшуюся работу без исполнения; UNRESOLVED и EXPIRED не разрешают продолжение.
 - Не придумывай услуги, цены, наличие, результаты и успешное выполнение. Актуальные бизнес-данные из инструментов выше истории и общих знаний. Проверка свободного времени ещё не означает созданную запись. Сообщай об успехе только после authoritative success result.
 - При ошибке объясни ситуацию простым языком и предложи полезный следующий шаг. READ можно повторить в пределах правил runtime. WRITE после однозначного отказа до эффекта повторяет только runtime по явной политике. При timeout/UNKNOWN_WRITE_RESULT не повторяй запись самостоятельно, не меняй параметры для обхода: результат проверяет runtime.
 - Используй разрешённый клиентский контекст: по точному сообщённому клиентом идентификатору можно получить доступное self-service резюме. При неоднозначности уточни минимум данных; не выбирай случайного клиента и не требуй проверку личности без причины. Не раскрывай внутренние заметки, аудит или чужие данные.

@@ -20,7 +20,7 @@ from business_capabilities.registry import REGISTRY, WIRE_REGISTRY, Risk, contro
 from business_capabilities.schemas import PendingReference
 from business_capabilities.context import AgentExecutionContext, BusinessRuntimeError, failure
 from business_capabilities.adapters.chotacrm import ChotaCRMAdapter
-from services.prompt_composer import RuntimeCapabilityContext, CapabilityPrompt, PendingActionPrompt, RecoveredOutcomePrompt
+from services.prompt_composer import RuntimeCapabilityContext, CapabilityPrompt, PendingActionPrompt, PendingActionProgress, RecoveredOutcomePrompt
 
 
 def digest(value):
@@ -63,6 +63,13 @@ class CapabilityRuntime:
         if (user_id != agent.user_id or not caller_namespace) and await db.get(BusinessConfiguration, agent.id) is not None:
             raise BusinessRuntimeError('PERMISSION_DENIED')
 
+    @staticmethod
+    def validate_turn(turn, user_message):
+        if turn.created_at < utcnow() - timedelta(days=30):
+            raise BusinessRuntimeError('OPERATION_EXPIRED')
+        if turn.message_hash != digest(user_message):
+            raise BusinessRuntimeError('IDEMPOTENCY_CONFLICT')
+
     @classmethod
     async def open(cls, db, settings, agent, external_client_id, channel, caller_namespace, user_id,
                    *, event_id=None, user_message='', adapter=None):
@@ -99,13 +106,10 @@ class CapabilityRuntime:
             # Do not persist a new turn until customer authority is current: a
             # first fresh utterance must survive rotation, but old event replay must not.
             turn = await db.scalar(select(BusinessTurn).where(BusinessTurn.session_id == session_id, BusinessTurn.event_id == event_id))
-            existing_turn = turn is not None
             if turn is None:
                 turn = BusinessTurn(id=uuid4(), session_id=session_id, event_id=event_id, message_hash=digest(user_message))
-            elif turn.created_at < utcnow() - timedelta(days=30):
-                raise BusinessRuntimeError('OPERATION_EXPIRED')
-            elif turn.message_hash != digest(user_message):
-                raise BusinessRuntimeError('IDEMPOTENCY_CONFLICT')
+            else:
+                cls.validate_turn(turn, user_message)
             await db.commit()
             context = AgentExecutionContext(owner_id=owner_id, agent_id=agent_id,
                 connection_id=connection.id if connection else UUID(int=0), workspace_id=connection.workspace_id if connection else UUID(int=0),
@@ -123,11 +127,29 @@ class CapabilityRuntime:
                     PendingBusinessAction.state == 'PROPOSED').values(state='CANCELLED'))
                 await db.commit()
                 continue
+            # Provider authorization released the original creation lock. A
+            # concurrent delivery may now own this event or have retired its
+            # context; arbitrate again and reload before creating a durable turn.
+            await db.execute(text('SELECT pg_advisory_xact_lock(:key)'), {'key': lock_key})
+            current_config = await db.get(BusinessConfiguration, agent_id, populate_existing=True)
+            if current_config is None or current_config.generation != generation:
+                raise BusinessRuntimeError('STALE_BINDING')
+            if await db.get(BusinessConnectionIntent, agent_id, populate_existing=True):
+                raise BusinessRuntimeError('CONNECTION_PENDING')
+            current_conversation = await db.get(BusinessConversation, session_id, populate_existing=True)
+            if current_conversation is None or current_conversation.retired:
+                await db.commit()
+                continue
             retired_event = await db.scalar(select(BusinessTurn.id).join(BusinessConversation, BusinessTurn.session_id == BusinessConversation.id).where(
                 BusinessConversation.lineage_id == lineage_id, BusinessConversation.retired.is_(True), BusinessTurn.event_id == event_id).limit(1))
             if retired_event:
                 raise BusinessRuntimeError('STALE_CUSTOMER_CONTEXT')
-            if not existing_turn:
+            saved_turn = await db.scalar(select(BusinessTurn).where(BusinessTurn.session_id == session_id,
+                BusinessTurn.event_id == event_id).execution_options(populate_existing=True))
+            if saved_turn is not None:
+                cls.validate_turn(saved_turn, user_message)
+                runtime.turn, runtime.turn_id = saved_turn, saved_turn.id
+            else:
                 db.add(turn)
             await db.commit()
             return runtime
@@ -220,12 +242,32 @@ class CapabilityRuntime:
         pending = await self.pending()
         proposal = None
         if pending:
+            progress = await self.pending_progress(pending)
+            statuses = {step.status for step in progress}
+            partial = statuses == {'COMPLETED', 'UNSTARTED'}
+            state = 'EXPIRED' if 'EXPIRED' in statuses else 'PARTIALLY_COMPLETED' if partial else pending.state
+            permitted = all(action['capability'] in self.enabled for action in pending.actions)
+            eligible_turn = pending.proposed_turn_id != self.turn_id and not await self.write_is_suppressed()
             proposal = PendingActionPrompt(action_ref=str(pending.id), tool_name='business_confirm', summary=pending.summary,
-                state=pending.state, confirmable=pending.state == 'PROPOSED' and pending.proposed_turn_id != self.turn_id
-                and not await self.write_is_suppressed())
+                state=state, confirmable=pending.state == 'PROPOSED' and statuses == {'UNSTARTED'} and permitted and eligible_turn,
+                continuable=partial and permitted and eligible_turn and pending.confirmed_turn_id is not None,
+                progress=progress)
         return RuntimeCapabilityContext(available=tuple(CapabilityPrompt(tool_name=REGISTRY[c].tool_name, risk=REGISTRY[c].risk.value,
             description=REGISTRY[c].description) for c in sorted(self.enabled)), disabled=tuple(REGISTRY[c].tool_name for c in sorted(REGISTRY.keys() - self.enabled)),
             audience=self.context.audience, pending_action=proposal, recovered_outcomes=tuple(self.recovered_outcomes[-2:]))
+
+    async def pending_progress(self, pending):
+        progress = []
+        for index, action in enumerate(pending.actions, start=1):
+            intent = digest([action['proposal_ref'], action['capability'], digest(action['arguments'])])
+            operation = await self.db.scalar(select(BusinessOperation).where(BusinessOperation.session_id == pending.session_id,
+                BusinessOperation.capability == action['capability'], BusinessOperation.intent_id == intent))
+            if operation is None:
+                status = 'EXPIRED' if datetime.fromisoformat(action['expires_at'].replace('Z', '+00:00')) <= utcnow() else 'UNSTARTED'
+            else:
+                status = {'COMPLETED': 'COMPLETED', 'FAILED': 'FAILED', 'EXPIRED': 'EXPIRED'}.get(operation.state, 'UNRESOLVED')
+            progress.append(PendingActionProgress(step=index, tool_name=REGISTRY[action['capability']].tool_name, status=status))
+        return tuple(progress)
 
     def tools(self):
         tools = [REGISTRY[c].tool() for c in sorted(self.enabled)]
@@ -328,6 +370,8 @@ class CapabilityRuntime:
             return failure('STALE_PROPOSAL')
         if any(a['capability'] not in self.enabled for a in row.actions):
             return failure('PERMISSION_DENIED')
+        if any(step.status == 'EXPIRED' for step in await self.pending_progress(row)):
+            return failure('STALE_PROPOSAL')
         if row.state == 'PROPOSED':
             unsettled = await self.reconcile_unsettled()
             if unsettled:

@@ -678,11 +678,21 @@ A later deliberate customer turn may create a new intent. If a booking+deal
 proposal has an unstarted leg after recovery, the frozen proposal is retained;
 the recovery turn reports its completed leg, and a later customer request may
 continue the remaining leg. Ordinary successful composition still executes both
-confirmed actions together. A shared
+confirmed actions together. The model receives bounded per-step progress and a
+`PARTIALLY_COMPLETED`/`continuable` projection for eligible continuation through
+the existing `business_confirm` reference, keeping original facts and consent.
+Genuine unresolved operations, expired unstarted proposals, disabled permissions
+and the recovery-turn fence never expose continuation permission. Provider fact
+and authority validation still applies when the remaining action executes.
+A shared
 agent lock prevents configuration racing past a new DISPATCHING record, and a
 session advisory lock serializes overlapping conversation turns. Optional chat
 `event_id` (1..200 chars) binds trusted event redeliveries and rejects changed
-payload reuse. Existing callers may omit it; their processing turns receive fresh
+payload reuse. Turn insertion is arbitrated again after provider authorization:
+simultaneous identical deliveries share a persisted turn, while changed messages
+return an idempotency conflict. A competing active chat may return in-progress;
+after the conversation lock, saved answers are refreshed before replay.
+Existing callers may omit it; their processing turns receive fresh
 server IDs, so transport-level delivery deduplication requires future caller
 adoption. Frozen proposals and provider receipts still prevent repeated effects.
 

@@ -349,6 +349,8 @@ class LLMService:
                 session_id = business.context.session_id
                 await business_stack.enter_async_context(conversation_lock(db_session, session_id))
                 await business.authorize()
+                # A competing delivery may have finished after open() returned.
+                await db_session.refresh(business.turn)
                 if business.turn.answer is not None:
                     return ChatProcessingResult(session_id=session_id, answer=business.turn.answer)
             else:
