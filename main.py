@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from api.internal.agents import router as internal_agents_router
+from api.internal.managed_turns import router as managed_turns_router
 from api.v1.agents import router as agents_router
 from api.v1.chat import router as chat_router
 from api.v1.mcp_services import router as mcp_services_router
@@ -12,6 +13,7 @@ from api.v1.models import router as models_router
 from api.v1.openrouter_key import router as openrouter_key_router
 from api.v1.tools import router as tools_router
 from core.config import get_settings
+from core.managed_boundary import ManagedTurnBoundary
 from core.redis import close_redis, init_redis
 from services.subscription_client import SubscriptionClient
 
@@ -39,6 +41,7 @@ app = FastAPI(
     debug=settings.debug,
     lifespan=lifespan,
 )
+app.add_middleware(ManagedTurnBoundary)
 
 app.include_router(
     agents_router,
@@ -74,6 +77,7 @@ app.include_router(
     internal_agents_router,
     prefix="/internal/v1",
 )
+app.include_router(managed_turns_router, prefix="/internal/v1")
 
 
 @app.get("/health", tags=["health"])
