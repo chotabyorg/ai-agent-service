@@ -573,6 +573,66 @@ async def test_chat_creates_distinct_sessions_for_different_channel_and_agent(
 
 
 @pytest.mark.integration
+async def test_chat_reuses_whatsapp_session_and_keeps_channel_distinct(
+    api_client,
+    db_session,
+    llm_controller,
+) -> None:
+    llm_controller.chat.completions.queue(
+        build_llm_response(content="whatsapp first"),
+        build_llm_response(content="whatsapp again"),
+        build_llm_response(content="telegram"),
+    )
+    agent = await create_agent(api_client, db_session_factory=db_session)
+
+    first = await api_client.post(
+        "/v1/chat/completions",
+        json={
+            "agent_id": agent["id"],
+            "external_client_id": "whatsapp:integration-1:375291234567",
+            "channel": "whatsapp",
+            "message": "Hello",
+        },
+    )
+    second = await api_client.post(
+        "/v1/chat/completions",
+        json={
+            "agent_id": agent["id"],
+            "external_client_id": "whatsapp:integration-1:375291234567",
+            "channel": "whatsapp",
+            "message": "Again",
+        },
+    )
+    third = await api_client.post(
+        "/v1/chat/completions",
+        json={
+            "agent_id": agent["id"],
+            "external_client_id": "whatsapp:integration-1:375291234567",
+            "channel": "telegram",
+            "message": "Same external id, different channel",
+        },
+    )
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert third.status_code == 200
+    assert first.json()["session_id"] == second.json()["session_id"]
+    assert third.json()["session_id"] != first.json()["session_id"]
+
+    async with db_session() as session:
+        sessions = (
+            await session.execute(
+                select(ConversationSession).where(
+                    ConversationSession.agent_id == UUID(agent["id"]),
+                    ConversationSession.external_client_id == "whatsapp:integration-1:375291234567",
+                )
+            )
+        ).scalars().all()
+
+    assert {s.channel for s in sessions} == {"whatsapp", "telegram"}
+
+
+@pytest.mark.integration
 async def test_chat_uses_existing_redis_history_and_strips_thinking_tags(
     api_client,
     db_session,

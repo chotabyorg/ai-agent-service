@@ -34,6 +34,10 @@ def _minimal_config() -> dict:
 
 TELEGRAM_CTX = ChatContext(channel="telegram", external_client_id="tg:1")
 INSTAGRAM_CTX = ChatContext(channel="instagram", external_client_id="ig:1")
+WHATSAPP_CTX = ChatContext(
+    channel="whatsapp",
+    external_client_id="whatsapp:integration-1:375291234567",
+)
 
 
 class TestBuildFromConfigBasic:
@@ -78,6 +82,29 @@ class TestBuildIncludesChannel:
         result = PromptBuilder().build(agent, INSTAGRAM_CTX)
         assert "Правила для instagram" in result
         assert "1000 символов" in result
+
+    def test_whatsapp_platform_rules_are_channel_specific(self) -> None:
+        agent = _make_agent(prompt_config=_minimal_config())
+        result = PromptBuilder().build(agent, WHATSAPP_CTX)
+
+        assert "Правила для whatsapp" in result
+        assert "WhatsApp" in result
+        assert "text-only" in result
+        assert "do not use HTML" in result
+        assert "/start" not in result
+        assert "4096 символов" not in result
+        assert "1000 символов" not in result
+        assert "DM" not in result
+
+    def test_unknown_channel_keeps_telegram_fallback_rules(self) -> None:
+        agent = _make_agent(prompt_config=_minimal_config())
+        result = PromptBuilder().build(
+            agent,
+            ChatContext(channel="unknown", external_client_id="unknown:1"),
+        )
+
+        assert "Правила для unknown" in result
+        assert "4096 символов" in result
 
 
 class TestBuildIncludesCapabilities:
