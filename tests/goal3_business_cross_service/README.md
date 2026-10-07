@@ -99,3 +99,46 @@ whose refs are empty. A separate actual marker-only recovery test asserts that40
 and retained authoritative AI evidence. F's same-T1 attachment is deliberately
 performed before that terminalization. The harness claims no automatic recovery
 coordinator, scheduler, real provider compatibility, deployment or final PASS.
+
+## Source-fix R3 matrix
+
+The public repository admission seam takes a closed zero-argument async facts
+resolver. Test-only workers use that same public P → released sessions → FRESH →
+decisive NOWAIT bridge. Passing a previously resolved `MaterialFacts` value is a
+negative test. Scope-lock traces distinguish wait-capable P from decisive locks;
+actual PostgreSQL observer records never label NOWAIT contention as a wait.
+
+The fake provider has independently durable mutable `fake_facts`, original
+`fake_objects`/`fake_receipts`, persistent key authority rows, and an honest
+expiring `fake_keys` cache. Acceptance acquires the facts and key authorities,
+reloads current facts, then samples `clock_timestamp()`. It compares complete
+expected values/revisions and the original absolute deadline before cache eviction
+or a new object. Counts distinguish POST bytes received, ACCEPT decisions,
+MUTATION object creation, REJECT, LOOKUP and distinct durable object IDs.
+
+Guarded BOUNDED profiles reject every unenveloped path and carry the unchanged
+deadline on FIRST, native and displaced attempts. Local expiration avoidance is
+only an optimization; the transport/provider-wait cases pass that local check and
+still require the authoritative late rejection. FENCED profiles receive no native
+replay token. An explicit legacy test profile retains an unenveloped old FIRST
+path and the exact conservative original catalog mapping; it is FENCED precisely
+because that path cannot gain retroactive acceptance protection. Receipt reads
+can establish its original effect later without another command.
+
+Original definitive no-effect evidence is a permanent fence under its complete
+receipt binding, including old unenveloped attempts after key eviction. A later
+negative attempt cannot disprove an existing durable B1 receipt. Separate legacy
+proofs also demonstrate that a positive original does not silently become durable
+success dedupe: an explicitly unsafe unenveloped send after honest cache expiry
+can create a distinct second object, so runtime replay remains FENCED.
+
+Additional cases exercise no-tool UNKNOWN/FAILED/pending/incomplete/mixed and
+32-ref plans, all-success positives, current-no-plan/prior-U, current success with
+other-Turn U, early inactive/key failures, actual final-read lock waits and final
+read loss, including cleanup success/failure with both no selected plan and
+retained successful receipts. Every original ref remains correlated to its selected plan. Stale
+runtime snapshots consume committed success at every ordinal of a three-action
+plan and all-terminal replay; residuals independently reconsider U, facts,
+generation, genuine FAILED predecessors and real original expiry. The ordinary
+suite separately exercises all32 ordinals. These are authored cases, not an
+independent review or a final-verifier result.

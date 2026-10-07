@@ -15,7 +15,7 @@ from schemas.business import (Ambiguous, BusinessSafetyError, DefinitiveNoEffect
                               ProvenFailedNoEffect, ProvenSucceeded, StillUnknown, SucceededReceipt)
 from schemas.managed_turn import ManagedTurnRequest
 from services.business_registry import (AdapterRegistration, BusinessRegistry, CapabilityDefinition,
-                                       ProviderProfile)
+                                       ProviderProfile, ExecutionContract)
 from services.business_repository import BusinessRepository
 from services.business_runtime import BusinessRuntime, CommittedReferenceCollector
 
@@ -50,9 +50,14 @@ class FakeAdapter:
     async def receipt_read_allowed(self, scope, *, execution):
         return self.provider.read_allowed
 
-    async def execute(self, command, *, execution):
+    async def execute(self, dispatch, *, execution):
+        command = dispatch.command
         provider = self.provider
         provider.posts += 1
+        if (command.facts != {"business": "local-fake"} or command.fact_revisions != {"catalog": provider.fact_revision}
+                or (dispatch.accept_before is not None and datetime.now(timezone.utc) >= dispatch.accept_before)):
+            from schemas.business import AttemptRejected
+            return AttemptRejected(binding=command.receipt_binding(), attempt=dispatch.attempt, reason_code="ATTEMPT_GUARD")
         provider.keys.append(command.provider_idempotency_key)
         if provider.execute_outcome == "FAILED":
             return DefinitiveNoEffect(binding=command.receipt_binding(),receipt_id="rejected-1",
@@ -124,7 +129,9 @@ async def setup_business(factory, *, mode="LOOKUP", confirmation=False, retentio
     registration = AdapterRegistration(adapter_id="fake_booking", profile=profile,
                                        capabilities=(CapabilityDefinition(name="booking.create", argument_model=BookingArguments,
                                                                            requires_confirmation=confirmation, public_fields=("slot",)),),
-                                       adapter=FakeAdapter(provider, mode))
+                                       adapter=FakeAdapter(provider, mode),
+                                       execution_contract=ExecutionContract(expected_facts="CONDITIONAL_EXPECTED_FACTS_V1",
+                                           bounded_acceptance="FENCED"))
     registry = BusinessRegistry((registration,))
     repository = BusinessRepository(factory)
     binding = await repository.configure_binding(grant, adapter_id=registration.adapter_id, connection_id=uuid4(),
@@ -180,7 +187,7 @@ async def test_response_loss_has_honest_recovery_profile(db_session, mode):
 async def test_only_authoritative_negative_evidence_resolves_unknown(db_session, outcome):
     runtime, provider, _, _ = await setup_business(db_session)
     plan = await runtime.freeze_plan(actions("12:00"))
-    facts = await runtime._facts(actions("12:00"))
+    facts = runtime.facts_resolver(actions("12:00"))
     decision = await runtime.repository.claim_dispatch(runtime.request, runtime.grant, plan.id,
                                                        plan.operations[0].id, runtime.registration, facts)
     # B2: permission committed, send never observed. That private test fact is
@@ -261,8 +268,10 @@ async def test_ref_and_receipt_survive_agent_delete_and_db_read_failure(db_sessi
     assert await BusinessRepository.read_evidence(runtime.request, runtime.grant, db_session) == refs
     async def unavailable(*args):
         raise ConnectionError
-    monkeypatch.setattr(runtime.repository, "collect_refs", unavailable)
+    monkeypatch.setattr(runtime.repository, "result_gate", unavailable)
     assert await runtime.collect_refs() == refs
+    assert runtime.last_gate is None
+    assert (await runtime.guard_result(reload=False)).halt_status == "UNKNOWN"
     assert provider.posts == 1
 
 
@@ -289,7 +298,7 @@ async def test_scope_guard_preserves_reserved_candidate_until_terminal_resolutio
     second = await BusinessRuntime.open(later(first.request), first.grant, db_session, registry)
     plan1 = await first.freeze_plan(actions("12"))
     plan2 = await second.freeze_plan(actions("13"))
-    facts = await first._facts(actions("12"))
+    facts = first.facts_resolver(actions("12"))
     decision1 = await first.repository.claim_dispatch(first.request, first.grant, plan1.id,
                                                        plan1.operations[0].id, first.registration, facts)
     for stored_state in ("live", "expired", "unknown"):
@@ -302,7 +311,7 @@ async def test_scope_guard_preserves_reserved_candidate_until_terminal_resolutio
             await first.recover_attempts()
         decision2 = await second.repository.claim_dispatch(second.request, second.grant, plan2.id,
                                                             plan2.operations[0].id, second.registration,
-                                                            await second._facts(actions("13")))
+                                                            second.facts_resolver(actions("13")))
         assert decision2.token is None and decision2.reason == "BLOCKED_UNRESOLVED_EFFECT"
         candidate = decision2.plan.operations[0]
         assert candidate.status == "RESERVED" and candidate.attempt_count == candidate.state_version == 0
@@ -317,7 +326,7 @@ async def test_scope_guard_preserves_reserved_candidate_until_terminal_resolutio
 async def test_strict_plan_predecessors_and_mixed_effect_refs(db_session):
     runtime, provider, _, _ = await setup_business(db_session)
     plan = await runtime.freeze_plan(actions("12", "13", "14"))
-    facts = await runtime._facts(actions("12", "13", "14"))
+    facts = runtime.facts_resolver(actions("12", "13", "14"))
     blocked = await runtime.repository.claim_dispatch(runtime.request, runtime.grant, plan.id,
                                                        plan.operations[1].id, runtime.registration, facts)
     assert blocked.reason == "BLOCKED_PREDECESSOR" and blocked.token is None
@@ -373,8 +382,8 @@ async def test_stale_original_receipt_after_normalization_requires_authoritative
     runtime, provider, _, _ = await setup_business(db_session)
     plan = await runtime.freeze_plan(actions("12"))
     decision = await runtime.repository.claim_dispatch(runtime.request, runtime.grant, plan.id, plan.operations[0].id,
-        runtime.registration, await runtime._facts(actions("12")))
-    original_receipt = await runtime.registration.adapter.execute(decision.token.command, execution=None)
+        runtime.registration, runtime.facts_resolver(actions("12")))
+    original_receipt = await runtime.registration.adapter.execute(decision.token.dispatch, execution=None)
     await runtime.repository.mark_unknown(runtime.request, runtime.grant, decision.token, lookup_available=True)
     stale = await runtime.repository.finalize(runtime.request, runtime.grant, decision.token, original_receipt)
     assert stale.operations[0].status == "UNKNOWN"
@@ -427,7 +436,7 @@ async def test_definitive_no_effect_failure_stops_ordered_plan_without_false_suc
     assert [op.status for op in plan.operations]==["FAILED","RESERVED"]
     assert provider.posts==1 and provider.objects=={}
     denied=await runtime.repository.claim_dispatch(runtime.request,runtime.grant,plan.id,plan.operations[1].id,
-        runtime.registration,await runtime._facts(actions("12","13")))
+        runtime.registration,runtime.facts_resolver(actions("12","13")))
     assert denied.token is None and denied.reason=="BLOCKED_PREDECESSOR"
 
 
@@ -464,6 +473,6 @@ async def test_unknown_evidence_survives_agent_delete_and_cannot_grant_new_dispa
     refs=await BusinessRepository.read_evidence(runtime.request,runtime.grant,db_session)
     assert refs[0].outcome=="UNKNOWN"
     denied=await runtime.repository.claim_dispatch(runtime.request,runtime.grant,original.id,original.operations[0].id,
-        runtime.registration,MaterialFacts(values={"business":"local-fake"},revisions={"catalog":1}))
+        runtime.registration,runtime.facts_resolver(actions("12")))
     assert denied.token is None and denied.plan.operations[0].status=="UNKNOWN"
     assert provider.posts==1

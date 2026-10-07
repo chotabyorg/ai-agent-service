@@ -1,15 +1,16 @@
 """Code-owned stateless HTTP fake adapter; only the provider is replaced."""
 
 import hashlib
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from datetime import datetime, timezone
 
 import httpx
 from pydantic import BaseModel, ConfigDict, Field
 
-from schemas.business import (Ambiguous, DefinitiveNoEffect, MaterialFacts,
+from schemas.business import (Ambiguous, AttemptRejected, DefinitiveNoEffect, MaterialFacts,
                               ProvenFailedNoEffect, ProvenSucceeded, StillUnknown,
                               SucceededReceipt)
-from services.business_registry import (AdapterRegistration, BusinessRegistry,
+from services.business_registry import (AdapterRegistration, BusinessRegistry, ExecutionContract,
                                        CapabilityDefinition, ProviderProfile)
 from services.managed_http_cleanup import close_managed_helper, own_managed_http
 
@@ -45,15 +46,20 @@ class HTTPBookingAdapter:
     async def receipt_read_allowed(self, scope, *, execution):
         return True
 
-    async def execute(self, command, *, execution):
+    async def execute(self, dispatch, *, execution):
+        if dispatch.accept_before is not None and datetime.now(timezone.utc) >= dispatch.accept_before:
+            return AttemptRejected(binding=dispatch.command.receipt_binding(), attempt=dispatch.attempt,
+                                   reason_code="LOCAL_ACCEPTANCE_EXPIRED")
         try:
             value = await self.request("POST", "/execute", execution,
-                                       command.model_dump(mode="json"))
+                                       dispatch.model_dump(mode="json"))
             kind = value.get("kind")
             if kind == "SUCCEEDED":
                 return SucceededReceipt.model_validate(value)
             if kind == "FAILED_NO_EFFECT":
                 return DefinitiveNoEffect.model_validate(value)
+            if kind == "ATTEMPT_REJECTED":
+                return AttemptRejected.model_validate(value)
             return Ambiguous()
         except httpx.HTTPError:
             return Ambiguous()
@@ -70,7 +76,8 @@ class HTTPBookingAdapter:
             return StillUnknown()
 
 
-def registry(base_url, *, native_policy="DURABLE_TEST", horizon=None, timeout=1, proposal_ttl=300):
+def registry(base_url, *, native_policy="DURABLE_TEST", horizon=None, timeout=1, proposal_ttl=300,
+             bounded_acceptance="PROVIDER_ACCEPT_BEFORE_V1", retained_legacy=False):
     values = []
     for mode in ("LOOKUP", "BLIND", "NATIVE"):
         profile = ProviderProfile(
@@ -80,12 +87,17 @@ def registry(base_url, *, native_policy="DURABLE_TEST", horizon=None, timeout=1,
             native_minimum_retention_seconds=horizon if mode == "NATIVE" else None,
             proposal_ttl_seconds=proposal_ttl,
         )
-        values.append(AdapterRegistration(
+        entry = AdapterRegistration(
             adapter_id="fake_" + mode.lower(), profile=profile,
             capabilities=(CapabilityDefinition("booking.create", BookingArguments,
                                                public_fields=("slot",)),
                           CapabilityDefinition("booking.confirm_create", BookingArguments,
                                                requires_confirmation=True, public_fields=("slot",))),
             adapter=HTTPBookingAdapter(base_url, timeout),
-        ))
+            execution_contract=ExecutionContract(expected_facts="CONDITIONAL_EXPECTED_FACTS_V1",
+                                                 bounded_acceptance=bounded_acceptance),
+        )
+        if retained_legacy:
+            entry = replace(entry, retained_catalog_revisions=(entry.legacy_catalog_revision,))
+        values.append(entry)
     return BusinessRegistry(tuple(values))

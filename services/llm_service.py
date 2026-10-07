@@ -507,6 +507,12 @@ class LLMService:
                 try:
                     if runtime:
                         runtime.check()
+                        if runtime.business is not None:
+                            gate = await runtime.operation(runtime.business.guard_result(allow_incomplete=True))
+                            if gate is not None:
+                                if gate.halt_status:
+                                    raise ManagedExecutionError(gate.error_code, processing_status=gate.halt_status)
+                                return gate.safe_draft
                         self._check_managed_envelope(agent, messages, openai_tools)
                     pending_response = llm_client.chat.completions.create(
                         model=agent.model_name or self.settings.llm_default_model,
@@ -568,6 +574,12 @@ class LLMService:
                 set_chat_failure_stage(ChatFailureStage.RESPONSE_PROCESSING)
                 message = response.choices[0].message
                 if not getattr(message, "tool_calls", None):
+                    if runtime and runtime.business is not None:
+                        gate = await runtime.operation(runtime.business.guard_result())
+                        if gate is not None:
+                            if gate.halt_status:
+                                raise ManagedExecutionError(gate.error_code, processing_status=gate.halt_status)
+                            return gate.safe_draft
                     raw_answer = message.content or "I processed your request."
                     clean_answer = self._strip_thinking_tags(raw_answer)
                     if not clean_answer:

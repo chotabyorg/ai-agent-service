@@ -5,7 +5,7 @@ from uuid import UUID
 
 import anyio
 
-from schemas.business import (Ambiguous, BusinessAction, BusinessSafetyError, BusinessToolResult,
+from schemas.business import (Ambiguous, AttemptRejected, BusinessAction, BusinessSafetyError, BusinessToolResult,
                               DefinitiveNoEffect, MaterialFacts, ProvenFailedNoEffect,
                               ProvenSucceeded, StillUnknown, SucceededReceipt)
 from schemas.managed_turn import OperationReference
@@ -56,19 +56,64 @@ class BusinessRuntime:
         # Explicit same-scope normalization, never a new provider command.
         if self.scope is not None:
             await self.repository.recover_attempts(request, grant)
-            await self.collect_refs()
+        self.last_gate = None
+        self.business_scope_seen = self.scope is not None
+        await self.collect_refs()
         return self
 
     async def collect_refs(self):
         try:
-            refs = await self.repository.collect_refs(self.request, self.grant)
-            self.collector.observe_committed(refs)
+            gate = await self.repository.result_gate(self.request, self.grant)
+            self.collector.observe_committed(gate.references)
         except BusinessSafetyError:
+            self.last_gate = None
             raise
         except Exception:
-            # Final DB unavailability cannot erase positively committed handles.
-            pass
+            # Preserve the original collector fallback, but never reuse an old
+            # no-blocker gate as permission for ordinary prose during an outage.
+            self.last_gate = None
+            return self.collector.snapshot()
+        self.last_gate = gate
+        self.business_scope_seen = self.business_scope_seen or gate.scope_exists
         return self.collector.snapshot()
+
+    async def guard_result(self, *, allow_incomplete=False, reload=True):
+        if reload:
+            try:
+                await self.collect_refs()
+            except Exception:
+                self.last_gate = None
+                return self._halt(True)
+        gate = self.last_gate
+        if gate is None:
+            return self._halt(True)
+        if gate.scope_unresolved or gate.disposition == "UNKNOWN":
+            return self._halt(True)
+        if gate.disposition == "NO_PLAN" and self.collector.snapshot():
+            return self._halt(True)
+        if gate.disposition in {"NO_PLAN", "ALL_SUCCEEDED"}:
+            return None
+        if gate.disposition == "AWAITING_CONFIRMATION":
+            try:
+                if (self.registration is None or gate.plan.operations[0].command.adapter_id != self.registration.adapter_id
+                        or gate.plan.operations[0].command.provider_profile_revision != self.registration.profile.profile_revision
+                        or not self.registration.accepts_catalog(gate.plan.catalog_revision)):
+                    return self._halt(True)
+                return self._proposal(gate.plan)
+            except Exception:
+                return self._halt(True)
+        if gate.disposition == "INCOMPLETE" and allow_incomplete:
+            return None
+        if gate.disposition == "FAILED":
+            return self._halt(any(op.status in {"SUCCEEDED", "DISPATCHING", "UNKNOWN"} for op in gate.plan.operations))
+        return self._halt(True)
+
+    def facts_resolver(self, actions, *, allow_disabled=True):
+        # This callback is invoked only by the repository after its P transaction
+        # has fully closed. It contains no admission right or cached witness.
+        async def resolve():
+            return await self._facts(actions, allow_disabled=allow_disabled)
+        return resolve
 
     def openai_tools(self):
         if self.registration is None or not self.binding.enabled_capabilities:
@@ -158,9 +203,8 @@ class BusinessRuntime:
     async def freeze_plan(self, actions, *, propose=False):
         if not isinstance(actions, (list, tuple)) or not 1 <= len(actions) <= 32:
             raise BusinessSafetyError("PLAN_BOUNDS")
-        facts = await self._facts(actions)
         plan = await self.repository.reserve_plan(self.request, self.grant, self.registration,
-                                                   actions, facts, propose=propose)
+                                                   actions, self.facts_resolver(actions, allow_disabled=False), propose=propose)
         self.collector.observe_committed(plan.references)
         return plan
 
@@ -201,23 +245,29 @@ class BusinessRuntime:
                                   error_code="TOOL_EXECUTION_UNKNOWN")
 
     async def _execute_frozen(self, plan):
-        for operation in plan.operations:
+        identities = tuple(op.id for op in plan.operations)
+        for identity in identities:
+            operation = next(op for op in plan.operations if op.id == identity)
             if operation.status == "SUCCEEDED":
                 continue
             if operation.status == "FAILED":
                 return self._halt(any(op.status in {"SUCCEEDED", "DISPATCHING", "UNKNOWN"} for op in plan.operations))
-            if operation.status in {"DISPATCHING", "UNKNOWN"}:
-                return self._halt(True)
-            facts = await self._facts([BusinessAction(capability=op.command.capability,
-                                                       arguments=op.command.arguments) for op in plan.operations], allow_disabled=True)
+            actions = [BusinessAction(capability=op.command.capability, arguments=op.command.arguments)
+                       for op in plan.operations]
             decision = await self.repository.claim_dispatch(self.request, self.grant, plan.id, operation.id,
-                                                            self.registration, facts)
+                                                            self.registration, self.facts_resolver(actions))
             self.collector.observe_committed(decision.plan.references)
+            plan = decision.plan
+            candidate = next(op for op in plan.operations if op.id == identity)
             if decision.token is None:
-                return self._halt(decision.reason in {"BLOCKED_UNRESOLVED_EFFECT", "BLOCKED_PREDECESSOR", "IN_FLIGHT", "UNKNOWN"}
-                                  or any(op.status in {"SUCCEEDED", "DISPATCHING", "UNKNOWN"} for op in decision.plan.operations))
+                # A fresh committed terminal success is observation, not a send
+                # token. Every following ordinal starts its own whole P/FRESH/D.
+                if candidate.status == "SUCCEEDED":
+                    continue
+                return self._halt(decision.reason in {"ADMISSION_CONTENDED", "BLOCKED_UNRESOLVED_EFFECT", "BLOCKED_PREDECESSOR", "IN_FLIGHT", "UNKNOWN"}
+                                  or any(op.status in {"SUCCEEDED", "DISPATCHING", "UNKNOWN"} for op in plan.operations))
             plan = await self._send(decision.token)
-            if next(op for op in plan.operations if op.id == operation.id).status != "SUCCEEDED":
+            if next(op for op in plan.operations if op.id == identity).status != "SUCCEEDED":
                 return self._halt(True)
         return BusinessToolResult(tool_payload={"status": "SUCCEEDED", "operation_refs":
                                   [ref.model_dump(mode="json") for ref in self.collector.snapshot()]})
@@ -228,7 +278,15 @@ class BusinessRuntime:
         if self.execution is not None:
             self.execution.tool_dispatch_attempted = True
         try:
-            receipt = await self._adapter_call("execute", token.command)
+            receipt = await self._adapter_call("execute", token.dispatch)
+            if isinstance(receipt, AttemptRejected):
+                if receipt.binding != token.command.receipt_binding() or receipt.attempt != token.dispatch.attempt:
+                    raise BusinessSafetyError("RECEIPT_CONFLICT", processing_status="UNKNOWN")
+                # This attempt's rejection cannot erase any prior possible B1.
+                plan = await self.repository.mark_unknown(self.request, self.grant, token,
+                    lookup_available=self.registration.profile.mode != "BLIND")
+                self.collector.observe_committed(plan.references)
+                return plan
             if not isinstance(receipt, (SucceededReceipt, DefinitiveNoEffect)):
                 raise BusinessSafetyError("PROVIDER_UNKNOWN", processing_status="UNKNOWN")
             plan = await self.repository.finalize(self.request, self.grant, token, receipt)
@@ -255,9 +313,9 @@ class BusinessRuntime:
         plan = await self.repository.lookup_plan(self.request, self.grant, proposal_id)
         if plan is None:
             raise BusinessSafetyError("PLAN_DENIED")
-        facts = await self._facts([BusinessAction(capability=op.command.capability,
-                                                  arguments=op.command.arguments) for op in plan.operations], allow_disabled=True)
-        plan = await self.repository.confirm_plan(self.request, self.grant, plan.id, self.registration, facts)
+        actions = [BusinessAction(capability=op.command.capability, arguments=op.command.arguments) for op in plan.operations]
+        plan = await self.repository.confirm_plan(self.request, self.grant, plan.id, self.registration,
+                                                   self.facts_resolver(actions))
         self.collector.observe_committed(plan.references)
         return await self._execute_frozen(plan)
 
@@ -310,9 +368,8 @@ class BusinessRuntime:
         operation = next((op for op in plan.operations if op.id == operation_id), None) if plan else None
         if operation is None:
             raise BusinessSafetyError("OPERATION_DENIED")
-        facts = await self._facts([BusinessAction(capability=op.command.capability,
-                                                   arguments=op.command.arguments) for op in plan.operations], allow_disabled=True)
+        actions = [BusinessAction(capability=op.command.capability, arguments=op.command.arguments) for op in plan.operations]
         decision = await self.repository.claim_dispatch(self.request, self.grant, plan.id, operation.id,
-                                                        self.registration, facts, native_replay=True)
+                                                        self.registration, self.facts_resolver(actions), native_replay=True)
         self.collector.observe_committed(decision.plan.references)
         return await self._send(decision.token) if decision.token else decision.plan

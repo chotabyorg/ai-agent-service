@@ -1,5 +1,6 @@
 """Managed policy and genuine PostgreSQL evidence through the shared core."""
 
+import asyncio
 import json
 from uuid import UUID, uuid4
 
@@ -10,7 +11,7 @@ import main
 import services.llm_service as llm_module
 from core.config import get_settings
 from models.agent import AgentCredentials, AgentTemplate
-from models.business import BusinessOperation, BusinessPlan
+from models.business import BusinessOperation, BusinessPlan, BusinessScope
 from schemas.managed_turn import ManagedTurnRequest
 from services.agent_service import AgentService
 from services.business_runtime import BusinessRuntime
@@ -80,6 +81,28 @@ MALFORMED = (
     '{"actions":[]}', '[]', '{"actions":' + '[' * 34 + '0' + ']' * 34 + '}',
     json.dumps({"actions": [{"capability": "booking.create", "arguments": {"slot": str(i)}} for i in range(33)]}),
 )
+
+
+@pytest.mark.integration
+async def test_work_deadline_with_retained_no_plan_scope_stays_unknown(
+        api_client, db_session, monkeypatch, model):
+    _, value = await setup(api_client, db_session, monkeypatch)
+    provider = await install_business(monkeypatch, value, db_session)
+    monkeypatch.setattr(get_settings(), "managed_ai_execution_seconds", 1)
+    entered = asyncio.Event()
+    async def waiting_model(**kwargs):
+        entered.set()
+        await asyncio.Event().wait()
+    monkeypatch.setattr(model.chat.completions, "create", waiting_model)
+    result = (await execute(api_client, value)).json()
+    assert entered.is_set()
+    assert result["status"] == "UNKNOWN" and result["draft_text"] is None
+    assert result["error_code"] == "EXECUTION_TIMEOUT" and result["operation_refs"] == []
+    assert provider.commands == [] and provider.fact_calls == 0
+    async with db_session() as db:
+        assert len((await db.scalars(select(BusinessScope))).all()) == 1
+        assert (await db.scalars(select(BusinessPlan))).all() == []
+        assert (await db.scalars(select(BusinessOperation))).all() == []
 
 
 @pytest.mark.integration
@@ -213,7 +236,7 @@ async def test_blocked_reserved_candidate_is_unknown_without_attempt_or_consent_
     plan1 = await first.freeze_plan(actions)
     plan2 = await second.freeze_plan(actions)
     decision = await first.repository.claim_dispatch(request, grant, plan1.id, plan1.operations[0].id,
-                                                     first.registration, await first._facts(actions))
+                                                     first.registration, first.facts_resolver(actions))
     assert decision.token is not None
     async with db_session() as db:
         op = await db.get(BusinessOperation, plan2.operations[0].id)
@@ -231,7 +254,7 @@ async def test_blocked_reserved_candidate_is_unknown_without_attempt_or_consent_
         assert (op.status, op.attempt_count, op.state_version, op.request_payload) == before
         plan = await db.get(BusinessPlan, plan2.id)
         assert (plan.proposal_state, plan.confirmed_turn_id, plan.confirmation_input_ids, plan.confirmed_at) == consent
-    assert provider.commands == [] and len(model.chat.completions.calls) == 1
+    assert provider.commands == [] and len(model.chat.completions.calls) == 0
 
 
 @pytest.mark.integration
@@ -248,7 +271,7 @@ async def test_final_reference_reload_failure_cannot_erase_committed_receipt(
     model.chat.completions.queue(build_llm_response(tool_calls=[
         build_tool_call("effect", "business_execute_plan", plan_arguments())]), build_llm_response(content="done"))
     result = (await execute(api_client, value)).json()
-    assert result["status"] == "DRAFT_READY" and result["operation_refs"][0]["outcome"] == "SUCCEEDED"
+    assert result["status"] == "UNKNOWN" and result["draft_text"] is None and result["operation_refs"][0]["outcome"] == "SUCCEEDED"
     async with db_session() as db:
         op = (await db.scalars(select(BusinessOperation))).one()
         assert str(op.id) == result["operation_refs"][0]["operation_id"] and op.receipt_id is not None

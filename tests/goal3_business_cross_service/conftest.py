@@ -187,10 +187,13 @@ class Harness:
         await self.stop(name, abrupt)
         await self.start(name)
 
-    async def script(self, *, model=(), settings=None, release=(), replace_model=False):
+    async def script(self, *, model=(), settings=None, release=(), replace_model=False, facts=None):
+        value = {"model": list(model), "settings": settings or {}, "release": list(release),
+                 "clear_model": replace_model}
+        if facts is not None:
+            value["facts"] = facts
         response = await self.client.post(self.url("provider") + "/__test__/script",
-            json={"model": list(model), "settings": settings or {}, "release": list(release),
-                  "clear_model": replace_model})
+            json=value)
         assert response.status_code == 200
 
     async def cs(self, method, path, value=None, principal="a"):
@@ -260,9 +263,16 @@ class Harness:
         async with self.provider_sql.connect() as db:
             requests = (await db.execute(text("SELECT kind,count(*) FROM fake_requests GROUP BY kind"))).all()
             objects = await db.scalar(text("SELECT count(*) FROM fake_objects"))
-            posts = [dict(v) for v in (await db.execute(text("SELECT operation_id,body FROM "
+            posts = [dict(v) for v in (await db.execute(text("SELECT operation_id,body,created_at,accepted_at,decision FROM "
                 "fake_requests WHERE kind='POST' ORDER BY sequence"))).mappings().all()]
-        return {"counts": dict(requests), "objects": objects, "posts": posts}
+            object_ids = (await db.execute(text("SELECT object_id FROM fake_objects ORDER BY object_id"))).scalars().all()
+        # Keep old counter consumers' original command projection while retaining
+        # attempt envelopes independently for exact deadline/attempt assertions.
+        for post in posts:
+            if "command" in post["body"]:
+                post["dispatch"] = post["body"]
+                post["body"] = post["body"]["command"]
+        return {"counts": dict(requests), "objects": objects, "posts": posts, "object_ids": list(object_ids)}
 
     async def phase(self, name):
         deadline = asyncio.get_running_loop().time() + 8
@@ -365,7 +375,8 @@ async def cross(paired_migrated, tmp_path, request):
                             for name in ("a", "b")]
         base = clean_env()
         provider_cfg = {"fd": listeners["provider"].fileno(), "port": listeners["provider"].getsockname()[1],
-                        "database": config["databases"]["provider"].replace("postgresql+asyncpg", "postgresql")}
+                        "database": config["databases"]["provider"].replace("postgresql+asyncpg", "postgresql"),
+                        "profile": mode}
         private_json(tmp_path / "provider.json", provider_cfg)
         h.envs["provider"] = dict(base, GOAL3_PROVIDER_CONFIG=str(tmp_path / "provider.json"))
         cs_config = {"fd": listeners["cs"].fileno(), "port": listeners["cs"].getsockname()[1],
@@ -398,8 +409,11 @@ async def cross(paired_migrated, tmp_path, request):
         try:
             await h.start("provider")
             async with h.provider_sql.begin() as db:
-                await db.execute(text("TRUNCATE fake_requests,fake_receipts,fake_objects,fake_settings,"
+                await db.execute(text("TRUNCATE fake_requests,fake_receipts,fake_objects,fake_keys,fake_key_authorities,fake_settings,"
                                       "fake_model_queue,fake_barriers CASCADE"))
+                await db.execute(text("UPDATE fake_facts SET values=CAST(:values AS jsonb),"
+                                      "revisions=CAST(:revisions AS jsonb) WHERE id=1"),
+                                 {"values": "{}", "revisions": json.dumps({"catalog": 1})})
             await h.start("ai"); await h.start("cs")
             yield h
         finally:
@@ -412,12 +426,22 @@ async def cross(paired_migrated, tmp_path, request):
                             "fake_connections c ON c.id=b.connection_id WHERE c.peer_eof_at IS NOT NULL"))).mappings().all()
                     safe = {"case": request.node.name, "result": getattr(getattr(request.node, "rep_call", None),
                         "outcome", "setup_failed"), "counts": counters["counts"], "objects": counters["objects"],
+                        "object_ids": counters["object_ids"],
                         "posts": [{"operation_id": p["operation_id"], "native_key": p["body"].get(
                             "provider_idempotency_key"), "issued_at": p["body"]["issued_at"],
-                            "fingerprint": p["body"]["request_fingerprint"]} for p in counters["posts"]],
+                            "fingerprint": p["body"]["request_fingerprint"],
+                            "attempt": p.get("dispatch", {}).get("attempt"),
+                            "accept_before": p.get("dispatch", {}).get("accept_before"),
+                            "kind": p.get("dispatch", {}).get("kind"), "received_at": p["created_at"],
+                            "accepted_at": p["accepted_at"], "decision": p["decision"]} for p in counters["posts"]],
                         "operations": [{key: str(o[key]) if key in {"id", "origin_turn_id"} else o[key]
                             for key in ("id", "origin_turn_id", "status", "attempt_count", "receipt_id", "object_id")}
                             for o in operations], "locks": h.lock_evidence, "guard_denials": h.trace("guard"),
+                            "admission_probes": h.trace("probe"), "fresh_fact_reads": h.trace("fresh"),
+                            "authority_lock_observations": h.trace("scope_lock"),
+                            "dispatch_attempts": [{key: record[key] for key in ("operation_id", "state_version",
+                                "dispatch_epoch", "dispatch_nonce", "native_replay", "accept_before", "execution_contract")}
+                                for record in h.trace("dispatch_token")],
                             "process_events": h.trace("process"), "phase_signals": [p.stem for p in tmp_path.glob("entered-*.json")],
                             "actual_ai_calls": len(h.trace("execute")), "evidence_calls": len(h.trace("evidence")),
                             "provider_peer_eof": [dict(row) for row in peers]}

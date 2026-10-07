@@ -155,6 +155,52 @@ to `confirm <canonical-lowercase-proposal-uuid>` or `подтверждаю <can
 after outer ASCII spaces only; prompt/model booleans or bare yes/да grant nothing.
 FAILED/UNKNOWN business results stop additional model/mutation continuation.
 
+The repository accepts an audited async facts resolver, never a pre-read facts
+value as admission authority. Each public R/confirmation/first or residual D/native
+attempt obtains one wait-capable read-only probe of agent, binding, retained scope,
+plan and ordered operations. It closes the transaction and session, reads facts
+again externally, then reacquires the complete authority set with NOWAIT for its
+separate decisive transaction. Changed initial preparation facts reject R; existing
+plans/consent compare their original frozen values. Current generations, complete
+plan, capabilities, consent, expiry, predecessors and the full unresolved scope
+are evaluated again. Renewed contention grants no token; there is no automatic
+retry/reprobe or network while DB locks are held. Each residual starts a new
+complete sequence even when a stale worker just consumed committed SUCCEEDED.
+
+A code-owned execution contract is included in catalog compatibility. Missing
+conditional expected-facts support denies mutation. The audited fake compares
+complete original facts/revisions under provider authority in the same transaction
+as dedupe/mutation. A local fresh read alone is never cross-provider atomicity or
+instantaneous cancellation after genuinely admitted/in-flight work.
+
+BOUNDED replay defaults to FENCED. An audited PROVIDER_ACCEPT_BEFORE_V1 contract
+receives a transient ProviderDispatch envelope: original command, attempt epoch,
+nonce/version, FIRST or NATIVE_REPLAY, original absolute deadline, contract revision.
+The provider checks facts and samples its acceptance clock after all key/facts/
+authority lock waits, before cache eviction/new mutation; every old/displaced path
+must obey it. A client deadline check is only an optimization. The fake's key cache
+really expires; durable objects and receipts remain separately counted. DURABLE_TEST
+is restricted to a durable test adapter and proves no production guarantee. An
+AttemptRejected binds only the current attempt and preserves original UNKNOWN;
+only authoritative original-operation no-effect evidence can establish FAILED.
+Legacy catalog compatibility is an explicit exact code-owned mapping, tied to the
+unchanged profile/capability normalization. Old unguarded bounded profiles remain
+FENCED; their original UUID/key/payload/issued time/horizon/generations are retained.
+
+A coherent retained scope/selected link/complete plan/operation observation and
+full same-scope unresolved query guard ordinary answers before model continuation,
+in the no-tool branch, and during final reload/return. Pending proposals use only
+the deterministic original handle and bounded approved public-field projection.
+Eligible RESERVED residual work may enter business-control reasoning, but a no-tool
+answer cannot claim it completed. FAILED/UNKNOWN/incomplete effects suppress
+ordinary drafts even when this attempt chose no tool. All 32 genuine selected refs
+remain; a prior Turn's unknown operation makes this Turn's processing UNKNOWN but
+its refs are never borrowed or attached as a new selected plan. Early live/key
+errors retain read permission; missing-agent 404 remains. If the required final
+business-scope uncertainty read is unavailable, even earlier complete successes
+retain their refs with a null draft. The final observation is point-in-time;
+no DB lock spans serialization/response delivery or grants later dispatch rights.
+
 The legacy completion hook persists only original history/current user/final answer inside
 its ExitStack before MCP cleanup. Cleanup failure can still yield plain500 after
 Redis save, matching existing behavior. Legacy raw tool-error continuation remains.

@@ -10,6 +10,7 @@ import os
 import select
 import socket
 import time
+from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from uuid import uuid4
@@ -25,6 +26,15 @@ CREATE TABLE IF NOT EXISTS fake_receipts(
  receipt jsonb NOT NULL);
 CREATE TABLE IF NOT EXISTS fake_objects(
  object_id text PRIMARY KEY, operation_id text NOT NULL);
+CREATE TABLE IF NOT EXISTS fake_facts(
+ id integer PRIMARY KEY CHECK(id=1), values jsonb NOT NULL, revisions jsonb NOT NULL);
+INSERT INTO fake_facts VALUES(1,'{}','{"catalog":1}') ON CONFLICT DO NOTHING;
+CREATE TABLE IF NOT EXISTS fake_key_authorities(native_key text PRIMARY KEY);
+CREATE TABLE IF NOT EXISTS fake_keys(
+ native_key text PRIMARY KEY REFERENCES fake_key_authorities(native_key),
+ fingerprint text NOT NULL, receipt jsonb NOT NULL, expires_at timestamptz);
+ALTER TABLE fake_requests ADD COLUMN IF NOT EXISTS accepted_at timestamptz;
+ALTER TABLE fake_requests ADD COLUMN IF NOT EXISTS decision text;
 CREATE TABLE IF NOT EXISTS fake_settings(key text PRIMARY KEY, value jsonb NOT NULL);
 CREATE TABLE IF NOT EXISTS fake_model_queue(
  sequence bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY, script jsonb NOT NULL);
@@ -59,6 +69,11 @@ class Provider:
         return await asyncpg.connect(self.config["database"], timeout=5)
 
     async def initialize(self):
+        from schemas.business import ProviderDispatch
+        from services.business_registry import ExecutionContract
+        self.dispatch_type = ProviderDispatch
+        self.contract_revision = ExecutionContract(expected_facts="CONDITIONAL_EXPECTED_FACTS_V1",
+            bounded_acceptance=self.config.get("profile", {}).get("bounded_acceptance", "PROVIDER_ACCEPT_BEFORE_V1")).revision
         db = await self.connection()
         try:
             assert 160000 <= int(await db.fetchval("SHOW server_version_num")) < 170000
@@ -94,6 +109,11 @@ class Provider:
                 return 200, {"status": "ok"}, None
             if path == "/__test__/script" and method == "POST":
                 async with db.transaction():
+                    if "facts" in body:
+                        # Same durable facts authority as provider acceptance.
+                        await db.execute("SELECT id FROM fake_facts WHERE id=1 FOR UPDATE")
+                        await db.execute("UPDATE fake_facts SET values=$1::jsonb,revisions=$2::jsonb WHERE id=1",
+                                         json.dumps(body["facts"]["values"]), json.dumps(body["facts"]["revisions"]))
                     if body.get("clear_model", False):
                         await db.execute("DELETE FROM fake_model_queue")
                     for key, value in body.get("settings", {}).items():
@@ -117,30 +137,98 @@ class Provider:
                     "message": "Synthetic model script exhausted", "type": "fixture"}}}
                 return script.get("status", 200), script["body"], script.get("barrier")
             if path == "/facts":
-                await db.execute("INSERT INTO fake_requests(kind,body) VALUES('FACTS','{}')")
-                return 200, {"values": {}, "revisions": {"catalog": 1}}, None
+                async with db.transaction():
+                    row = await db.fetchrow("SELECT values,revisions FROM fake_facts WHERE id=1 FOR SHARE")
+                    facts = {name: json.loads(row[name]) for name in ("values", "revisions")}
+                    await db.execute("INSERT INTO fake_requests(kind,body) VALUES('FACTS',$1::jsonb)", json.dumps(facts))
+                barrier = await self.setting(db, "facts_barrier")
+                if barrier:
+                    await self.barrier(barrier)
+                return 200, facts, None
             if path == "/execute" and method == "POST":
-                op, key, fp = body["operation_id"], body.get("provider_idempotency_key"), body["request_fingerprint"]
+                command = body.get("command", body)
+                op, key, fp = command["operation_id"], command.get("provider_idempotency_key"), command["request_fingerprint"]
                 script = await self.setting(db, "execute", {})
-                slot = body["arguments"].get("slot", "")
+                slot = command["arguments"].get("slot", "")
                 script = script.get(slot, script.get("default", {}))
                 binding_names = ("scope", "operation_id", "request_fingerprint", "adapter_id",
                                  "connection_id", "provider_profile_revision", "issued_at",
                                  "provider_idempotency_key")
-                binding = {name: body[name] for name in binding_names}
+                binding = {name: command[name] for name in binding_names}
+                # Count receipt of bytes before any acceptance wait. A timed-out
+                # caller can still have a durable counted request waiting here.
+                sequence = await db.fetchval("INSERT INTO fake_requests(kind,operation_id,body) "
+                    "VALUES('POST',$1,$2::jsonb) RETURNING sequence", op, json.dumps(body))
+                if script.get("before_accept"):
+                    await self.barrier(script["before_accept"])
                 async with db.transaction():
-                    # Separate provider-key authority serializes simultaneous native requests.
-                    await db.execute("SELECT pg_advisory_xact_lock(hashtextextended($1,0))", key or str(uuid4()))
-                    await db.execute("INSERT INTO fake_requests(kind,operation_id,body) "
-                                     "VALUES('POST',$1,$2::jsonb)", op, json.dumps(body))
-                    old = await db.fetchrow("SELECT fingerprint,receipt FROM fake_receipts "
-                                           "WHERE native_key=$1", key) if key else None
+                    # Acquire every provider authority first, then reload facts
+                    # and sample clock_timestamp at the acceptance decision.
+                    await db.execute("SELECT id FROM fake_facts WHERE id=1 FOR UPDATE")
+                    if key:
+                        await db.execute("INSERT INTO fake_key_authorities VALUES($1) ON CONFLICT DO NOTHING", key)
+                        await db.execute("SELECT native_key FROM fake_key_authorities WHERE native_key=$1 FOR UPDATE", key)
+                    row = await db.fetchrow("SELECT values,revisions FROM fake_facts WHERE id=1")
+                    current = {name: json.loads(row[name]) for name in ("values", "revisions")}
+                    now = await db.fetchval("SELECT clock_timestamp()")
+                    profile = self.config.get("profile", {})
+                    deadline = body.get("accept_before")
+                    reason = None
+                    legacy_unenveloped = ("command" not in body and profile.get("retained_legacy") is True
+                                          and profile.get("bounded_acceptance") == "FENCED")
+                    if ("command" not in body or "attempt" not in body) and not legacy_unenveloped:
+                        reason = "UNENVELOPED_ATTEMPT"
+                    elif not legacy_unenveloped:
+                        try:
+                            self.dispatch_type.model_validate(body)
+                            if body["execution_contract"] != self.contract_revision:
+                                reason = "EXECUTION_CONTRACT_CONFLICT"
+                        except (ValueError, TypeError):
+                            reason = "ATTEMPT_CONFLICT"
+                    if reason is None and key and profile.get("native_policy") == "BOUNDED" and profile.get(
+                            "bounded_acceptance", "PROVIDER_ACCEPT_BEFORE_V1") == "PROVIDER_ACCEPT_BEFORE_V1":
+                        original_deadline = datetime.fromisoformat(command["issued_at"].replace("Z", "+00:00")) + timedelta(seconds=profile["horizon"])
+                        if deadline is None or datetime.fromisoformat(deadline.replace("Z", "+00:00")) != original_deadline:
+                            reason = "DEADLINE_CONFLICT"
+                        elif now >= original_deadline:
+                            reason = "ACCEPTANCE_EXPIRED"
+                    if reason is None and (command["facts"] != current["values"] or command["fact_revisions"] != current["revisions"]):
+                        reason = "EXPECTED_FACTS_CHANGED"
+                    original_row = await db.fetchrow("SELECT fingerprint,receipt FROM fake_receipts WHERE operation_id=$1", op)
+                    original = json.loads(original_row["receipt"]) if original_row else None
+                    if original is not None and (original_row["fingerprint"] != fp or original["binding"] != binding):
+                        reason = reason or "ORIGINAL_BINDING_CONFLICT"
+                    await db.execute("UPDATE fake_requests SET accepted_at=$1,decision=$2 WHERE sequence=$3", now, reason or "ACCEPTED", sequence)
+                    if reason:
+                        await db.execute("INSERT INTO fake_requests(kind,operation_id,body) VALUES('REJECT',$1,$2::jsonb)", op, json.dumps({"reason": reason}))
+                        rejected = {"kind": "ATTEMPT_REJECTED", "binding": binding,
+                                    "attempt": body.get("attempt"), "reason_code": reason}
+                        return 200 if body.get("attempt") else 409, rejected, None
+                    # Honest key expiry never deletes the separately durable
+                    # original object or authoritative original receipt.
+                    if key:
+                        await db.execute("DELETE FROM fake_keys WHERE native_key=$1 AND expires_at<=$2", key, now)
+                    if original is not None and original["kind"] == "FAILED_NO_EFFECT":
+                        # Original no-effect is a permanent provider fence under
+                        # this full binding. Cache expiry or a positive later
+                        # script cannot invalidate already-issued final evidence.
+                        # This is not success dedupe for LOOKUP/BLIND profiles.
+                        await db.execute("INSERT INTO fake_requests(kind,operation_id,body) VALUES('ACCEPT',$1,'{}')", op)
+                        return 200, original, None
+                    old = await db.fetchrow("SELECT fingerprint,receipt FROM fake_keys WHERE native_key=$1", key) if key else None
                     if old and old["fingerprint"] != fp:
                         return 409, {"kind": "AMBIGUOUS", "reason_code": "KEY_CONFLICT"}, None
                     if old:
                         receipt = json.loads(old["receipt"])
                     else:
                         negative = script.get("negative", False)
+                        if negative:
+                            # An evicted cache proves nothing about the original
+                            # logical operation. Existing durable B1 evidence
+                            # cannot be overwritten by rejection of a later try.
+                            if original is not None:
+                                await db.execute("INSERT INTO fake_requests(kind,operation_id,body) VALUES('ACCEPT',$1,'{}')", op)
+                                return 200, original, None
                         receipt = {"kind": "FAILED_NO_EFFECT" if negative else "SUCCEEDED",
                                    "binding": binding, "receipt_id": "r:" + op,
                                    "evidence": {"proof": "REJECTED" if negative else "CREATED"}}
@@ -149,9 +237,14 @@ class Provider:
                         else:
                             receipt["object_id"] = "b:" + str(uuid4())
                             await db.execute("INSERT INTO fake_objects VALUES($1,$2)", receipt["object_id"], op)
+                            await db.execute("INSERT INTO fake_requests(kind,operation_id,body) VALUES('MUTATION',$1,'{}')", op)
                         await db.execute("INSERT INTO fake_receipts VALUES($1,$2,$3,$4::jsonb) "
-                                         "ON CONFLICT(operation_id) DO UPDATE SET receipt=EXCLUDED.receipt",
+                                         "ON CONFLICT(operation_id) DO NOTHING",
                                          op, key, fp, json.dumps(receipt))
+                        if key:
+                            expiry = now + timedelta(seconds=profile["horizon"]) if profile.get("native_policy") == "BOUNDED" else None
+                            await db.execute("INSERT INTO fake_keys VALUES($1,$2,$3::jsonb,$4)", key, fp, json.dumps(receipt), expiry)
+                    await db.execute("INSERT INTO fake_requests(kind,operation_id,body) VALUES('ACCEPT',$1,'{}')", op)
                 # The effect/receipt/counter COMMIT positively returns before any loss/gate.
                 return 200, receipt, script.get("barrier") or ("DROP" if script.get("drop") else None)
             if path.startswith("/operations/") and method == "GET":

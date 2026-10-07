@@ -18,7 +18,7 @@ async def test_database_attempt_slot_rejects_second_plan_and_rolls_back(db_sessi
     second = await BusinessRuntime.open(later(first.request), first.grant, db_session, registry)
     plan1, plan2 = await first.freeze_plan(actions("12")), await second.freeze_plan(actions("13"))
     await first.repository.claim_dispatch(first.request, first.grant, plan1.id, plan1.operations[0].id,
-                                         first.registration, await first._facts(actions("12")))
+                                         first.registration, first.facts_resolver(actions("12")))
     async with db_session() as outsider:
         with pytest.raises(IntegrityError):
             await outsider.execute(update(BusinessOperation).where(BusinessOperation.id == plan2.operations[0].id).values(

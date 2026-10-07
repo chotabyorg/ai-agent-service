@@ -146,6 +146,41 @@ class FrozenProviderCommand(ReceiptBinding):
         return ReceiptBinding.model_validate(self.model_dump(include=set(ReceiptBinding.model_fields)))
 
 
+class DispatchAttempt(BusinessValue):
+    operation_id: UUID
+    state_version: Generation
+    dispatch_epoch: Generation
+    dispatch_nonce: UUID
+
+
+class ProviderDispatch(BusinessValue):
+    """Transient attempt control; never renews the original receipt identity."""
+    command: FrozenProviderCommand
+    attempt: DispatchAttempt
+    kind: Literal["FIRST", "NATIVE_REPLAY"]
+    accept_before: datetime | None = None
+    execution_contract: Hash
+
+    @field_validator("accept_before")
+    @classmethod
+    def deadline_aware(cls, value):
+        return ReceiptBinding.aware(value) if value is not None else None
+
+    @model_validator(mode="after")
+    def original_identity(self):
+        if self.attempt.operation_id != self.command.operation_id:
+            raise ValueError("Dispatch identity conflict")
+        return self
+
+
+class AttemptRejected(BusinessValue):
+    """Only this attempt made no new mutation; prior effects remain possible."""
+    binding: ReceiptBinding
+    attempt: DispatchAttempt
+    reason_code: Annotated[str, Field(pattern=r"^[A-Z][A-Z0-9_]{0,63}$")]
+    kind: Literal["ATTEMPT_REJECTED"] = "ATTEMPT_REJECTED"
+
+
 class SucceededReceipt(BusinessValue):
     binding: ReceiptBinding
     receipt_id: Handle

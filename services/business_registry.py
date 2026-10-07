@@ -7,8 +7,8 @@ from typing import Any, Literal, Protocol
 
 from pydantic import BaseModel, Field, StrictInt, model_validator
 
-from schemas.business import (Ambiguous, BusinessScopeValue, BusinessValue, DefinitiveNoEffect,
-                              FrozenProviderCommand, Hash, MaterialFacts, ProvenFailedNoEffect,
+from schemas.business import (Ambiguous, AttemptRejected, BusinessScopeValue, BusinessValue, DefinitiveNoEffect,
+                              FrozenProviderCommand, ProviderDispatch, Hash, MaterialFacts, ProvenFailedNoEffect,
                               ProvenSucceeded, StillUnknown, SucceededReceipt, canonical_value,
                               fingerprint)
 
@@ -35,11 +35,21 @@ class ProviderProfile(BusinessValue):
         return self
 
 
+class ExecutionContract(BusinessValue):
+    """Code-owned audited effect ports. Missing guarantees grant no mutation."""
+    expected_facts: Literal["UNAVAILABLE", "CONDITIONAL_EXPECTED_FACTS_V1"] = "UNAVAILABLE"
+    bounded_acceptance: Literal["FENCED", "PROVIDER_ACCEPT_BEFORE_V1"] = "FENCED"
+
+    @property
+    def revision(self):
+        return fingerprint("chota.business.execution-contract.v1", self)
+
+
 class BusinessAdapter(Protocol):
     """Implementations are stateless/config-only; each call receives its owner."""
 
     async def resolve_facts(self, scope: BusinessScopeValue, actions: tuple, *, execution) -> MaterialFacts: ...
-    async def execute(self, command: FrozenProviderCommand, *, execution) -> SucceededReceipt | DefinitiveNoEffect | Ambiguous: ...
+    async def execute(self, dispatch: ProviderDispatch, *, execution) -> SucceededReceipt | DefinitiveNoEffect | AttemptRejected | Ambiguous: ...
     async def lookup(self, command: FrozenProviderCommand, *, execution) -> ProvenSucceeded | ProvenFailedNoEffect | StillUnknown: ...
     async def receipt_read_allowed(self, scope: BusinessScopeValue, *, execution) -> bool: ...
 
@@ -71,6 +81,8 @@ class AdapterRegistration:
     profile: ProviderProfile
     capabilities: tuple[CapabilityDefinition, ...]
     adapter: BusinessAdapter
+    execution_contract: ExecutionContract = ExecutionContract()
+    retained_catalog_revisions: tuple[str, ...] = ()
 
     def __post_init__(self):
         import re
@@ -78,9 +90,14 @@ class AdapterRegistration:
                 or not self.capabilities or len({c.name for c in self.capabilities}) != len(self.capabilities)):
             raise ValueError("Invalid business registration")
         object.__setattr__(self, "capabilities", tuple(self.capabilities))
+        object.__setattr__(self, "retained_catalog_revisions", tuple(self.retained_catalog_revisions))
+        if (any(value != self.legacy_catalog_revision for value in self.retained_catalog_revisions)
+                or (self.retained_catalog_revisions and self.profile.native_replay_policy == "BOUNDED"
+                    and self.execution_contract.bounded_acceptance != "FENCED")):
+            raise ValueError("Exact conservative retained catalog required")
 
     @property
-    def catalog_revision(self) -> str:
+    def legacy_catalog_revision(self) -> str:
         return fingerprint("chota.business.catalog.v1", {
             "adapter_id": self.adapter_id, "profile": self.profile.model_dump(mode="json"),
             "capabilities": [{"name": c.name, "schema_version": c.schema_version,
@@ -88,6 +105,16 @@ class AdapterRegistration:
                               "public_fields": list(c.public_fields),
                               "schema": c.argument_model.model_json_schema()} for c in self.capabilities],
         })
+
+    @property
+    def catalog_revision(self) -> str:
+        return fingerprint("chota.business.catalog.v2", {
+            "legacy_catalog_revision": self.legacy_catalog_revision,
+            "execution_contract": self.execution_contract.model_dump(mode="json"),
+        })
+
+    def accepts_catalog(self, revision: str) -> bool:
+        return revision == self.catalog_revision or revision in self.retained_catalog_revisions
 
     def capability(self, name: str) -> CapabilityDefinition | None:
         return next((c for c in self.capabilities if c.name == name), None)

@@ -490,6 +490,17 @@ keeps only opaque refs, with an explicit manual pre-terminal crash-F recovery;
 already-terminal empty refs cannot be enriched by current APIs. Existing chat
 callers stay on `/v1/chat/completions`. No real provider/channel/deployment is enabled.
 
+Business admission closes its wait-capable read-only authority probe before a
+fresh external facts read, then obtains a separate complete NOWAIT decision and
+positive COMMIT. Renewed contention returns a bounded safe result; each later
+explicit attempt reads facts again. Typed fake adapters check the original
+expected facts atomically at provider acceptance. Bounded native replay is fenced
+unless the provider contract enforces the original absolute acceptance deadline
+for every first/replay/displaced request after all provider-side lock waits.
+Attempt rejection preserves UNKNOWN. Ordinary model prose cannot override a
+pending/incomplete/failed/uncertain selected plan or an earlier same-scope unknown
+operation; the final retained-scope observation preserves only this Turn's refs.
+
 Существующие legacy-эндпоинты под префиксом `/internal/v1`, кроме отдельно описанных managed-turns, предназначены для вызовов из других внутренних сервисов (например, `subscription-service` и `control-plane-service`) и **не проходят через API Gateway**. Каждый такой запрос должен содержать заголовок `X-Service-Token` со значением, равным `INTERNAL_API_TOKEN`. Сравнение выполняется через `secrets.compare_digest` для защиты от timing-атак. Если `INTERNAL_API_TOKEN` не задан на сервере — запрос отклоняется (fail-closed).
 
 - `GET /internal/v1/agents/count?user_id=<uuid>` — вернуть количество агентов пользователя.

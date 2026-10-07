@@ -4,6 +4,7 @@ import asyncio
 import copy
 import json
 from uuid import uuid4
+from datetime import datetime
 
 import pytest
 from sqlalchemy import text
@@ -311,7 +312,8 @@ async def test_AR1_pre_reserved_live_expired_unknown_preserve_consent(cross):
     value = ai_unknown(await cross.ai("/managed-turns/execute", second))
     assert value["operation_refs"] == [{"origin": "AI_AGENT_SERVICE", "operation_id": str(rows[1]["id"]), "outcome": None}]
     after = await cross.counters()
-    assert after["counts"]["MODEL"] == before["counts"]["MODEL"] + 1
+    # The retained entry guard now suppresses model continuation for known U.
+    assert after["counts"]["MODEL"] == before["counts"]["MODEL"]
     assert after["counts"]["POST"] == before["counts"]["POST"] == 2
     assert not any(p["operation_id"] == str(rows[1]["id"]) for p in after["posts"])
     assert await frozen_snapshot(cross, rows[1]) == frozen
@@ -729,9 +731,16 @@ async def test_section46_same_operation_reservation_and_exact_replay_wait(cross,
         cross.lock_evidence.append(await observed_waiters(cross.ai_sql, pid,
             "46 exact replay" if existing else "46 first same-operation reservation", count=2))
     outcomes = [await worker for worker in workers]
-    assert outcomes[0]["plan_id"] == outcomes[1]["plan_id"]
+    committed = [outcome["plan_id"] for outcome in outcomes if outcome.get("plan_id")]
+    assert committed and len(set(committed)) == 1
+    assert all(outcome.get("plan_id") or (outcome.get("safety_code") == "ADMISSION_CONTENDED"
+               and outcome["halt_status"] == "UNKNOWN") for outcome in outcomes)
+    # P may wait, but renewed decisive contention is deliberately bounded.
+    # Only a later explicit invocation obtains fresh facts for exact replay.
+    replay = await cross.worker(request, "reserve_direct", actions=actions())
+    assert replay["plan_id"] == committed[0]
     if existing:
-        assert outcomes[0]["plan_id"] == prior["plan_id"]
+        assert committed[0] == prior["plan_id"]
     row = await one_operation(cross, request["turn_id"])
     assert row["status"] == "RESERVED" and row["attempt_count"] == 0
     assert (await cross.counters())["counts"].get("POST", 0) == 0
@@ -748,7 +757,8 @@ async def test_section46_same_operation_competing_permission_one_actual_post(cro
         cross.lock_evidence.append(await observed_waiters(cross.ai_sql, pid, "46 same-operation D permission", count=2))
     outcomes = [await worker for worker in workers]
     assert sum(result["permitted"] for result in outcomes) == 1
-    assert next(result for result in outcomes if not result["permitted"])["reason"] in {"IN_FLIGHT", "UNKNOWN"}
+    assert next(result for result in outcomes if not result["permitted"])["reason"] in {"IN_FLIGHT", "UNKNOWN", "ADMISSION_CONTENDED"}
+    assert not (await cross.worker(request, "claim", send=True))["permitted"]
     assert (await cross.counters())["counts"]["POST"] == (await cross.counters())["objects"] == 1
     assert (await one_operation(cross, request["turn_id"]))["attempt_count"] == 1
 
@@ -815,7 +825,16 @@ async def test_section46_exact_confirmation_overlap_and_replay(cross):
         workers = [asyncio.create_task(cross.worker(confirming, "confirm_direct", plan_id=plan["plan_id"])) for _ in range(2)]
         cross.lock_evidence.append(await observed_waiters(cross.ai_sql, pid, "46 exact selected confirmation", count=2))
     outcomes = [await worker for worker in workers]
-    assert all(outcome["plan_id"] == plan["plan_id"] for outcome in outcomes)
+    assert any(outcome.get("plan_id") == plan["plan_id"] for outcome in outcomes)
+    assert all(outcome.get("plan_id") == plan["plan_id"] or (outcome.get("safety_code") == "ADMISSION_CONTENDED"
+               and outcome["halt_status"] == "UNKNOWN") for outcome in outcomes)
+    async with cross.ai_sql.connect() as db:
+        consent = (await db.execute(text("SELECT confirmed_at,confirmed_turn_id,confirmation_input_ids,confirmation_policy FROM business_plans WHERE id=:id"),
+                                   {"id": plan["plan_id"]})).one()
+    assert (await cross.worker(confirming, "confirm_direct", plan_id=plan["plan_id"]))["plan_id"] == plan["plan_id"]
+    async with cross.ai_sql.connect() as db:
+        assert (await db.execute(text("SELECT confirmed_at,confirmed_turn_id,confirmation_input_ids,confirmation_policy FROM business_plans WHERE id=:id"),
+                                {"id": plan["plan_id"]})).one() == consent
     for _ in range(2):
         assert (await cross.worker(confirming, "confirm", plan_id=plan["plan_id"]))["operation_refs"][0]["outcome"] == "SUCCEEDED"
     assert (await cross.counters())["counts"]["POST"] == (await cross.counters())["objects"] == 1
@@ -856,6 +875,698 @@ async def test_actual_stale_proposal_cannot_dispatch_later_confirmation(cross):
     assert turn["operation_refs"] == [{"origin": "AI_AGENT_SERVICE", "operation_id": str(original["id"]), "outcome": "FAILED"}]
     after = await one_operation(cross, claim["turn"]["id"])
     assert after["id"] == original["id"] and after["status"] == "FAILED" and after["attempt_count"] == 0
-    assert after["failure_code"] == "STALE_AUTHORITY_OR_CONTEXT" and after["receipt_id"] == "no-dispatch:" + str(original["id"])
+    assert after["failure_code"] == "STALE_CONFIRMATION" and after["receipt_id"] == "no-dispatch:" + str(original["id"])
+    assert after["receipt_evidence"] == {"kind": "NO_DISPATCH", "reason_code": "STALE_CONFIRMATION"}
     assert (await cross.counters())["counts"].get("POST", 0) == 0
     await cross.separated(claim["turn"]["conversation_id"], 2)
+
+
+# R3 source-fix author additions. These invoke actual public bridges, the shared
+# managed HTTP core and the independent provider; no ledger/result is fabricated.
+
+@pytest.mark.parametrize("state", ["unknown", "failed", "proposal", "reserved", "confirmed",
+                                   "mixed", "mixed32", "success", "success32"])
+async def test_sourcefix_no_tool_retained_plan_guard(cross, state):
+    request = await bare_request(cross)
+    slots = tuple("guard-" + str(n) for n in range(32 if state.endswith("32") else 3 if state == "mixed" else 1))
+    confirmed = state in {"proposal", "confirmed"}
+    plan = await cross.worker(request, "reserve", actions=actions(*slots, confirmed=confirmed), propose=confirmed)
+    origin = request
+    if state == "confirmed":
+        request = later_request(request, "confirm " + plan["plan_id"])
+        await cross.worker(request, "confirm_only", plan_id=plan["plan_id"])
+    if state in {"unknown", "mixed", "mixed32"}:
+        if state.startswith("mixed"):
+            await cross.worker(request, "claim", ordinal=0, send=True)
+        await cross.script(settings={"execute": {"default": {"drop": True}}})
+        await cross.worker(request, "claim", ordinal=1 if state.startswith("mixed") else 0, send=True)
+    elif state == "failed":
+        await cross.script(settings={"execute": {"default": {"negative": True}}})
+        await cross.worker(request, "claim", send=True)
+    elif state.startswith("success"):
+        await cross.worker(request, "execute", actions=actions(*slots))
+    rows = await cross.operations(origin["turn_id"])
+    originals = [await frozen_snapshot(cross, row) for row in rows]
+    expected = (await cross.ai("/managed-turns/evidence", evidence_input(request))).json()["operation_refs"]
+    await cross.script(model=[{"body": completion("Готово, запись создана")}], replace_model=True)
+    before = await cross.counters()
+    response = await cross.ai("/managed-turns/execute", request)
+    assert response.status_code == 200
+    value = response.json()
+    assert value["operation_refs"] == expected and len(expected) == len(slots)
+    if state.startswith("success"):
+        assert value["status"] == "DRAFT_READY" and value["draft_text"] == "Готово, запись создана"
+    elif state == "proposal":
+        assert value["status"] == "DRAFT_READY" and "confirm " + plan["plan_id"] in value["draft_text"]
+        assert value["draft_text"] != "Готово, запись создана"
+    else:
+        assert value["status"] in {"FAILED", "UNKNOWN"} and value["draft_text"] is None
+    after = await cross.counters()
+    assert after["counts"].get("POST", 0) == before["counts"].get("POST", 0)
+    assert after["objects"] == before["objects"]
+    assert [await frozen_snapshot(cross, row) for row in rows] == originals
+
+
+@pytest.mark.parametrize("current_success", [False, True])
+@pytest.mark.parametrize("blocker_status", ["DISPATCHING", "UNKNOWN"])
+async def test_sourcefix_prior_turn_U_guards_current_refs_only(cross, current_success, blocker_status):
+    prior, current, rows = await reserved_pair(cross)
+    if current_success:
+        await cross.worker(current, "claim", send=True)
+    else:
+        # Use an additional current Turn with no selected plan. Opening it while
+        # U is still empty records its own exact trusted projection.
+        current = later_request(current, "Какой адрес?")
+        await cross.script(model=[{"body": completion("Адрес доступен")}], replace_model=True)
+        assert (await cross.ai("/managed-turns/execute", current)).json()["status"] == "DRAFT_READY"
+    await cross.script(settings={"execute": {"default": {"drop": True}}})
+    await cross.worker(prior, "claim", send=blocker_status == "UNKNOWN")
+    expected = (await cross.ai("/managed-turns/evidence", evidence_input(current))).json()["operation_refs"]
+    prior_evidence = (await cross.ai("/managed-turns/evidence", evidence_input(prior))).json()
+    assert (await one_operation(cross, prior["turn_id"]))["status"] == blocker_status
+    before = await cross.counters()
+    await cross.script(model=[{"body": completion("Готово, запись создана")}], replace_model=True)
+    value = ai_unknown(await cross.ai("/managed-turns/execute", current))
+    assert value["operation_refs"] == expected
+    assert len(expected) == (1 if current_success else 0)
+    assert all(ref["operation_id"] != str(rows[0]["id"]) for ref in expected)
+    assert (await cross.ai("/managed-turns/evidence", evidence_input(prior))).json() == prior_evidence
+    assert (await cross.counters())["counts"].get("POST", 0) == before["counts"].get("POST", 0)
+
+
+@pytest.mark.parametrize("method", ["reserve", "dispatch", "confirm"])
+async def test_sourcefix_raw_material_facts_cannot_bypass_public_bridge(cross, method):
+    request = await bare_request(cross)
+    await cross.worker(request, "reserve", actions=actions(confirmed=method == "confirm"), propose=method == "confirm")
+    before = await cross.counters()
+    result = await cross.worker(request, "raw_facts", method=method, actions=actions())
+    assert result.get("safety_code") and result.get("rejected") is not False
+    after = await cross.counters()
+    assert after["counts"].get("POST", 0) == before["counts"].get("POST", 0)
+    assert (await one_operation(cross, request["turn_id"]))["attempt_count"] == 0
+
+
+@pytest.mark.parametrize("purpose", ["reserve", "first", "residual", "confirm", "native"])
+@pytest.mark.parametrize("changed", [False, True])
+@pytest.mark.parametrize("cross", ["NATIVE"], indirect=True)
+async def test_sourcefix_post_P_wait_facts_matrix(cross, purpose, changed):
+    request = await bare_request(cross)
+    slots = ("wait-0", "wait-1") if purpose == "residual" else ("wait-0",)
+    if purpose != "reserve":
+        plan = await cross.worker(request, "reserve", actions=actions(*slots, confirmed=purpose == "confirm"), propose=purpose == "confirm")
+        if purpose == "residual":
+            await cross.worker(request, "claim", ordinal=0, send=True)
+        elif purpose == "native":
+            await cross.script(settings={"execute": {"default": {"drop": True}}})
+            await cross.worker(request, "claim", send=True)
+            await cross.script(settings={"execute": {"default": {}}})
+        elif purpose == "confirm":
+            request = later_request(request, "confirm " + plan["plan_id"])
+    before = await cross.counters()
+    async with cross.ai_sql.begin() as holder:
+        pid = await holder.scalar(text("SELECT pg_backend_pid()"))
+        await holder.execute(text("SELECT id FROM agent_templates WHERE id=:id FOR UPDATE"), {"id": request["agent_id"]})
+        if purpose == "reserve":
+            task = asyncio.create_task(cross.worker(request, "reserve_direct", actions=actions(*slots)))
+        elif purpose == "confirm":
+            task = asyncio.create_task(cross.worker(request, "confirm_direct", plan_id=plan["plan_id"]))
+        else:
+            task = asyncio.create_task(cross.worker(request, "claim", ordinal=1 if purpose == "residual" else 0,
+                                                    native=purpose == "native", send=True))
+        cross.lock_evidence.append(await observed_waiters(cross.ai_sql, pid, "sourcefix P " + purpose + " changed=" + str(changed)))
+        if changed:
+            await cross.script(facts={"values": {"resource": "revision-2"}, "revisions": {"catalog": 2}})
+    result = await task
+    after = await cross.counters()
+    recent = cross.trace("fresh")
+    assert recent[-1]["revisions"] == {"catalog": 2 if changed else 1}
+    if changed:
+        assert after["counts"].get("POST", 0) == before["counts"].get("POST", 0)
+        if purpose == "reserve":
+            assert result.get("safety_code") and await cross.operations(request["turn_id"]) == []
+        elif purpose == "confirm":
+            async with cross.ai_sql.connect() as db:
+                assert await db.scalar(text("SELECT confirmed_at FROM business_plans WHERE id=:id"), {"id": plan["plan_id"]}) is None
+        else:
+            assert not result["permitted"]
+            if purpose == "native":
+                assert result["operation_refs"][0]["outcome"] == "UNKNOWN"
+    elif purpose in {"reserve", "confirm"}:
+        assert result["plan_id"]
+    else:
+        assert result["permitted"] and after["counts"].get("POST", 0) == before["counts"].get("POST", 0) + 1
+    # FRESH is outside every live authority lock, including all selected rows.
+    async with cross.ai_sql.begin() as observer:
+        await observer.execute(text("SELECT id FROM agent_templates WHERE id=:id FOR UPDATE NOWAIT"), {"id": request["agent_id"]})
+
+
+async def test_sourcefix_renewed_scope_contention_no_token_no_hidden_retry(cross):
+    request = await bare_request(cross)
+    await cross.worker(request, "reserve", actions=actions())
+    row = await one_operation(cross, request["turn_id"])
+    frozen = await frozen_snapshot(cross, row)
+    cross.fault("FRESH-claim_dispatch")
+    attempt = asyncio.create_task(cross.worker(request, "claim", send=True))
+    await cross.phase("FRESH-claim_dispatch")
+    before_release = await cross.counters()
+    # The real provider facts HTTP read has completed. All authority locks can
+    # independently be obtained while this callback is paused outside the DB.
+    async with cross.ai_sql.begin() as holder:
+        for table, identity in (("agent_templates", request["agent_id"]),
+                                ("business_scopes", row["scope_id"]),
+                                ("business_plans", row["plan_id"]),
+                                ("business_operations", row["id"])):
+            await holder.execute(text("SELECT id FROM " + table + " WHERE id=:id FOR UPDATE NOWAIT"), {"id": identity})
+        await holder.execute(text("SELECT id FROM business_bindings WHERE agent_id=:id FOR UPDATE NOWAIT"), {"id": request["agent_id"]})
+        cross.fault(); (cross.root / "release-FRESH-claim_dispatch").touch()
+        denied = await asyncio.wait_for(attempt, 3)
+        assert not denied["permitted"]
+    after = await cross.counters()
+    assert after["counts"].get("POST", 0) == 0
+    assert after["counts"]["FACTS"] == before_release["counts"]["FACTS"]
+    assert await frozen_snapshot(cross, row) == frozen
+    # Only a later explicit attempt gets another P and another FRESH.
+    assert (await cross.worker(request, "claim", send=True))["permitted"]
+    assert (await cross.counters())["counts"]["POST"] == (await cross.counters())["objects"] == 1
+
+
+@pytest.mark.parametrize("purpose", ["reserve", "first", "residual", "confirm", "native"])
+@pytest.mark.parametrize("cross", ["NATIVE"], indirect=True)
+async def test_sourcefix_each_decisive_admission_contender_has_no_token(cross, purpose):
+    request = await bare_request(cross)
+    slots = ("contend-0", "contend-1") if purpose == "residual" else ("contend-0",)
+    plan = None
+    if purpose != "reserve":
+        plan = await cross.worker(request, "reserve", actions=actions(*slots, confirmed=purpose == "confirm"), propose=purpose == "confirm")
+        if purpose == "residual":
+            await cross.worker(request, "claim", ordinal=0, send=True)
+        elif purpose == "native":
+            await cross.script(settings={"execute": {"default": {"drop": True}}})
+            await cross.worker(request, "claim", send=True)
+            await cross.script(settings={"execute": {"default": {}}})
+        elif purpose == "confirm":
+            request = later_request(request, "confirm " + plan["plan_id"])
+    async with cross.ai_sql.connect() as db:
+        scope_id = await db.scalar(text("SELECT id FROM business_scopes WHERE agent_id=:agent AND conversation_id=:conversation"),
+                                   {"agent": request["agent_id"], "conversation": request["conversation_id"]})
+        binding_id = await db.scalar(text("SELECT id FROM business_bindings WHERE agent_id=:agent AND active"), {"agent": request["agent_id"]})
+    rows = await cross.operations()
+    snapshots = [await frozen_snapshot(cross, row) for row in rows]
+    before = await cross.counters()
+    original_tokens = len(cross.trace("dispatch_token"))
+    method = "reserve_plan" if purpose == "reserve" else "confirm_plan" if purpose == "confirm" else "claim_dispatch"
+    # P returned after closing its session. Gate F1 specifically, avoiding R's
+    # initial F0, and then contend after the real facts HTTP read completed.
+    cross.fault("P-" + method)
+    if purpose == "reserve":
+        task = asyncio.create_task(cross.worker(request, "reserve_direct", actions=actions(*slots)))
+    elif purpose == "confirm":
+        task = asyncio.create_task(cross.worker(request, "confirm_direct", plan_id=plan["plan_id"]))
+    else:
+        task = asyncio.create_task(cross.worker(request, "claim", ordinal=1 if purpose == "residual" else 0,
+                                                native=purpose == "native", send=True))
+    await cross.phase("P-" + method)
+    cross.fault("FRESH-" + method); (cross.root / ("release-P-" + method)).touch()
+    await cross.phase("FRESH-" + method)
+    fact_count = (await cross.counters())["counts"]["FACTS"]
+    async with cross.ai_sql.begin() as holder:
+        # These independent NOWAIT acquisitions prove the callback holds no
+        # runtime authority locks or surrounding DB configuration transaction.
+        for table, identity in (("agent_templates", request["agent_id"]), ("business_bindings", binding_id),
+                                ("business_scopes", scope_id)):
+            await holder.execute(text("SELECT id FROM " + table + " WHERE id=:id FOR UPDATE NOWAIT"), {"id": identity})
+        if plan:
+            await holder.execute(text("SELECT id FROM business_plans WHERE id=:id FOR UPDATE NOWAIT"), {"id": plan["plan_id"]})
+            await holder.execute(text("SELECT id FROM business_operations WHERE plan_id=:id ORDER BY ordinal FOR UPDATE NOWAIT"), {"id": plan["plan_id"]})
+        cross.fault(); (cross.root / ("release-FRESH-" + method)).touch()
+        result = await asyncio.wait_for(task, 3)
+        assert result.get("reason", result.get("safety_code")) == "ADMISSION_CONTENDED"
+        assert not result.get("permitted", False) and not result.get("plan_id")
+    after = await cross.counters()
+    assert after["counts"].get("POST", 0) == before["counts"].get("POST", 0)
+    assert after["counts"]["FACTS"] == fact_count and len(cross.trace("dispatch_token")) == original_tokens
+    assert [await frozen_snapshot(cross, row) for row in rows] == snapshots
+    if purpose == "reserve":
+        assert await cross.operations(request["turn_id"]) == []
+        assert (await cross.worker(request, "reserve_direct", actions=actions(*slots)))["plan_id"]
+    elif purpose == "confirm":
+        async with cross.ai_sql.connect() as db:
+            assert await db.scalar(text("SELECT confirmed_at FROM business_plans WHERE id=:id"), {"id": plan["plan_id"]}) is None
+        assert (await cross.worker(request, "confirm_direct", plan_id=plan["plan_id"]))["plan_id"] == plan["plan_id"]
+    else:
+        assert (await cross.worker(request, "claim", ordinal=1 if purpose == "residual" else 0,
+                                  native=purpose == "native", send=True))["permitted"]
+
+
+async def test_sourcefix_expected_facts_change_after_positive_D_is_attempt_only(cross):
+    request = await bare_request(cross)
+    await cross.worker(request, "reserve", actions=actions())
+    cross.fault("B2")
+    executing = asyncio.create_task(cross.worker(request, "claim", send=True))
+    await cross.phase("B2")
+    assert (await one_operation(cross, request["turn_id"]))["status"] == "DISPATCHING"
+    await cross.script(facts={"values": {"resource": "changed-after-D"}, "revisions": {"catalog": 2}})
+    cross.fault(); (cross.root / "release-B2").touch()
+    assert (await executing)["permitted"]
+    row = await one_operation(cross, request["turn_id"])
+    assert row["status"] == "UNKNOWN" and row["attempt_count"] == 1
+    counters = await cross.counters()
+    assert counters["counts"]["POST"] == counters["counts"]["REJECT"] == 1 and counters["objects"] == 0
+    await cross.worker(request, "reconcile", operation_id=str(row["id"]))
+    assert (await one_operation(cross, request["turn_id"]))["status"] == "UNKNOWN"
+    assert (await cross.counters())["counts"]["POST"] == 1
+
+
+@pytest.mark.parametrize("prefix_done", [1, 2, 3])
+async def test_sourcefix_stale_each_ordinal_and_all_terminal_consumed(cross, prefix_done):
+    request = await bare_request(cross)
+    await cross.worker(request, "reserve", actions=actions("stale-0", "stale-1", "stale-2"))
+    original_ids = [row["id"] for row in await cross.operations(request["turn_id"])]
+    cross.fault("STALE")
+    stale = asyncio.create_task(cross.worker(request, "execute_stale"))
+    await cross.phase("STALE")
+    for ordinal in range(prefix_done):
+        assert (await cross.worker(request, "claim", ordinal=ordinal, send=True))["permitted"]
+    cross.fault(); (cross.root / "release-STALE").touch()
+    value = await stale
+    assert value["halt_status"] is None
+    rows = await cross.operations(request["turn_id"])
+    assert [row["id"] for row in rows] == original_ids
+    assert [row["status"] for row in rows] == ["SUCCEEDED"] * 3
+    counters = await cross.counters()
+    assert counters["counts"]["POST"] == counters["objects"] == len(counters["object_ids"]) == 3
+    assert {post["operation_id"] for post in counters["posts"]} == {str(identity) for identity in original_ids}
+
+
+@pytest.mark.parametrize("invalidation", ["other_U", "facts", "authority", "failed_predecessor"])
+async def test_sourcefix_stale_success_residual_rechecks_full_current_permission(cross, invalidation):
+    request = await bare_request(cross)
+    await cross.worker(request, "reserve", actions=actions("stale-0", "stale-1"))
+    other = later_request(request)
+    if invalidation == "other_U":
+        await cross.worker(other, "reserve", actions=actions("other"))
+    cross.fault("STALE")
+    stale = asyncio.create_task(cross.worker(request, "execute_stale"))
+    await cross.phase("STALE")
+    if invalidation == "failed_predecessor":
+        # A real permitted RESERVED→DISPATCHING→FAILED transition. An immutable
+        # SUCCEEDED row is never rewritten to manufacture this interleaving.
+        await cross.script(settings={"execute": {"default": {"negative": True}}})
+    await cross.worker(request, "claim", ordinal=0, send=True)
+    if invalidation == "other_U":
+        await cross.script(settings={"execute": {"default": {"drop": True}}})
+        await cross.worker(other, "claim", send=True)
+    elif invalidation == "facts":
+        await cross.script(facts={"values": {}, "revisions": {"catalog": 2}})
+    elif invalidation == "authority":
+        await cross.worker(request, "configure", enabled_capabilities=[], authorization_generation=2)
+    cross.fault(); (cross.root / "release-STALE").touch()
+    value = await stale
+    assert value["halt_status"] in {"FAILED", "UNKNOWN"}
+    rows = await cross.operations(request["turn_id"])
+    assert rows[1]["attempt_count"] == 0 and rows[1]["status"] in {"RESERVED", "FAILED"}
+    assert not any(post["operation_id"] == str(rows[1]["id"]) for post in (await cross.counters())["posts"])
+
+
+async def test_sourcefix_final_coherent_read_wait_sees_new_prior_U(cross):
+    prior, current, rows = await reserved_pair(cross)
+    await cross.worker(current, "claim", send=True)
+    await cross.script(model=[{"body": completion("Готово, запись создана")}], replace_model=True)
+    cross.fault("FINAL-READ")
+    final = asyncio.create_task(cross.ai("/managed-turns/execute", current))
+    await cross.phase("FINAL-READ")
+    cross.fault("LOCK-claim_dispatch")
+    changing = asyncio.create_task(cross.worker(prior, "claim"))
+    await cross.phase("LOCK-claim_dispatch")
+    pid = [record for record in cross.trace("scope_lock") if record["method"] == "claim_dispatch" and record["decisive"]][-1]["pid"]
+    (cross.root / "release-FINAL-READ").touch()
+    cross.lock_evidence.append(await observed_waiters(cross.ai_sql, pid, "sourcefix final coherent guard read"))
+    cross.fault(); (cross.root / "release-LOCK-claim_dispatch").touch()
+    assert (await changing)["permitted"]
+    value = ai_unknown(await final)
+    assert value["operation_refs"] == [{"origin": "AI_AGENT_SERVICE", "operation_id": str(rows[1]["id"]), "outcome": "SUCCEEDED"}]
+    assert (await one_operation(cross, prior["turn_id"]))["status"] == "DISPATCHING"
+    assert (await cross.counters())["counts"]["POST"] == 1
+
+
+@pytest.mark.parametrize("current_success", [False, True])
+@pytest.mark.parametrize("cleanup_failure", [False, True])
+async def test_sourcefix_final_unavailable_retains_terminal_receipts_without_draft(cross, current_success, cleanup_failure):
+    request = await bare_request(cross)
+    if current_success:
+        await cross.worker(request, "execute", actions=actions("receipt-0", "receipt-1"))
+    expected = (await cross.ai("/managed-turns/evidence", evidence_input(request))).json()["operation_refs"]
+    await cross.script(model=[{"body": completion("Готово, запись создана")}], replace_model=True)
+    private_json(cross.root / "faults.json", {"final_read_failure": True, "cleanup_failure": cleanup_failure})
+    response = await cross.ai("/managed-turns/execute", request)
+    assert response.status_code == 200 and response.json()["draft_text"] is None
+    assert response.json()["status"] == "UNKNOWN" and response.json()["operation_refs"] == expected
+    if cleanup_failure:
+        assert response.json()["error_code"] == "TOOL_CLEANUP_FAILED"
+    assert len(expected) == (2 if current_success else 0) and all(ref["outcome"] == "SUCCEEDED" for ref in expected)
+    counters = await cross.counters()
+    assert counters["counts"].get("POST", 0) == counters["objects"] == (2 if current_success else 0)
+
+
+async def wait_past_original_cache_and_deadline(cross, operation):
+    deadline = asyncio.get_running_loop().time() + 10
+    while True:
+        async with cross.ai_sql.connect() as db:
+            expired = await db.scalar(text("SELECT clock_timestamp()>native_replay_until FROM business_operations WHERE id=:id"), {"id": operation["id"]})
+            lease_live = await db.scalar(text("SELECT clock_timestamp()<dispatch_lease_expires_at FROM business_operations WHERE id=:id"), {"id": operation["id"]})
+        async with cross.provider_sql.connect() as db:
+            cache_expired = await db.scalar(text("SELECT clock_timestamp()>expires_at FROM fake_keys WHERE native_key=:key"), {"key": operation["provider_idempotency_key"]})
+        if expired and (cache_expired or cache_expired is None):
+            assert lease_live, "The original 8-second profile lease must not be extended for the deadline test"
+            return
+        assert asyncio.get_running_loop().time() < deadline
+        await asyncio.sleep(.025)
+
+
+async def wait_provider_rejection(cross):
+    deadline = asyncio.get_running_loop().time() + 5
+    while (await cross.counters())["counts"].get("REJECT", 0) == 0:
+        assert asyncio.get_running_loop().time() < deadline
+        await asyncio.sleep(.02)
+
+
+@pytest.mark.parametrize("cross", [{"mode": "NATIVE", "native_policy": "BOUNDED", "horizon": 3}], indirect=True)
+async def test_sourcefix_bounded_post_D_pause_local_guard_preserves_original_unknown(cross):
+    request = await bare_request(cross)
+    await cross.worker(request, "reserve", actions=actions())
+    await cross.script(settings={"execute": {"default": {"drop": True}}})
+    await cross.worker(request, "claim", send=True)
+    original = await one_operation(cross, request["turn_id"])
+    original_objects = (await cross.counters())["object_ids"]
+    await cross.script(settings={"execute": {"default": {}}})
+    cross.fault("B2")
+    replay = asyncio.create_task(cross.worker(request, "native", operation_id=str(original["id"])))
+    await cross.phase("B2")
+    await wait_past_original_cache_and_deadline(cross, original)
+    cross.fault(); (cross.root / "release-B2").touch()
+    await replay
+    after = await one_operation(cross, request["turn_id"])
+    assert after["status"] == "UNKNOWN" and after["attempt_count"] == 2
+    for key in ("id", "request_payload", "request_fingerprint", "provider_idempotency_key", "provider_profile_revision", "issued_at", "native_replay_until"):
+        assert after[key] == original[key]
+    counters = await cross.counters()
+    assert counters["counts"]["POST"] == counters["objects"] == 1 and counters["object_ids"] == original_objects
+    assert len(cross.trace("dispatch_token")) == 2
+    assert {record["accept_before"] for record in cross.trace("dispatch_token")} == {str(original["native_replay_until"])}
+    await cross.worker(request, "reconcile", operation_id=str(original["id"]))
+    assert (await one_operation(cross, request["turn_id"]))["status"] == "SUCCEEDED"
+
+
+@pytest.mark.parametrize("cross", [{"mode": "NATIVE", "native_policy": "BOUNDED", "horizon": 3}], indirect=True)
+async def test_sourcefix_bounded_transport_accepts_bytes_before_deadline_rejects_after(cross):
+    request = await bare_request(cross)
+    await cross.worker(request, "reserve", actions=actions())
+    await cross.script(settings={"execute": {"default": {"drop": True}}})
+    await cross.worker(request, "claim", send=True)
+    original = await one_operation(cross, request["turn_id"])
+    await cross.script(settings={"execute": {"default": {"before_accept": "late-transport"}}})
+    replay = asyncio.create_task(cross.worker(request, "native", operation_id=str(original["id"])))
+    await cross.provider_barrier("late-transport")
+    assert (await cross.counters())["counts"]["POST"] == 2
+    await wait_past_original_cache_and_deadline(cross, original)
+    await cross.script(release=["late-transport"])
+    await replay
+    await wait_provider_rejection(cross)
+    counters = await cross.counters()
+    assert counters["counts"]["POST"] == 2 and counters["counts"]["REJECT"] == 1
+    assert counters["objects"] == len(counters["object_ids"]) == 1
+    assert (await one_operation(cross, request["turn_id"]))["status"] == "UNKNOWN"
+    assert {datetime.fromisoformat(post["dispatch"]["accept_before"].replace("Z", "+00:00"))
+            for post in counters["posts"]} == {original["native_replay_until"]}
+
+
+@pytest.mark.parametrize("provider_lock", ["facts", "key"])
+@pytest.mark.parametrize("cross", [{"mode": "NATIVE", "native_policy": "BOUNDED", "horizon": 3}], indirect=True)
+async def test_sourcefix_provider_acceptance_clock_after_every_authority_wait(cross, provider_lock):
+    request = await bare_request(cross)
+    await cross.worker(request, "reserve", actions=actions())
+    await cross.script(settings={"execute": {"default": {"drop": True}}})
+    await cross.worker(request, "claim", send=True)
+    original = await one_operation(cross, request["turn_id"])
+    await cross.script(settings={"execute": {"default": {}}})
+    cross.fault("B2")
+    replay = asyncio.create_task(cross.worker(request, "native", operation_id=str(original["id"])))
+    await cross.phase("B2")
+    async with cross.provider_sql.begin() as holder:
+        pid = await holder.scalar(text("SELECT pg_backend_pid()"))
+        if provider_lock == "facts":
+            await holder.execute(text("SELECT id FROM fake_facts WHERE id=1 FOR UPDATE"))
+        else:
+            await holder.execute(text("SELECT native_key FROM fake_key_authorities WHERE native_key=:key FOR UPDATE"), {"key": original["provider_idempotency_key"]})
+        cross.fault(); (cross.root / "release-B2").touch()
+        cross.lock_evidence.append(await observed_waiters(cross.provider_sql, pid, "sourcefix provider acceptance " + provider_lock))
+        await wait_past_original_cache_and_deadline(cross, original)
+    await replay
+    await wait_provider_rejection(cross)
+    counters = await cross.counters()
+    assert counters["counts"]["POST"] == 2 and counters["counts"]["REJECT"] == 1 and counters["objects"] == 1
+    async with cross.provider_sql.connect() as db:
+        accepted = (await db.execute(text("SELECT accepted_at,decision FROM fake_requests WHERE kind='POST' ORDER BY sequence DESC LIMIT 1"))).mappings().one()
+        assert accepted["accepted_at"] >= original["native_replay_until"] and accepted["decision"] == "ACCEPTANCE_EXPIRED"
+    assert (await one_operation(cross, request["turn_id"]))["status"] == "UNKNOWN"
+
+
+@pytest.mark.parametrize("cross", [{"mode": "NATIVE", "native_policy": "BOUNDED", "horizon": 3}], indirect=True)
+async def test_sourcefix_displaced_old_FIRST_and_unenveloped_paths_are_guarded(cross):
+    request = await bare_request(cross)
+    await cross.worker(request, "reserve", actions=actions())
+    await cross.worker(request, "claim")  # Original positively acknowledged FIRST, no send.
+    original = await one_operation(cross, request["turn_id"])
+    token = cross.trace("dispatch_token")[-1]
+    old_dispatch = {"command": token["command"], "attempt": {key: token[key] for key in
+        ("operation_id", "state_version", "dispatch_epoch", "dispatch_nonce")}, "kind": "FIRST",
+        "accept_before": token["accept_before"], "execution_contract": token["execution_contract"]}
+    await cross.expire_attempt(original["id"])
+    await cross.worker(request, "recover")
+    await cross.worker(request, "native", operation_id=str(original["id"]))
+    assert (await one_operation(cross, request["turn_id"]))["status"] == "SUCCEEDED"
+    await wait_past_original_cache_and_deadline(cross, original)
+    # Deliver the already issued displaced FIRST directly through the same
+    # guarded provider endpoint after the original acceptance guarantee ended.
+    response = await cross.client.post(cross.url("provider") + "/execute", json=old_dispatch)
+    assert response.status_code == 200 and response.json()["kind"] == "ATTEMPT_REJECTED"
+    assert response.json()["reason_code"] == "ACCEPTANCE_EXPIRED"
+    legacy = await cross.client.post(cross.url("provider") + "/execute", json=token["command"])
+    assert legacy.status_code == 409 and legacy.json()["reason_code"] == "UNENVELOPED_ATTEMPT"
+    counters = await cross.counters()
+    assert counters["counts"]["POST"] == 3 and counters["counts"]["REJECT"] == 2 and counters["objects"] == 1
+    assert (await one_operation(cross, request["turn_id"]))["status"] == "SUCCEEDED"
+
+
+@pytest.mark.parametrize("cross", [{"mode": "NATIVE", "native_policy": "BOUNDED", "horizon": 30,
+                                     "bounded_acceptance": "FENCED"}], indirect=True)
+async def test_sourcefix_fenced_bounded_profile_never_grants_native_replay(cross):
+    request = await bare_request(cross)
+    await cross.worker(request, "reserve", actions=actions())
+    await cross.script(settings={"execute": {"default": {"drop": True}}})
+    await cross.worker(request, "claim", send=True)
+    original = await one_operation(cross, request["turn_id"])
+    before = await frozen_snapshot(cross, original)
+    await cross.worker(request, "native", operation_id=str(original["id"]))
+    assert await frozen_snapshot(cross, original) == before
+    assert (await cross.counters())["counts"]["POST"] == (await cross.counters())["objects"] == 1
+    assert len(cross.trace("dispatch_token")) == 1
+
+
+@pytest.mark.parametrize("failure", ["inactive", "key"])
+async def test_sourcefix_initial_retained_U_guard_survives_live_setup_failure(cross, failure):
+    prior = await bare_request(cross)
+    current = later_request(prior, "Какой адрес?")
+    await cross.script(model=[{"body": completion("Адрес доступен")}], replace_model=True)
+    assert (await cross.ai("/managed-turns/execute", current)).json()["status"] == "DRAFT_READY"
+    await cross.worker(prior, "reserve", actions=actions())
+    await cross.script(settings={"execute": {"default": {"drop": True}}})
+    await cross.worker(prior, "claim", send=True)
+    async with cross.ai_sql.begin() as db:
+        column = "is_active=false" if failure == "inactive" else "encrypted_openrouter_key=NULL"
+        await db.execute(text("UPDATE agent_templates SET " + column + " WHERE id=:id"), {"id": prior["agent_id"]})
+    before = await cross.counters()
+    value = ai_unknown(await cross.ai("/managed-turns/execute", current))
+    assert value["operation_refs"] == []
+    assert (await cross.counters())["counts"]["POST"] == before["counts"]["POST"] == 1
+
+
+async def test_sourcefix_provider_facts_reload_after_its_actual_wait(cross):
+    request = await bare_request(cross)
+    await cross.worker(request, "reserve", actions=actions())
+    cross.fault("B2")
+    executing = asyncio.create_task(cross.worker(request, "claim", send=True))
+    await cross.phase("B2")
+    async with cross.provider_sql.begin() as writer:
+        pid = await writer.scalar(text("SELECT pg_backend_pid()"))
+        await writer.execute(text("SELECT id FROM fake_facts WHERE id=1 FOR UPDATE"))
+        cross.fault(); (cross.root / "release-B2").touch()
+        cross.lock_evidence.append(await observed_waiters(cross.provider_sql, pid, "sourcefix mutable provider facts authority"))
+        # The authoritative facts writer owns the same lock as acceptance.
+        await writer.execute(text("UPDATE fake_facts SET values=CAST(:values AS jsonb),"
+            "revisions=CAST(:revisions AS jsonb) WHERE id=1"), {"values": "{}", "revisions": json.dumps({"catalog": 2})})
+    await executing
+    await wait_provider_rejection(cross)
+    counters = await cross.counters()
+    assert counters["counts"]["POST"] == counters["counts"]["REJECT"] == 1 and counters["objects"] == 0
+    assert (await one_operation(cross, request["turn_id"]))["status"] == "UNKNOWN"
+
+
+@pytest.mark.parametrize("change", ["generation", "other_U"])
+async def test_sourcefix_change_between_FRESH_and_decisive_admission(cross, change):
+    first, other, rows = await reserved_pair(cross)
+    original = await frozen_snapshot(cross, rows[0])
+    cross.fault("FRESH-claim_dispatch")
+    attempt = asyncio.create_task(cross.worker(first, "claim", send=True))
+    await cross.phase("FRESH-claim_dispatch")
+    # Clear only the fault selector. The first callback remains paused on its
+    # original release file, while a separate real trusted worker changes state.
+    cross.fault()
+    if change == "generation":
+        await cross.worker(first, "configure", enabled_capabilities=["booking.create", "booking.confirm_create"], authorization_generation=2)
+    else:
+        await cross.script(settings={"execute": {"default": {"drop": True}}})
+        assert (await cross.worker(other, "claim", send=True))["permitted"]
+    (cross.root / "release-FRESH-claim_dispatch").touch()
+    result = await attempt
+    assert result.get("permitted") is not True
+    assert (await one_operation(cross, first["turn_id"]))["attempt_count"] == 0
+    assert not any(post["operation_id"] == str(rows[0]["id"]) for post in (await cross.counters())["posts"])
+    if change == "other_U":
+        assert await frozen_snapshot(cross, rows[0]) == original
+
+
+@pytest.mark.parametrize("cross", [{"mode": "LOOKUP", "proposal_ttl": 2}], indirect=True)
+async def test_sourcefix_stale_success_residual_uses_original_expiry(cross):
+    request = await bare_request(cross)
+    await cross.worker(request, "reserve", actions=actions("expiry-0", "expiry-1"))
+    original = (await cross.operations(request["turn_id"]))[1]
+    cross.fault("STALE")
+    stale = asyncio.create_task(cross.worker(request, "execute_stale"))
+    await cross.phase("STALE")
+    await cross.worker(request, "claim", ordinal=0, send=True)
+    await asyncio.sleep(2.05)  # Real immutable proposal expiry, no deadline rewrite.
+    cross.fault(); (cross.root / "release-STALE").touch()
+    assert (await stale)["halt_status"] in {"FAILED", "UNKNOWN"}
+    after = (await cross.operations(request["turn_id"]))[1]
+    assert after["id"] == original["id"] and after["attempt_count"] == 0 and after["status"] == "FAILED"
+    assert (await cross.counters())["counts"]["POST"] == (await cross.counters())["objects"] == 1
+
+
+@pytest.mark.parametrize("cross", [{"mode": "NATIVE", "native_policy": "BOUNDED", "horizon": 3,
+                                     "bounded_acceptance": "FENCED", "retained_legacy": True}], indirect=True)
+async def test_sourcefix_exact_legacy_catalog_retained_old_FIRST_cannot_gain_replay(cross):
+    request = await bare_request(cross)
+    await cross.worker(request, "reserve", actions=actions())
+    await cross.worker(request, "claim")
+    original = await one_operation(cross, request["turn_id"])
+    saved = cross.trace("dispatch_token")[-1]
+    async with cross.ai_sql.connect() as db:
+        legacy_catalog = await db.scalar(text("SELECT catalog_revision FROM business_plans WHERE id=:id"), {"id": original["plan_id"]})
+    await cross.expire_attempt(original["id"])
+    await cross.worker(request, "recover")
+    before = await frozen_snapshot(cross, original)
+    # Reopen the exact old catalog/profile, preserving the original durable rows.
+    await cross.restart("ai", abrupt=True)
+    await cross.worker(request, "native", operation_id=str(original["id"]))
+    assert await frozen_snapshot(cross, original) == before
+    assert len(cross.trace("dispatch_token")) == 1 and (await cross.counters())["counts"].get("POST", 0) == 0
+    await asyncio.sleep(3.1)
+    # This profile openly retains an unprotected old FIRST acceptance path.
+    # Its existence is why the new worker must remain FENCED, even with a new
+    # typed envelope implementation. No guarded claim is made for this profile.
+    late = await cross.client.post(cross.url("provider") + "/execute", json=saved["command"])
+    assert late.status_code == 200 and late.json()["kind"] == "SUCCEEDED"
+    assert (await one_operation(cross, request["turn_id"]))["status"] == "UNKNOWN"
+    await cross.worker(request, "reconcile", operation_id=str(original["id"]))
+    after = await one_operation(cross, request["turn_id"])
+    assert after["status"] == "SUCCEEDED"
+    for key in ("id", "request_payload", "request_fingerprint", "provider_idempotency_key", "provider_profile_revision", "issued_at", "native_replay_until"):
+        assert after[key] == original[key]
+    async with cross.ai_sql.connect() as db:
+        assert await db.scalar(text("SELECT catalog_revision FROM business_plans WHERE id=:id"), {"id": original["plan_id"]}) == legacy_catalog
+    assert (await cross.counters())["counts"]["POST"] == (await cross.counters())["objects"] == 1
+
+
+@pytest.mark.parametrize("cross", [{"mode": "NATIVE", "native_policy": "BOUNDED", "horizon": 3,
+                                     "bounded_acceptance": "FENCED", "retained_legacy": True}], indirect=True)
+async def test_sourcefix_evicted_key_negative_attempt_cannot_disprove_original_B1(cross):
+    request = await bare_request(cross)
+    await cross.worker(request, "reserve", actions=actions())
+    await cross.script(settings={"execute": {"default": {"drop": True}}})
+    await cross.worker(request, "claim", send=True)
+    original = await one_operation(cross, request["turn_id"])
+    saved = cross.trace("dispatch_token")[-1]
+    object_ids = (await cross.counters())["object_ids"]
+    await asyncio.sleep(3.1)
+    await cross.script(settings={"execute": {"default": {"negative": True}}})
+    late = await cross.client.post(cross.url("provider") + "/execute", json=saved["command"])
+    assert late.status_code == 200 and late.json()["kind"] == "SUCCEEDED"
+    assert late.json()["object_id"] in object_ids
+    assert (await one_operation(cross, request["turn_id"]))["status"] == "UNKNOWN"
+    async with cross.provider_sql.connect() as db:
+        assert await db.scalar(text("SELECT count(*) FROM fake_keys WHERE native_key=:key"), {"key": original["provider_idempotency_key"]}) == 0
+    counters = await cross.counters()
+    assert counters["counts"]["POST"] == 2 and counters["counts"]["MUTATION"] == 1
+    assert counters["objects"] == len(counters["object_ids"]) == 1 and counters["object_ids"] == object_ids
+    await cross.worker(request, "reconcile", operation_id=str(original["id"]))
+    assert (await one_operation(cross, request["turn_id"]))["status"] == "SUCCEEDED"
+
+
+@pytest.mark.parametrize("cross", [{"mode": "NATIVE", "native_policy": "BOUNDED", "horizon": 3,
+                                     "bounded_acceptance": "FENCED", "retained_legacy": True}], indirect=True)
+async def test_sourcefix_original_noeffect_permanently_fences_expired_legacy_FIRST(cross):
+    request = await bare_request(cross)
+    await cross.worker(request, "reserve", actions=actions())
+    await cross.script(settings={"execute": {"default": {"negative": True}}})
+    await cross.worker(request, "claim", send=True)
+    original = await one_operation(cross, request["turn_id"])
+    saved = cross.trace("dispatch_token")[-1]
+    frozen = await frozen_snapshot(cross, original)
+    assert original["status"] == "FAILED" and original["receipt_id"] and original["object_id"] is None
+    await asyncio.sleep(3.1)
+    await cross.script(settings={"execute": {"default": {}}})
+    late = await cross.client.post(cross.url("provider") + "/execute", json=saved["command"])
+    assert late.status_code == 200 and late.json()["kind"] == "FAILED_NO_EFFECT"
+    assert late.json()["receipt_id"] == original["receipt_id"]
+    assert late.json()["binding"] == {key: saved["command"][key] for key in late.json()["binding"]}
+    counters = await cross.counters()
+    assert counters["counts"]["POST"] == counters["counts"]["ACCEPT"] == 2
+    assert counters["counts"].get("MUTATION", 0) == counters["objects"] == 0 and counters["object_ids"] == []
+    async with cross.provider_sql.connect() as db:
+        assert await db.scalar(text("SELECT count(*) FROM fake_keys WHERE native_key=:key"), {"key": original["provider_idempotency_key"]}) == 0
+        retained = await db.scalar(text("SELECT receipt FROM fake_receipts WHERE operation_id=:op"), {"op": str(original["id"])})
+        assert retained == late.json()
+    assert await frozen_snapshot(cross, original) == frozen
+    lookup = await cross.client.get(cross.url("provider") + "/operations/" + str(original["id"]))
+    assert lookup.json() == retained
+    conflicting = copy.deepcopy(saved["command"])
+    conflicting["request_fingerprint"] = "f" * 64 if conflicting["request_fingerprint"] != "f" * 64 else "e" * 64
+    denied = await cross.client.post(cross.url("provider") + "/execute", json=conflicting)
+    assert denied.status_code == 409 and denied.json()["reason_code"] == "ORIGINAL_BINDING_CONFLICT"
+    assert (await cross.counters())["objects"] == 0
+
+
+@pytest.mark.parametrize("cross", [{"mode": "NATIVE", "native_policy": "BOUNDED", "horizon": 3,
+                                     "bounded_acceptance": "FENCED", "retained_legacy": True}], indirect=True)
+async def test_sourcefix_legacy_success_cache_honestly_expires_without_durable_dedupe(cross):
+    request = await bare_request(cross)
+    await cross.worker(request, "reserve", actions=actions())
+    await cross.script(settings={"execute": {"default": {"drop": True}}})
+    await cross.worker(request, "claim", send=True)
+    original = await one_operation(cross, request["turn_id"])
+    saved = cross.trace("dispatch_token")[-1]
+    first_ids = (await cross.counters())["object_ids"]
+    await asyncio.sleep(3.1)
+    await cross.script(settings={"execute": {"default": {}}})
+    late = await cross.client.post(cross.url("provider") + "/execute", json=saved["command"])
+    assert late.status_code == 200 and late.json()["kind"] == "SUCCEEDED" and late.json()["object_id"] not in first_ids
+    counters = await cross.counters()
+    # This explicit unsafe legacy path is exactly why new replay is FENCED.
+    # The fake has not silently become a permanent-success dedupe provider.
+    assert counters["counts"]["POST"] == counters["counts"]["MUTATION"] == counters["objects"] == 2
+    assert len(counters["object_ids"]) == 2 and set(first_ids) < set(counters["object_ids"])
+    assert len(cross.trace("dispatch_token")) == 1
+    assert (await one_operation(cross, request["turn_id"]))["status"] == "UNKNOWN"
+    lookup = await cross.client.get(cross.url("provider") + "/operations/" + str(original["id"]))
+    assert lookup.json()["object_id"] in first_ids

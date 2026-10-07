@@ -10,6 +10,7 @@ import json
 import os
 import secrets
 import socket
+from datetime import datetime
 from pathlib import Path
 from uuid import UUID
 
@@ -17,6 +18,7 @@ from tests.goal3_business_cross_service.network import install_guard, self_check
 from tests.goal3_business_cross_service.state import State
 
 CURRENT_METHOD = contextvars.ContextVar("goal3_repository_method", default="")
+CORE_RETURNED = contextvars.ContextVar("goal3_core_returned", default=False)
 
 
 def wrap_repository(state):
@@ -67,16 +69,63 @@ def wrap_repository(state):
 
     original_lock = BusinessRepository._lock_scope
 
-    async def lock_scope(session, scope_id):
-        row = await original_lock(session, scope_id)
+    async def lock_scope(session, scope_id, **kwargs):
+        row = await original_lock(session, scope_id, **kwargs)
         method = CURRENT_METHOD.get()
         if method:
             pid = await session.scalar(text("SELECT pg_backend_pid()"))
-            state.append("scope_lock", {"method": method, "pid": pid, "scope_id": str(scope_id)})
-            await state.phase("LOCK-" + method)
+            decisive = bool(session.info.get("business_nowait"))
+            state.append("scope_lock", {"method": method, "pid": pid, "scope_id": str(scope_id),
+                                        "decisive": decisive})
+            if method not in {"reserve_plan", "claim_dispatch", "confirm_plan"} or decisive:
+                await state.phase("LOCK-" + method)
         return row
 
     BusinessRepository._lock_scope = staticmethod(lock_scope)
+
+    original_probe = BusinessRepository._admission_probe
+
+    async def observed_probe(self, *args, **kwargs):
+        result = await original_probe(self, *args, **kwargs)
+        method = CURRENT_METHOD.get()
+        state.append("probe", {"method": method})
+        # The original P's transaction and session have exited here.
+        await state.phase("P-" + method)
+        return result
+
+    BusinessRepository._admission_probe = observed_probe
+
+    from services.llm_service import LLMService
+    original_core = LLMService._execute_core
+
+    async def observed_core(self, *args, **kwargs):
+        result = await original_core(self, *args, **kwargs)
+        CORE_RETURNED.set(True)
+        return result
+
+    LLMService._execute_core = observed_core
+    original_gate = BusinessRepository.result_gate
+
+    async def observed_gate(self, *args, **kwargs):
+        if CORE_RETURNED.get():
+            await state.phase("FINAL-READ")
+            if json.loads((state.directory / "faults.json").read_text()).get("final_read_failure"):
+                raise RuntimeError("Synthetic unavailable final observation")
+        return await original_gate(self, *args, **kwargs)
+
+    BusinessRepository.result_gate = observed_gate
+
+    from tests.goal3_business_cross_service.adapter import HTTPBookingAdapter
+    original_request = HTTPBookingAdapter.request
+
+    async def observed_request(self, method, path, execution, body=None):
+        result = await original_request(self, method, path, execution, body)
+        if path == "/facts":
+            state.append("fresh", {"method": CURRENT_METHOD.get(), "revisions": result["revisions"]})
+            await state.phase("FRESH-" + CURRENT_METHOD.get())
+        return result
+
+    HTTPBookingAdapter.request = observed_request
 
     from services import managed_turn_service
     from services.managed_tools import ManagedExecutionError
@@ -139,7 +188,7 @@ async def seed(config, registrations):
     for record, grant_value in zip(config["agents"], config["grants"]):
         await repo.configure_binding(ManagedGrant.model_validate(grant_value),
             adapter_id=registration.adapter_id, connection_id=UUID(record["connection_id"]),
-            catalog_revision=registration.catalog_revision,
+            catalog_revision=registration.legacy_catalog_revision if config["profile"].get("retained_legacy") else registration.catalog_revision,
             enabled_capabilities=[cap.name for cap in registration.capabilities])
     await engine.dispose()
 
@@ -182,8 +231,9 @@ def worker_router(config, registrations, state):
                         actual_scope = scope_value(await repo._scope_query(db, projection, grant))
                     if action == "reserve_direct":
                         selected = tuple(BusinessAction.model_validate(v) for v in value["actions"])
-                        facts = await registration.adapter.resolve_facts(actual_scope, selected, execution=execution)
-                        plan = await repo.reserve_plan(projection, grant, registration, selected, facts,
+                        async def facts_resolver():
+                            return await registration.adapter.resolve_facts(actual_scope, selected, execution=execution)
+                        plan = await repo.reserve_plan(projection, grant, registration, selected, facts_resolver,
                                                        propose=value.get("propose", False))
                         result = {"plan_id": str(plan.id)}
                     else:
@@ -192,8 +242,9 @@ def worker_router(config, registrations, state):
                         if action == "confirm_direct":
                             selected = tuple(BusinessAction(capability=o.command.capability, arguments=o.command.arguments)
                                              for o in plan.operations)
-                            facts = await registration.adapter.resolve_facts(actual_scope, selected, execution=execution)
-                            await repo.confirm_plan(projection, grant, plan.id, registration, facts)
+                            async def facts_resolver():
+                                return await registration.adapter.resolve_facts(actual_scope, selected, execution=execution)
+                            await repo.confirm_plan(projection, grant, plan.id, registration, facts_resolver)
                             result = {"plan_id": str(plan.id)}
                         elif action == "reconcile_direct":
                             token = await repo.claim_reconcile(projection, grant, plan.id, UUID(value["operation_id"]),
@@ -208,7 +259,10 @@ def worker_router(config, registrations, state):
                             saved = next(v for v in reversed(records) if v["operation_id"] == value["operation_id"])
                             command = FrozenProviderCommand.model_validate(saved["command"])
                             token = DispatchToken(UUID(saved["operation_id"]), UUID(saved["scope_id"]), UUID(saved["plan_id"]),
-                                saved["state_version"], saved["dispatch_epoch"], UUID(saved["dispatch_nonce"]), command)
+                                saved["state_version"], saved["dispatch_epoch"], UUID(saved["dispatch_nonce"]), command,
+                                native_replay=saved.get("native_replay", False),
+                                accept_before=datetime.fromisoformat(saved["accept_before"])
+                                if saved.get("accept_before") else None, execution_contract=saved["execution_contract"])
                             provider_receipt = await registration.adapter.lookup(command, execution=execution)
                             receipt = SucceededReceipt.model_validate(provider_receipt.model_dump(mode="json"))
                             await repo.finalize(projection, grant, token, receipt)
@@ -231,13 +285,14 @@ def worker_router(config, registrations, state):
                     registration = registrations[plan.operations[0].command.adapter_id]
                     actions = tuple(BusinessAction(capability=o.command.capability,
                         arguments=o.command.arguments) for o in plan.operations)
-                    facts = await registration.adapter.resolve_facts(plan.scope, actions, execution=execution)
+                    async def facts_resolver():
+                        return await registration.adapter.resolve_facts(plan.scope, actions, execution=execution)
                     operation = plan.operations[value.get("ordinal", 0)]
                     decision = await repo.claim_dispatch(projection, grant, plan.id, operation.id,
-                        registration, facts, native_replay=value.get("native", False))
+                        registration, facts_resolver, native_replay=value.get("native", False))
                     result = {"permitted": decision.token is not None, "reason": decision.reason}
                     if decision.token is not None and value.get("send", False):
-                        receipt = await registration.adapter.execute(decision.token.command, execution=execution)
+                        receipt = await registration.adapter.execute(decision.token.dispatch, execution=execution)
                         from schemas.business import SucceededReceipt, DefinitiveNoEffect
                         plan = (await repo.finalize(projection, grant, decision.token, receipt)
                                 if isinstance(receipt, (SucceededReceipt, DefinitiveNoEffect))
@@ -260,9 +315,10 @@ def worker_router(config, registrations, state):
                             {"proposal_id": value["plan_id"]})).model_dump(mode="json")
                     elif action == "confirm_only":
                         plan = await repo.lookup_plan(projection, grant, UUID(value["plan_id"]))
-                        facts = await runtime._facts([BusinessAction(capability=o.command.capability,
-                            arguments=o.command.arguments) for o in plan.operations])
-                        plan = await repo.confirm_plan(projection, grant, plan.id, runtime.registration, facts)
+                        async def facts_resolver():
+                            return await runtime._facts([BusinessAction(capability=o.command.capability,
+                                arguments=o.command.arguments) for o in plan.operations])
+                        plan = await repo.confirm_plan(projection, grant, plan.id, runtime.registration, facts_resolver)
                         result = {"plan_id": str(plan.id)}
                     elif action == "reconcile":
                         await runtime.reconcile(UUID(value["operation_id"]))
@@ -270,6 +326,22 @@ def worker_router(config, registrations, state):
                     elif action == "native":
                         await runtime.replay_native(UUID(value["operation_id"]))
                         result = {}
+                    elif action == "execute_stale":
+                        plan = await repo.selected_plan(projection, grant)
+                        await state.phase("STALE")
+                        result = (await runtime._execute_frozen(plan)).model_dump(mode="json")
+                    elif action == "raw_facts":
+                        from schemas.business import MaterialFacts
+                        plan = await repo.selected_plan(projection, grant)
+                        if value["method"] == "reserve":
+                            await repo.reserve_plan(projection, grant, runtime.registration,
+                                value["actions"], MaterialFacts())
+                        elif value["method"] == "confirm":
+                            await repo.confirm_plan(projection, grant, plan.id, runtime.registration, MaterialFacts())
+                        else:
+                            await repo.claim_dispatch(projection, grant, plan.id, plan.operations[0].id,
+                                runtime.registration, MaterialFacts())
+                        result = {"rejected": False}
                     else:
                         raise ValueError("Unknown synthetic worker action")
                 result["operation_refs"] = [r.model_dump(mode="json") for r in await repo.collect_refs(projection, grant)]
@@ -299,7 +371,9 @@ def run():
     prepare_fakes(LegacyState(config["state_dir"]))
     registrations = registry(config["provider_url"], native_policy=config["profile"].get(
         "native_policy", "DURABLE_TEST"), horizon=config["profile"].get("horizon"),
-        timeout=config["profile"].get("timeout", 1), proposal_ttl=config["profile"].get("proposal_ttl", 300))
+        timeout=config["profile"].get("timeout", 1), proposal_ttl=config["profile"].get("proposal_ttl", 300),
+        bounded_acceptance=config["profile"].get("bounded_acceptance", "PROVIDER_ACCEPT_BEFORE_V1"),
+        retained_legacy=config["profile"].get("retained_legacy", False))
     asyncio.run(seed(config, registrations))
     wrap_repository(state)
     import main

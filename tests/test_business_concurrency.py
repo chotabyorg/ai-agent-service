@@ -8,7 +8,7 @@ from sqlalchemy import func, select, text, update
 
 from models.agent import AgentTemplate
 from models.business import BusinessBinding, BusinessOperation, BusinessPlan, BusinessScope
-from schemas.business import ProvenSucceeded, SucceededReceipt
+from schemas.business import BusinessSafetyError, ProvenSucceeded, SucceededReceipt
 from services.business_runtime import BusinessRuntime
 from tests.test_business_runtime import actions, later, setup_business
 
@@ -63,7 +63,12 @@ async def test_reservation_and_exact_replay_have_actual_overlap(db_session):
         waits = await observe_blocked(db_session, pid, count=2)
         assert len({row[0] for row in waits}) == 2
         await blocker.rollback()
-        first, second = await asyncio.wait_for(asyncio.gather(one, two), 5)
+        results = await asyncio.wait_for(asyncio.gather(one, two, return_exceptions=True), 5)
+    committed = [item for item in results if not isinstance(item, Exception)]
+    refused = [item for item in results if isinstance(item, Exception)]
+    assert committed and all(isinstance(item, BusinessSafetyError) and item.code == "ADMISSION_CONTENDED" for item in refused)
+    first = committed[0]
+    second = await duplicate.freeze_plan(actions("12"))
     assert first.id == second.id and first.operations[0].id == second.operations[0].id and provider.posts == 0
     async with held(db_session, BusinessScope, BusinessScope.id == first.scope.scope_id) as (blocker, pid):
         replay = asyncio.create_task(runtime.freeze_plan(actions("12")))
@@ -85,21 +90,21 @@ async def test_same_operation_and_distinct_turn_dispatch_permission_overlap(db_s
     loser, losing_plan = contenders[1]
     async with held(db_session, BusinessScope, BusinessScope.id == plan1.scope.scope_id) as (blocker, pid):
         first = asyncio.create_task(winner.repository.claim_dispatch(winner.request, winner.grant,
-            winning_plan.id, winning_plan.operations[0].id, winner.registration, await winner._facts(actions("12"))))
+            winning_plan.id, winning_plan.operations[0].id, winner.registration, winner.facts_resolver(actions("12"))))
         await observe_blocked(db_session, pid)
         await blocker.rollback()
         allowed = await asyncio.wait_for(first, 5)
     assert allowed.token is not None
     async with held(db_session, BusinessScope, BusinessScope.id == plan1.scope.scope_id) as (blocker, pid):
         losing = asyncio.create_task(loser.repository.claim_dispatch(loser.request, loser.grant,
-            losing_plan.id, losing_plan.operations[0].id, loser.registration, await loser._facts(actions("13"))))
+            losing_plan.id, losing_plan.operations[0].id, loser.registration, loser.facts_resolver(actions("13"))))
         await observe_blocked(db_session, pid)
         await blocker.rollback()
         blocked = await asyncio.wait_for(losing, 5)
     assert blocked.token is None and blocked.reason == "BLOCKED_UNRESOLVED_EFFECT"
     assert blocked.plan.operations[0].status == "RESERVED" and blocked.plan.operations[0].attempt_count == 0
     duplicate = await winner.repository.claim_dispatch(winner.request, winner.grant, winning_plan.id,
-        winning_plan.operations[0].id, winner.registration, await winner._facts(actions("12")))
+        winning_plan.operations[0].id, winner.registration, winner.facts_resolver(actions("12")))
     assert duplicate.token is None and duplicate.reason == "IN_FLIGHT"
 
 
@@ -108,8 +113,8 @@ async def test_receipt_finalize_overlap_and_stale_token_cannot_overwrite(db_sess
     runtime, provider, _, _ = await setup_business(db_session)
     plan = await runtime.freeze_plan(actions("12"))
     decision = await runtime.repository.claim_dispatch(runtime.request, runtime.grant, plan.id, plan.operations[0].id,
-                                                       runtime.registration, await runtime._facts(actions("12")))
-    receipt = await runtime.registration.adapter.execute(decision.token.command, execution=None)
+                                                       runtime.registration, runtime.facts_resolver(actions("12")))
+    receipt = await runtime.registration.adapter.execute(decision.token.dispatch, execution=None)
     async with held(db_session, BusinessScope, BusinessScope.id == plan.scope.scope_id) as (blocker, pid):
         finalizer = asyncio.create_task(runtime.repository.finalize(runtime.request, runtime.grant, decision.token, receipt))
         await observe_blocked(db_session, pid)
@@ -151,14 +156,19 @@ async def test_confirmation_competitors_reload_after_actual_scope_wait(db_sessio
     request = later(origin.request, "confirm " + str(proposal.id))
     one = await BusinessRuntime.open(request, origin.grant, db_session, registry)
     two = await BusinessRuntime.open(request, origin.grant, db_session, registry)
-    facts = await one._facts(actions("12"))
+    facts = one.facts_resolver(actions("12"))
     async with held(db_session, AgentTemplate, AgentTemplate.id == request.agent_id) as (blocker, pid):
         confirmations = [asyncio.create_task(runtime.repository.confirm_plan(request, origin.grant,
                             proposal.id, runtime.registration, facts)) for runtime in (one, two)]
         await observe_blocked(db_session, pid, count=2)
         await blocker.rollback()
-        confirmed = await asyncio.wait_for(asyncio.gather(*confirmations), 5)
-    assert confirmed[0].id == confirmed[1].id and all(p.proposal_state == "CONFIRMED" for p in confirmed)
+        results = await asyncio.wait_for(asyncio.gather(*confirmations, return_exceptions=True), 5)
+    confirmed = [item for item in results if not isinstance(item, Exception)]
+    refused = [item for item in results if isinstance(item, Exception)]
+    assert confirmed and all(isinstance(item, BusinessSafetyError) and item.code == "ADMISSION_CONTENDED" for item in refused)
+    assert all(p.id == proposal.id and p.proposal_state == "CONFIRMED" for p in confirmed)
+    assert (await two.repository.confirm_plan(request, origin.grant, proposal.id, two.registration,
+                                              two.facts_resolver(actions("12")))).id == proposal.id
     await one.confirm(proposal.id)
     await two.confirm(proposal.id)
     assert provider.posts == 1
@@ -168,7 +178,7 @@ async def test_confirmation_competitors_reload_after_actual_scope_wait(db_sessio
 async def test_generation_change_wins_post_lock_dispatch_read(db_session):
     runtime, provider, _, binding = await setup_business(db_session)
     plan = await runtime.freeze_plan(actions("12"))
-    facts = await runtime._facts(actions("12"))
+    facts = runtime.facts_resolver(actions("12"))
     async with db_session() as changer:
         await changer.execute(select(AgentTemplate).where(AgentTemplate.id == runtime.request.agent_id).with_for_update())
         await changer.execute(select(BusinessBinding).where(BusinessBinding.id == binding.id).with_for_update())
@@ -190,7 +200,7 @@ async def test_expiry_normalization_overlap_blocks_an_already_reserved_plan(db_s
     second = await BusinessRuntime.open(later(first.request), first.grant, db_session, registry)
     plan1, plan2 = await first.freeze_plan(actions("12")), await second.freeze_plan(actions("13"))
     permitted = await first.repository.claim_dispatch(first.request, first.grant, plan1.id, plan1.operations[0].id,
-                                                       first.registration, await first._facts(actions("12")))
+                                                       first.registration, first.facts_resolver(actions("12")))
     async with db_session() as session:
         await session.execute(update(BusinessOperation).where(BusinessOperation.id == permitted.token.operation_id)
                               .values(dispatch_lease_expires_at=func.clock_timestamp() - text("interval '1 second'")))
@@ -208,7 +218,7 @@ async def test_expiry_normalization_overlap_blocks_an_already_reserved_plan(db_s
     recovery = asyncio.create_task(first.recover_attempts())
     await asyncio.wait_for(locked.wait(), 5)
     contender = asyncio.create_task(second.repository.claim_dispatch(second.request, second.grant, plan2.id,
-        plan2.operations[0].id, second.registration, await second._facts(actions("13"))))
+        plan2.operations[0].id, second.registration, second.facts_resolver(actions("13"))))
     await observe_blocked(db_session, owner["pid"])
     release.set()
     assert await asyncio.wait_for(recovery, 5) == 1
@@ -222,7 +232,7 @@ async def test_no_database_lock_spans_provider_and_an_independent_scope_progress
     runtime, provider, _, _ = await setup_business(db_session)
     plan = await runtime.freeze_plan(actions("12"))
     decision = await runtime.repository.claim_dispatch(runtime.request, runtime.grant, plan.id,
-        plan.operations[0].id, runtime.registration, await runtime._facts(actions("12")))
+        plan.operations[0].id, runtime.registration, runtime.facts_resolver(actions("12")))
     # Permission returned COMMIT. A distinct connection can acquire every row
     # before the fake external response is available; no network transaction.
     async with db_session() as observer:
@@ -247,13 +257,15 @@ async def test_new_plan_freeze_races_dispatch_commit_without_current_state_gap(d
     real_lock = first.repository._lock_scope
     async def gate(session, scope_id):
         scope = await real_lock(session, scope_id)
+        if not session.info.get("business_nowait"):
+            return scope
         owner["pid"] = await session.scalar(text("SELECT pg_backend_pid()"))
         locked.set()
         await release.wait()
         return scope
     monkeypatch.setattr(first.repository, "_lock_scope", gate)
     admission = asyncio.create_task(first.repository.claim_dispatch(first.request, first.grant, plan.id,
-        plan.operations[0].id, first.registration, await first._facts(actions("12"))))
+        plan.operations[0].id, first.registration, first.facts_resolver(actions("12"))))
     await asyncio.wait_for(locked.wait(), 5)
     freezing = asyncio.create_task(second.freeze_plan(actions("13")))
     await observe_blocked(db_session, owner["pid"])
@@ -272,7 +284,7 @@ async def test_terminal_commit_releases_slot_before_waiting_candidate_admission(
     second = await BusinessRuntime.open(later(first.request), first.grant, db_session, registry)
     plan1, plan2 = await first.freeze_plan(actions("12")), await second.freeze_plan(actions("13"))
     decision = await first.repository.claim_dispatch(first.request, first.grant, plan1.id, plan1.operations[0].id,
-        first.registration, await first._facts(actions("12")))
+        first.registration, first.facts_resolver(actions("12")))
     from schemas.business import DefinitiveNoEffect
     receipt = (SucceededReceipt(binding=decision.token.command.receipt_binding(),receipt_id="resolved-1",object_id="object-1",evidence={"proof":"SUCCEEDED"})
                if terminal == "SUCCEEDED" else DefinitiveNoEffect(binding=decision.token.command.receipt_binding(),
@@ -289,7 +301,7 @@ async def test_terminal_commit_releases_slot_before_waiting_candidate_admission(
     finishing = asyncio.create_task(first.repository.finalize(first.request, first.grant, decision.token, receipt))
     await asyncio.wait_for(locked.wait(), 5)
     contender = asyncio.create_task(second.repository.claim_dispatch(second.request, second.grant, plan2.id,
-        plan2.operations[0].id, second.registration, await second._facts(actions("13"))))
+        plan2.operations[0].id, second.registration, second.facts_resolver(actions("13"))))
     await observe_blocked(db_session, owner["pid"])
     release.set()
     assert (await asyncio.wait_for(finishing,5)).operations[0].status == terminal
@@ -305,12 +317,12 @@ async def test_another_turn_can_win_between_ordered_actions_without_erasing_resi
     second = await BusinessRuntime.open(later(first.request), first.grant, db_session, registry)
     plan1, plan2 = await first.freeze_plan(actions("12","13")), await second.freeze_plan(actions("14"))
     first_permission = await first.repository.claim_dispatch(first.request,first.grant,plan1.id,plan1.operations[0].id,
-        first.registration,await first._facts(actions("12","13")))
+        first.registration,first.facts_resolver(actions("12","13")))
     await first._send(first_permission.token)
     other_permission = await second.repository.claim_dispatch(second.request,second.grant,plan2.id,plan2.operations[0].id,
-        second.registration,await second._facts(actions("14")))
+        second.registration,second.facts_resolver(actions("14")))
     blocked = await first.repository.claim_dispatch(first.request,first.grant,plan1.id,plan1.operations[1].id,
-        first.registration,await first._facts(actions("12","13")))
+        first.registration,first.facts_resolver(actions("12","13")))
     assert blocked.reason == "BLOCKED_UNRESOLVED_EFFECT" and blocked.token is None
     assert [op.status for op in blocked.plan.operations] == ["SUCCEEDED","RESERVED"]
     await second._send(other_permission.token)
@@ -325,7 +337,7 @@ async def test_native_original_unknown_is_the_only_exception_and_competing_token
     plan1, plan2 = await first.freeze_plan(actions("12")),await second.freeze_plan(actions("13"))
     provider.lose_next = True
     await first.execute_plan(actions("12"))
-    facts = await first._facts(actions("12"))
+    facts = first.facts_resolver(actions("12"))
     async with held(db_session,BusinessScope,BusinessScope.id==plan1.scope.scope_id) as (blocker,pid):
         recovering = asyncio.create_task(first.repository.claim_dispatch(first.request,first.grant,plan1.id,
             plan1.operations[0].id,first.registration,facts,native_replay=True))
@@ -338,7 +350,7 @@ async def test_native_original_unknown_is_the_only_exception_and_competing_token
         first.registration,facts,native_replay=True)
     assert repeat.token is None and repeat.reason == "IN_FLIGHT"
     contender = await second.repository.claim_dispatch(second.request,second.grant,plan2.id,plan2.operations[0].id,
-        second.registration,await second._facts(actions("13")),native_replay=True)
+        second.registration,second.facts_resolver(actions("13")),native_replay=True)
     assert contender.token is None
     await first._send(admitted.token)
     assert provider.posts == 2 and len(provider.objects)==1

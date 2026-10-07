@@ -17,7 +17,7 @@ from schemas.business import (Ambiguous, BusinessValue, DefinitiveNoEffect,
                               MaterialFacts, ProvenSucceeded, StillUnknown,
                               SucceededReceipt)
 from services.business_registry import (AdapterRegistration, BusinessRegistry,
-    CapabilityDefinition, ProviderProfile)
+    CapabilityDefinition, ProviderProfile, ExecutionContract)
 from services.business_repository import BusinessRepository
 
 
@@ -36,7 +36,9 @@ class BookingAdapter:
     async def receipt_read_allowed(self, scope, *, execution):
         return True
 
-    async def execute(self, command, *, execution):
+    async def execute(self, dispatch, *, execution):
+        command = dispatch.command
+        assert command.facts == {"availability": "fixture"} and command.fact_revisions == {"catalog": 1}
         assert execution is not None
         assert asyncio.current_task().get_name() == "managed-turn-owner"
         self.authority.commands.append(command)
@@ -76,7 +78,8 @@ async def install_business(monkeypatch, value, db_session, *, confirmation=False
         requires_confirmation=confirmation, public_fields=("slot",))
     entry = AdapterRegistration(adapter_id="fake_booking", profile=ProviderProfile(
         profile_revision="a" * 64, mode="LOOKUP", dispatch_timeout_seconds=1, test_only=True),
-        capabilities=(capability,), adapter=BookingAdapter(authority))
+        capabilities=(capability,), adapter=BookingAdapter(authority),
+        execution_contract=ExecutionContract(expected_facts="CONDITIONAL_EXPECTED_FACTS_V1"))
     await BusinessRepository(db_session).configure_binding(grant, adapter_id=entry.adapter_id,
         connection_id=uuid4(), catalog_revision=entry.catalog_revision,
         enabled_capabilities=[capability.name], active=True)
