@@ -9,16 +9,17 @@ from api.dependencies import get_db
 from core.config import get_settings
 from core.managed_boundary import boundary_error
 from schemas.managed_turn import ManagedTurnRequest, ManagedTurnResult
+from schemas.managed_evidence import ManagedEvidenceRequest, ManagedEvidenceResult
 from services.managed_runtime import ManagedRuntime, join_owner
 from services.managed_turn_service import ManagedAgentNotFound, execute_managed_owned
 
 router = APIRouter()
 
 
-def _request_schema():
+def _request_schema(model=ManagedTurnRequest):
     # Body is parsed by the ASGI boundary, so inline its small local definitions
     # rather than emitting JSON-schema root refs that do not resolve in OpenAPI.
-    schema = ManagedTurnRequest.model_json_schema()
+    schema = model.model_json_schema()
     definitions = schema.pop("$defs", {})
 
     def inline(value):
@@ -31,6 +32,36 @@ def _request_schema():
         return value
 
     return inline(schema)
+
+
+def get_business_session_factory(request: Request):
+    """Independent short transactions, explicitly on the agent database."""
+    from db import database
+
+    factory = getattr(request.app.state, "business_session_factory", None)
+    if factory is None:
+        if get_db in request.app.dependency_overrides:
+            # A test/custom DB dependency must never fall back to runtime DB.
+            raise RuntimeError("Explicit managed business database required")
+        factory = database.AsyncSessionLocal
+    if not callable(factory):
+        raise RuntimeError("Invalid managed business database")
+    return factory
+
+
+def get_business_registry(request: Request):
+    from services.business_registry import BusinessRegistry, EMPTY_BUSINESS_REGISTRY
+
+    registry = getattr(request.app.state, "business_registry", EMPTY_BUSINESS_REGISTRY)
+    if not isinstance(registry, BusinessRegistry):
+        raise RuntimeError("Code-owned managed business registry required")
+    return registry
+
+
+def _business_dependency(request, dependency):
+    # These are synchronous code-owned dependencies. No body/provider value can
+    # choose a factory, adapter catalog or transport destination.
+    return request.app.dependency_overrides.get(dependency, dependency)(request)
 
 
 @router.post("/managed-turns/execute", response_model=ManagedTurnResult,
@@ -47,7 +78,10 @@ async def execute_managed_turn(request: Request):
         return boundary_error(404, "AGENT_NOT_FOUND")
     runtime = ManagedRuntime(get_settings().managed_ai_execution_seconds, request=value)
     provider = request.app.dependency_overrides.get(get_db, get_db)
-    owner = asyncio.create_task(execute_managed_owned(value, grant, runtime, provider),
+    factory = _business_dependency(request, get_business_session_factory)
+    registry = _business_dependency(request, get_business_registry)
+    owner = asyncio.create_task(execute_managed_owned(value, grant, runtime, provider,
+                                                     factory, registry),
                                 name="managed-turn-owner")
 
     async def watch_disconnect():
@@ -67,4 +101,23 @@ async def execute_managed_turn(request: Request):
             await disconnect
         except asyncio.CancelledError:
             pass
+    return JSONResponse(result.model_dump(mode="json"), headers={"Cache-Control": "no-store"})
+
+
+@router.post("/managed-turns/evidence", response_model=ManagedEvidenceResult,
+             tags=["internal-managed-turns"],
+             openapi_extra={"requestBody": {"required": True, "content": {
+                 "application/json": {"schema": _request_schema(ManagedEvidenceRequest)}}}})
+async def managed_turn_evidence(request: Request):
+    """Read retained scoped refs only; never open execution/recovery/provider."""
+    from services.business_repository import BusinessRepository
+
+    value = request.scope["managed_evidence_request"]
+    grant = request.scope["managed_grant"]
+    refs = await BusinessRepository.read_evidence(
+        value, grant, _business_dependency(request, get_business_session_factory))
+    if refs is None:
+        return boundary_error(404, "AGENT_NOT_FOUND")
+    result = ManagedEvidenceResult(conversation_id=value.conversation_id,
+        turn_id=value.turn_id, agent_id=value.agent_id, operation_refs=refs)
     return JSONResponse(result.model_dump(mode="json"), headers={"Cache-Control": "no-store"})

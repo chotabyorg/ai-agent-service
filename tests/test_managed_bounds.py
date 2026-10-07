@@ -151,18 +151,19 @@ async def test_invalid_tool_results_stop_actual_loop(api_client,db_session,monke
         "structured_conflict":SimpleNamespace(structuredContent={"error":SENTINEL},content=[SimpleNamespace(text='{"ok":true}')])}[kind]
     model.chat.completions.queue(build_llm_response(tool_calls=[build_tool_call("one","mutate","{}")]),build_llm_response(content="should not consume"))
     result=(await execute(api_client,value)).json()
-    assert result["status"] == "UNKNOWN" and result["draft_text"] is None
-    assert len(model.chat.completions.calls) == 1 and len(tools.calls) == 1
+    assert result["status"] == "FAILED" and result["error_code"] == "TOOL_SETUP_FAILED"
+    assert result["draft_text"] is None
+    assert len(model.chat.completions.calls) == 1 and tools.calls == tools.init_calls == []
 
 
 @pytest.mark.integration
-async def test_no_tool_cleanup_and_invalid_result_are_failed(api_client,db_session,monkeypatch,model,tools):
+async def test_quarantined_mcp_cleanup_is_unreachable_and_invalid_result_is_failed(api_client,db_session,monkeypatch,model,tools):
     agent,value=await setup(api_client,db_session,monkeypatch)
     await store_credentials(api_client,agent["id"],"bitrix",{"webhook_url":"https://synthetic.invalid/rest"},owner_id=UUID(agent["user_id"]))
     tools.cleanup_error=True
     model.chat.completions.queue(build_llm_response(content="answer"))
     result=(await execute(api_client,value)).json()
-    assert result["status"]=="FAILED" and result["error_code"]=="TOOL_CLEANUP_FAILED"
+    assert result["status"]=="DRAFT_READY" and tools.calls == tools.init_calls == []
     tools.cleanup_error=False
     model.chat.completions.queue(build_llm_response(content="x"*16385))
     result=(await execute(api_client,value)).json()

@@ -5,9 +5,29 @@ import math
 
 
 class ManagedExecutionError(Exception):
-    def __init__(self, code: str):
+    def __init__(self, code: str, *, processing_status=None):
         self.code = code
+        # This is processing evidence, never a BusinessOperation transition.
+        # A scope/predecessor block is UNKNOWN even without a provider attempt.
+        self.processing_status = processing_status
         super().__init__(code)
+
+
+def parse_managed_tool_arguments(text: str) -> dict:
+    """Closed managed input; legacy keeps its existing permissive parser."""
+    try:
+        if not isinstance(text, str) or len(text.encode("utf-8")) > 131072:
+            raise ValueError
+        value = json.loads(text, object_pairs_hook=_object_pairs,
+                           parse_constant=lambda _: (_ for _ in ()).throw(ValueError()))
+        if not isinstance(value, dict):
+            raise ValueError
+        _bounded_json(value)
+        return value
+    except ManagedExecutionError:
+        raise
+    except Exception:
+        raise ManagedExecutionError("TOOL_SETUP_FAILED") from None
 
 
 def _bounded_json(value):

@@ -22,7 +22,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from mcp_clients.manager import MCPManager, MCPPreAcquisitionError
 from core.managed_security import managed_logging
-from services.managed_tools import ManagedExecutionError, inspect_managed_tool_result
+from services.managed_tools import (ManagedExecutionError, inspect_managed_tool_result,
+                                    parse_managed_tool_arguments, _bounded_json)
 from services.managed_http_cleanup import close_managed_helper, own_managed_http
 from services.chat_diagnostics import ChatFailureStage, set_chat_failure_stage
 from services.agent_service import AgentService
@@ -443,54 +444,60 @@ class LLMService:
 
         set_chat_failure_stage(ChatFailureStage.MCP_SETUP)
         async with self._execution_stack(runtime) as stack:
-            tool_registry: dict[str, MCPManager] = {}
+            tool_registry: dict[str, MCPManager | None] = {}
             openai_tools: list[dict[str, object]] = []
 
-            for credentials_record in credentials_records:
-                manager = MCPManager(
-                    service_name=credentials_record.service_name,
-                    credentials=self.agent_service.decrypt_credentials_record(
-                        credentials_record
-                    ),
-                )
-                if runtime:
+            if runtime:
+                # Raw MCP is quarantined before lookup/decrypt/construction, not
+                # merely removed from model advertisement. Only code-owned
+                # business controls can enter the managed registry.
+                openai_tools = runtime.business.openai_tools() if runtime.business else []
+                tool_registry = {tool["function"]["name"]: None for tool in openai_tools}
+            else:
+                for credentials_record in credentials_records:
+                    manager = MCPManager(
+                        service_name=credentials_record.service_name,
+                        credentials=self.agent_service.decrypt_credentials_record(
+                            credentials_record
+                        ),
+                    )
+                    if runtime:
+                        try:
+                            await manager.acquire_owned(stack, runtime)
+                        except MCPPreAcquisitionError:
+                            continue
+                        except ManagedExecutionError:
+                            raise
+                        except Exception:
+                            raise ManagedExecutionError("TOOL_SETUP_FAILED") from None
+                    else:
+                        try:
+                            await stack.enter_async_context(manager)
+                        except ValueError:
+                            continue
+
+                    enabled = credentials_record.enabled_tools
                     try:
-                        await manager.acquire_owned(stack, runtime)
-                    except MCPPreAcquisitionError:
-                        continue
+                        pending_metadata = manager.get_tools_metadata()
+                        metadata = await runtime.operation(pending_metadata) if runtime else await pending_metadata
                     except ManagedExecutionError:
                         raise
                     except Exception:
-                        raise ManagedExecutionError("TOOL_SETUP_FAILED") from None
-                else:
-                    try:
-                        await stack.enter_async_context(manager)
-                    except ValueError:
-                        continue
-
-                enabled = credentials_record.enabled_tools
-                try:
-                    pending_metadata = manager.get_tools_metadata()
-                    metadata = await runtime.operation(pending_metadata) if runtime else await pending_metadata
-                except ManagedExecutionError:
-                    raise
-                except Exception:
-                    if runtime:
-                        raise ManagedExecutionError("TOOL_SETUP_FAILED") from None
-                    raise
-                for tool in manager.get_openai_tools():
-                    tool_name = tool["function"]["name"]
-                    if tool_name in tool_registry:
-                        continue
-                    tier = metadata.get(tool_name, {}).get("tier", "core")
-                    if enabled is None:
-                        if tier != "core":
+                        if runtime:
+                            raise ManagedExecutionError("TOOL_SETUP_FAILED") from None
+                        raise
+                    for tool in manager.get_openai_tools():
+                        tool_name = tool["function"]["name"]
+                        if tool_name in tool_registry:
                             continue
-                    elif "*" not in enabled and tool_name not in enabled:
-                        continue
-                    tool_registry[tool_name] = manager
-                    openai_tools.append(tool)
-
+                        tier = metadata.get(tool_name, {}).get("tier", "core")
+                        if enabled is None:
+                            if tier != "core":
+                                continue
+                        elif "*" not in enabled and tool_name not in enabled:
+                            continue
+                        tool_registry[tool_name] = manager
+                        openai_tools.append(tool)
             if runtime:
                 messages = self._budget_managed_messages(
                     agent, messages, openai_tools, selected_indices, communication, simple_selection,
@@ -500,6 +507,12 @@ class LLMService:
                 try:
                     if runtime:
                         runtime.check()
+                        if runtime.business is not None:
+                            gate = await runtime.operation(runtime.business.guard_result(allow_incomplete=True))
+                            if gate is not None:
+                                if gate.halt_status:
+                                    raise ManagedExecutionError(gate.error_code, processing_status=gate.halt_status)
+                                return gate.safe_draft
                         self._check_managed_envelope(agent, messages, openai_tools)
                     pending_response = llm_client.chat.completions.create(
                         model=agent.model_name or self.settings.llm_default_model,
@@ -561,6 +574,12 @@ class LLMService:
                 set_chat_failure_stage(ChatFailureStage.RESPONSE_PROCESSING)
                 message = response.choices[0].message
                 if not getattr(message, "tool_calls", None):
+                    if runtime and runtime.business is not None:
+                        gate = await runtime.operation(runtime.business.guard_result())
+                        if gate is not None:
+                            if gate.halt_status:
+                                raise ManagedExecutionError(gate.error_code, processing_status=gate.halt_status)
+                            return gate.safe_draft
                     raw_answer = message.content or "I processed your request."
                     clean_answer = self._strip_thinking_tags(raw_answer)
                     if not clean_answer:
@@ -579,6 +598,36 @@ class LLMService:
                 for tool_call in message.tool_calls:
                     func_name = tool_call.function.name
                     func_args_str = tool_call.function.arguments
+
+                    if runtime:
+                        # Hidden, disabled, custom and raw names stop before
+                        # parsing and cannot reach a later scripted completion.
+                        if func_name not in tool_registry or runtime.business is None:
+                            raise ManagedExecutionError("TOOL_SETUP_FAILED")
+                        func_args = parse_managed_tool_arguments(func_args_str)
+                        from schemas.business import BusinessSafetyError
+                        try:
+                            business_result = await runtime.operation(
+                                runtime.business.call_tool(func_name, func_args))
+                        except BusinessSafetyError as exc:
+                            raise ManagedExecutionError("TOOL_EXECUTION_UNKNOWN"
+                                if exc.processing_status == "UNKNOWN" else "TOOL_SETUP_FAILED",
+                                processing_status=exc.processing_status) from None
+                        if business_result.halt_status:
+                            raise ManagedExecutionError(business_result.error_code,
+                                processing_status=business_result.halt_status)
+                        if business_result.safe_draft is not None:
+                            # Proposals are bounded frozen public fields. Model
+                            # prose is never permission or a completion receipt.
+                            return business_result.safe_draft
+                        _bounded_json(business_result.tool_payload)
+                        tool_result_text = json.dumps(business_result.tool_payload,
+                            ensure_ascii=False, allow_nan=False)
+                        messages.append({"role": "tool", "tool_call_id": tool_call.id,
+                                         "name": func_name, "content": tool_result_text})
+                        # Durable normalized replay/conflict owns business
+                        # identity; the legacy raw-string loop guard does not.
+                        continue
 
                     try:
                         func_args = json.loads(func_args_str)
