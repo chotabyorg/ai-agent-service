@@ -23,7 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from mcp_clients.manager import MCPManager, MCPPreAcquisitionError
 from core.managed_security import managed_logging
 from services.managed_tools import ManagedExecutionError, inspect_managed_tool_result
-from services.managed_http_cleanup import close_managed_helper
+from services.managed_http_cleanup import close_managed_helper, own_managed_http
 from services.chat_diagnostics import ChatFailureStage, set_chat_failure_stage
 from services.agent_service import AgentService
 from services.encryption_service import EncryptionService
@@ -140,6 +140,7 @@ class PrivacyProxyCompletions:
             if managed_logging.get():
                 client = httpx.AsyncClient(timeout=self.privacy_filter_timeout_seconds, trust_env=False)
                 try:
+                    own_managed_http(client)
                     response = await client.post(url, headers=headers, json=payload)
                 finally:
                     await close_managed_helper(client)

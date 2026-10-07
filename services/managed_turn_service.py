@@ -9,7 +9,7 @@ from openai import AsyncOpenAI
 from core.managed_security import EXECUTION_NAMESPACE
 from schemas.managed_turn import MAX_RESULT_BYTES, ManagedTurnResult
 from services.llm_service import LLMService
-from services.managed_http_cleanup import close_managed_helper
+from services.managed_http_cleanup import close_managed_helper, own_managed_http
 from services.managed_runtime import CHANNEL_PROMPT, privacy_id
 from services.managed_tools import ManagedExecutionError
 from services.prompt_builder import ChatContext
@@ -98,6 +98,8 @@ async def execute_managed_owned(request, grant, runtime, db_provider):
             # The proxy creates/closes each owned HTTP request client in its helper.
             if hasattr(client, "close"):
                 runtime.stack.push_async_callback(_close_client, client)
+            if isinstance(client, AsyncOpenAI):
+                own_managed_http(client._client)
             credentials = await runtime.operation(service.agent_service.get_credentials(db, agent.id))
             answer = await service._execute_core(
                 db, agent=agent, llm_client=client, credentials_records=credentials,

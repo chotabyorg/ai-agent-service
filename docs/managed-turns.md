@@ -133,14 +133,24 @@ request is repeated for cleanup.
 
 HTTPX0.28.1 and httpcore1.0.9 are pinned to the already inspected versions. Their
 client/pool bookkeeping can report closed/remove connections before socket close
-finishes. The narrow managed cleanup module retains the HTTP/1 pool and actual
-AnyIO socket close handles before its first await, including the socket underlying
-TLS. A failed finite close joins those retained streams/pools in the same owner;
+finishes. Before any HTTP operation, the narrow managed cleanup module installs a
+request-local backend/stream owner on every native HTTP/1 pool, including default
+forward and CONNECT proxy mounts. It retains actual AnyIO socket objects/bound
+close handles immediately after TCP/Unix acquisition, with no await before retention,
+and retains them across TLS setup. A malformed header, read/body failure or cancelled
+TLS handshake can therefore discard pool/protocol bookkeeping without losing the
+actual owner. Operation-time stream close also has a two-second detection window;
+its error/deadline marks cleanup uncertain and prevents later model/tool work.
+Every final close joins acquired streams even when ordinary client.close succeeds
+against an empty pool. A failed finite close joins retained streams/pools in the same owner;
 it does not rely on client.is_closed or repeat a potentially no-op client.aclose.
 Legacy HTTP helper defaults/context manager/lifetime remain unchanged. No environment
 proxy pool is used in managed helper requests. The final retained join, like the
 SDK's final process reap, cannot promise an absolute bound for an uncooperative
 resource/OS; the owner remains joined instead of abandoning resources.
+Supported private ABI is HTTPX0.28.1/httpcore1.0.9 with AnyIO4.12.1 on asyncio.
+Socketless MockTransport is an explicit test seam; HTTP/2, custom transports/backends
+and other native versions are unsupported, rather than silently assumed safe.
 
 The direct managed OpenAI client uses the same retained HTTP teardown after MCP
 scopes exit. OpenAI2.26.0 is also pinned to the inspected existing runtime because

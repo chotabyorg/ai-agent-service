@@ -90,7 +90,8 @@ def tls_contexts(tmp_path):
 
 
 @asynccontextmanager
-async def loopback_service(tmp_path, *, tls=False, proxy=False, post_tool=False, bad_kb=False, stall=False):
+async def loopback_service(tmp_path, *, tls=False, proxy=False, post_tool=False, bad_kb=False, stall=False,
+                           operation_error=None):
     state = SimpleNamespace(peers=[], calls=[], tasks=[], received=asyncio.Event())
     server_context, verify = tls_contexts(tmp_path) if tls else (None, True)
 
@@ -112,6 +113,17 @@ async def loopback_service(tmp_path, *, tls=False, proxy=False, post_tool=False,
                 state.calls.append((head.split(b"\r\n", 1)[0], json.loads(body)))
                 if len(state.calls) == (2 if post_tool else 1):
                     state.received.set()
+                    if operation_error:
+                        if operation_error == "malformed":
+                            writer.write(b"INVALID STATUS\r\n\r\n")
+                            await writer.drain()
+                        elif operation_error == "body":
+                            writer.write(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+                                         b"Content-Length: 100\r\n\r\n{")
+                            await writer.drain()
+                        assert await reader.read() == b""
+                        peer.eof.set()
+                        return
                 if stall and len(state.calls) == (2 if post_tool else 1):
                     assert await reader.read() == b""
                     peer.eof.set()
@@ -234,6 +246,8 @@ def direct_sdk(monkeypatch, state):
 
     def create_sdk(**kwargs):
         assert kwargs["max_retries"] == 0
+        if hasattr(state, "operation_timeout"):
+            kwargs["timeout"] = state.operation_timeout
         client = state.create(timeout=kwargs["timeout"], trust_env=False)
         sdk = RealOpenAI(**kwargs, http_client=client)
         original_close = sdk.close
@@ -263,6 +277,222 @@ async def assert_released(state, server, before, db_probe):
     assert not db_probe.checkouts
     assert db_probe.drivers and all(driver.is_closed() for driver in db_probe.drivers)
     assert not (set(asyncio.all_tasks()) - before - {asyncio.current_task()})
+
+
+def operation_close_fault(monkeypatch, state, mode, *, fault_connection=1):
+    """Inject before protocol setup/operation cleanup, not at final aclose."""
+    from httpcore._backends.anyio import AnyIOBackend, AnyIOStream
+    original = AnyIOBackend.connect_tcp
+    original_tls = AnyIOStream.start_tls
+
+    def fault_stream(stream, fault):
+        close = stream.aclose
+        async def native_close():
+            state.events.append(asyncio.current_task())
+            state.close_started.set()
+            if fault and mode == "raise":
+                raise RuntimeError(SENTINEL)
+            if fault and mode == "deadline":
+                await asyncio.sleep(5)
+            await close()
+        stream.aclose = native_close
+        stream._goal2_test_fault = fault
+        return stream
+
+    async def connect(backend, *args, **kwargs):
+        stream = await original(backend, *args, **kwargs)
+        state.sockets.append(stream.get_extra_info("socket"))
+        return fault_stream(stream, len(state.sockets) == fault_connection)
+
+    async def start_tls(stream, *args, **kwargs):
+        tls = await original_tls(stream, *args, **kwargs)
+        return fault_stream(tls, getattr(stream, "_goal2_test_fault", False))
+
+    monkeypatch.setattr(AnyIOBackend, "connect_tcp", connect)
+    monkeypatch.setattr(AnyIOStream, "start_tls", start_tls)
+
+
+@asynccontextmanager
+async def stalled_tls_service(*, proxy=False):
+    state = SimpleNamespace(peers=[], tasks=[], received=asyncio.Event(), verify=True)
+    async def serve(reader, writer):
+        peer = SimpleNamespace(writer=writer, eof=asyncio.Event())
+        state.peers.append(peer)
+        state.tasks.append(asyncio.current_task())
+        try:
+            if proxy:
+                assert (await reader.readuntil(b"\r\n\r\n")).startswith(b"CONNECT ")
+                writer.write(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+                await writer.drain()
+            hello = await reader.read(4096)
+            assert hello and hello[0] == 22
+            state.received.set()
+            while await reader.read(4096):
+                pass
+            peer.eof.set()
+        finally:
+            writer.close()
+            await writer.wait_closed()
+    server = await asyncio.start_server(serve, "127.0.0.1", 0)
+    state.origin = ("http" if proxy else "https") + "://127.0.0.1:" + str(server.sockets[0].getsockname()[1])
+    try:
+        yield state
+    finally:
+        server.close()
+        await server.wait_closed()
+        for peer in state.peers:
+            peer.writer.close()
+        for task in state.tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*state.tasks, return_exceptions=True)
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("family", ["kb", "privacy", "direct", "connect_proxy"])
+@pytest.mark.parametrize("mode", ["work_deadline", "caller_cancel", "connect_deadline"])
+async def test_native_tls_partial_acquisition_retained_before_protocol_and_cancel(
+        api_client, db_session, db_probe, monkeypatch, model, tmp_path, family, mode):
+    from httpcore._backends.anyio import AnyIOBackend
+    _, value = await setup(api_client, db_session, monkeypatch)
+    settings = get_settings()
+    monkeypatch.setattr(settings, "internal_api_token", "synthetic-helper-token")
+    monkeypatch.setattr(settings, "knowledge_base_enabled", family == "kb")
+    monkeypatch.setattr(settings, "privacy_filter_enabled", family == "privacy")
+    monkeypatch.setattr(settings, "managed_ai_execution_seconds", 1)
+    timeout = .05 if mode == "connect_deadline" else 5
+    monkeypatch.setattr(settings, "knowledge_base_timeout_seconds", timeout)
+    monkeypatch.setattr(settings, "privacy_filter_timeout_seconds", timeout)
+    async with stalled_tls_service(proxy=family == "connect_proxy") as server:
+        monkeypatch.setattr(settings, "knowledge_base_service_url", server.origin)
+        monkeypatch.setattr(settings, "privacy_filter_base_url", server.origin)
+        monkeypatch.setattr(settings, "llm_base_url", server.origin + "/v1")
+        state = helper_clients(monkeypatch, server, "success", patch=family not in {"direct", "connect_proxy"})
+        if family == "direct":
+            state.operation_timeout = timeout
+            direct_sdk(monkeypatch, state)
+        elif family == "connect_proxy":
+            monkeypatch.setenv("HTTPS_PROXY", server.origin)
+            monkeypatch.setenv("HTTP_PROXY", server.origin)
+            monkeypatch.setenv("NO_PROXY", "")
+            monkeypatch.setenv("ALL_PROXY", "")
+            monkeypatch.setattr(settings, "llm_base_url", "https://127.0.0.1:1/v1")
+            def create_sdk(**kwargs):
+                kwargs["timeout"] = timeout
+                sdk = RealOpenAI(**kwargs)
+                state.clients.append(sdk._client)
+                state.transports = list({id(t): t for t in [sdk._client._transport, *sdk._client._mounts.values()]
+                                         if t is not None}.values())
+                return sdk
+            monkeypatch.setattr(llm_module, "AsyncOpenAI", create_sdk)
+        original_connect = AnyIOBackend.connect_tcp
+        async def observe(backend, *args, **kwargs):
+            stream = await original_connect(backend, *args, **kwargs)
+            state.sockets.append(stream.get_extra_info("socket"))
+            state.events.append(asyncio.current_task())
+            return stream
+        monkeypatch.setattr(AnyIOBackend, "connect_tcp", observe)
+        before = set(asyncio.all_tasks())
+        request = asyncio.create_task(execute(api_client, value))
+        if mode == "caller_cancel":
+            await asyncio.wait_for(server.received.wait(), 2)
+            request.cancel("original partial TLS cancellation")
+            await asyncio.sleep(0)
+            request.cancel("repeated partial TLS cancellation")
+            with pytest.raises(asyncio.CancelledError) as cancelled:
+                await request
+            assert cancelled.value.args == ("original partial TLS cancellation",)
+        else:
+            if family == "kb" and mode == "connect_deadline":
+                model.chat.completions.queue(build_llm_response(content="safe draft"))
+            result = (await request).json()
+            if family == "kb" and mode == "connect_deadline":
+                assert result["status"] == "DRAFT_READY"
+            else:
+                assert result["status"] == "FAILED" and result["draft_text"] is None
+                assert result["error_code"] == ("EXECUTION_TIMEOUT" if mode == "work_deadline" else
+                                                "MODEL_TIMEOUT" if family in {"direct", "connect_proxy"} else
+                                                "PRIVACY_UNAVAILABLE")
+        assert len(server.peers) == len(state.sockets) == 1
+        await assert_released(state, server, before, db_probe)
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("family,post_tool", [("kb", False), ("privacy", False), ("privacy", True),
+                                             ("direct", False), ("direct", True)])
+@pytest.mark.parametrize("operation_error", ["malformed", "read", "body"])
+@pytest.mark.parametrize("close_fault", ["raise", "deadline"])
+@pytest.mark.parametrize("tls", [False, True])
+async def test_operation_close_failure_before_pool_snapshot_retains_actual_socket(
+        api_client, db_session, db_probe, monkeypatch, model, tools, tmp_path, caplog, capfd,
+        family, post_tool, operation_error, close_fault, tls):
+    agent, value = await setup(api_client, db_session, monkeypatch)
+    settings = get_settings()
+    monkeypatch.setattr(settings, "internal_api_token", "synthetic-helper-token")
+    monkeypatch.setattr(settings, "knowledge_base_enabled", family == "kb")
+    monkeypatch.setattr(settings, "privacy_filter_enabled", family == "privacy")
+    monkeypatch.setattr(settings, "knowledge_base_timeout_seconds", .05)
+    monkeypatch.setattr(settings, "privacy_filter_timeout_seconds", .05)
+    if post_tool:
+        await store_credentials(api_client, agent["id"], "bitrix", {"webhook_url": "https://synthetic.invalid/rest"},
+                                owner_id=UUID(agent["user_id"]))
+        tools.result = build_tool_result('{"ok": true}')
+    model.chat.completions.queue(build_llm_response(content="must remain unconsumed"))
+    async with loopback_service(tmp_path, post_tool=post_tool, operation_error=operation_error, tls=tls) as server:
+        monkeypatch.setattr(settings, "knowledge_base_service_url", server.origin)
+        monkeypatch.setattr(settings, "privacy_filter_base_url", server.origin)
+        monkeypatch.setattr(settings, "llm_base_url", server.origin + "/v1")
+        state = helper_clients(monkeypatch, server, "success", patch=family != "direct")
+        if family == "direct":
+            state.operation_timeout = .05
+            direct_sdk(monkeypatch, state)
+        operation_close_fault(monkeypatch, state, close_fault,
+                              fault_connection=2 if family == "privacy" and post_tool else 1)
+        before = set(asyncio.all_tasks())
+        response = await execute(api_client, value)
+        result = response.json()
+        assert result["status"] == ("UNKNOWN" if post_tool else "FAILED")
+        assert result["error_code"] == "TOOL_CLEANUP_FAILED"
+        assert result["draft_text"] is None and result["operation_refs"] == []
+        assert len(server.calls) == (2 if post_tool else 1)
+        assert len(tools.calls) == int(post_tool) and model.chat.completions.calls == []
+        await assert_released(state, server, before, db_probe)
+        captured = capfd.readouterr()
+        assert SENTINEL not in response.text + caplog.text + captured.out + captured.err
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("tls", [False, True])
+@pytest.mark.parametrize("operation_error", ["malformed", "read", "body"])
+async def test_native_proxy_mount_operation_close_loss_retains_forward_and_connect_socket(
+        api_client, db_session, db_probe, monkeypatch, tmp_path, tls, operation_error):
+    _, value = await setup(api_client, db_session, monkeypatch)
+    monkeypatch.setattr(get_settings(), "knowledge_base_enabled", False)
+    async with loopback_service(tmp_path, tls=tls, proxy=True, operation_error=operation_error) as server:
+        monkeypatch.setenv("HTTP_PROXY", server.origin)
+        monkeypatch.setenv("HTTPS_PROXY", server.origin)
+        monkeypatch.setenv("ALL_PROXY", "")
+        monkeypatch.setenv("NO_PROXY", "")
+        if tls:
+            monkeypatch.setenv("SSL_CERT_FILE", str(tmp_path / "loopback-cert.pem"))
+        monkeypatch.setattr(get_settings(), "llm_base_url", ("https" if tls else "http") + "://127.0.0.1:1/v1")
+        state = SimpleNamespace(clients=[], transports=[], connections=[], sockets=[], events=[],
+                                close_started=asyncio.Event())
+        def create_sdk(**kwargs):
+            kwargs["timeout"] = .05
+            sdk = RealOpenAI(**kwargs)
+            state.clients.append(sdk._client)
+            state.transports = list({id(t): t for t in [sdk._client._transport, *sdk._client._mounts.values()]
+                                     if t is not None}.values())
+            return sdk
+        monkeypatch.setattr(llm_module, "AsyncOpenAI", create_sdk)
+        operation_close_fault(monkeypatch, state, "raise")
+        before = set(asyncio.all_tasks())
+        result = (await execute(api_client, value)).json()
+        assert result["status"] == "FAILED" and result["error_code"] == "TOOL_CLEANUP_FAILED"
+        assert result["draft_text"] is None and result["operation_refs"] == []
+        assert len(server.calls) == 1
+        await assert_released(state, server, before, db_probe)
 
 
 @pytest.mark.integration

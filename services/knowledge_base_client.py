@@ -6,7 +6,7 @@ from uuid import UUID
 import httpx
 from pydantic import BaseModel, Field, ValidationError
 
-from services.managed_http_cleanup import close_managed_helper
+from services.managed_http_cleanup import close_managed_helper, own_managed_http
 
 
 class KnowledgeBaseClientError(Exception):
@@ -54,6 +54,8 @@ class KnowledgeBaseClient:
         self._managed = managed
         self._client = httpx.AsyncClient(timeout=timeout, transport=transport,
                                         **({"trust_env": False} if managed else {}))
+        if managed:
+            own_managed_http(self._client)
 
     async def aclose(self) -> None:
         if self._managed:
