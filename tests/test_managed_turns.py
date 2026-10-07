@@ -25,6 +25,7 @@ from services.managed_runtime import privacy_id
 from services.session_service import SessionService
 from tests.fakes import ScriptedLLMClient, build_llm_response, build_tool_call, build_tool_result
 from tests.test_chat_flow import FakeKnowledgeBaseClient, create_agent, store_credentials
+from tests.test_managed_business_fakes import install_business, plan_arguments
 
 TOKEN = "test_managed_token_" + "x" * 32
 SENTINEL = "managed-secret-sentinel"
@@ -177,13 +178,18 @@ async def test_kb_failure_is_safe_fail_open(api_client, db_session, monkeypatch,
 class OwnedFakeManager:
     result = None
     calls = []
+    init_calls = []
+    acquisition_calls = []
+    metadata_calls = []
     cleanup_error = False
     metadata = {"mutate": {"tier": "core"}, "second": {"tier": "core"}}
 
     def __init__(self, service_name, credentials):
         self.service_name = service_name
+        self.init_calls.append(service_name)
 
     async def acquire_owned(self, stack, runtime):
+        self.acquisition_calls.append(self.service_name)
         async def close():
             if self.cleanup_error:
                 raise RuntimeError(SENTINEL)
@@ -201,6 +207,7 @@ class OwnedFakeManager:
         return [dict(type="function", function=dict(name=name, parameters={"type": "object"})) for name in self.metadata]
 
     async def get_tools_metadata(self):
+        self.metadata_calls.append(self.service_name)
         return self.metadata
 
     async def call_tool(self, name, args):
@@ -213,6 +220,9 @@ class OwnedFakeManager:
 @pytest.fixture
 def tools(monkeypatch):
     OwnedFakeManager.calls = []
+    OwnedFakeManager.init_calls = []
+    OwnedFakeManager.acquisition_calls = []
+    OwnedFakeManager.metadata_calls = []
     OwnedFakeManager.cleanup_error = False
     OwnedFakeManager.metadata = {"mutate": {"tier": "core"}, "second": {"tier": "core"}}
     monkeypatch.setattr(llm_module, "MCPManager", OwnedFakeManager)
@@ -239,26 +249,34 @@ async def test_lost_reply_error_stops_before_next_model_or_same_response_tool(ap
         build_llm_response(tool_calls=[build_tool_call("repeat", "mutate", '{ "x" : 1 }')]), build_llm_response(content="unsafe draft"))
     with caplog.at_level(logging.DEBUG):
         response = await execute(api_client, value)
-    assert response.json()["status"] == "UNKNOWN"
-    assert response.json()["error_code"] == "TOOL_EXECUTION_UNKNOWN"
+    # Managed policy never acquires the raw adapter, regardless of its nominal
+    # result envelope. The classifier remains tested at its component seam.
+    from services.managed_tools import ManagedExecutionError, inspect_managed_tool_result
+    with pytest.raises(ManagedExecutionError, match="TOOL_EXECUTION_UNKNOWN"):
+        inspect_managed_tool_result(service, result)
+    assert response.json()["status"] == "FAILED"
+    assert response.json()["error_code"] == "TOOL_SETUP_FAILED"
     assert response.json()["draft_text"] is None and response.json()["operation_refs"] == []
-    assert len(model.chat.completions.calls) == 1 and tools.calls == [("mutate", {"x": 1})]
+    assert len(model.chat.completions.calls) == 1 and tools.calls == []
+    assert tools.init_calls == tools.acquisition_calls == tools.metadata_calls == []
     assert len(model.chat.completions._responses) == 2
     assert SENTINEL not in json.dumps(model.chat.completions.calls) + response.text + caplog.text
     assert model.closed
 
 
 @pytest.mark.integration
-async def test_managed_successful_multi_step_tool_and_dedupe(api_client, db_session, monkeypatch, model, tools):
-    agent, value = await setup(api_client, db_session, monkeypatch)
-    await store_credentials(api_client, agent["id"], "bitrix", {"webhook_url": "https://synthetic.invalid/rest"}, owner_id=UUID(agent["user_id"]))
-    tools.result = build_tool_result('{"result":[{"ID":"synthetic"}]}')
-    model.chat.completions.queue(build_llm_response(tool_calls=[build_tool_call("one", "mutate", '{}')]),
-                                 build_llm_response(tool_calls=[build_tool_call("two", "mutate", '{}'), build_tool_call("three", "second", '{}')]),
-                                 build_llm_response(content="answer"))
+async def test_managed_normalized_business_replay_bypasses_legacy_string_guard(api_client, db_session, monkeypatch, model, tools):
+    _, value = await setup(api_client, db_session, monkeypatch)
+    provider = await install_business(monkeypatch, value, db_session)
+    arguments = plan_arguments()
+    model.chat.completions.queue(build_llm_response(tool_calls=[build_tool_call("one", "business_execute_plan", arguments)]),
+        build_llm_response(tool_calls=[build_tool_call("different-id", "business_execute_plan", arguments),
+                                      build_tool_call("third-id", "business_execute_plan", json.dumps(json.loads(arguments), indent=2))]),
+        build_llm_response(content="answer"))
     result = (await execute(api_client, value)).json()
-    assert result["status"] == "DRAFT_READY" and result["operation_refs"] == []
-    assert tools.calls == [("mutate", {}), ("second", {})]
+    assert result["status"] == "DRAFT_READY" and len(result["operation_refs"]) == 1
+    assert result["operation_refs"][0]["outcome"] == "SUCCEEDED"
+    assert len(provider.commands) == 1 and tools.calls == tools.init_calls == []
     assert len(model.chat.completions.calls) == 3
 
 
@@ -280,16 +298,18 @@ async def test_legacy_error_continues_and_save_precedes_cleanup_failure(api_clie
 @pytest.mark.integration
 @pytest.mark.parametrize("condition,code", [("model", "MODEL_ERROR"), ("cleanup", "TOOL_CLEANUP_FAILED"), ("tool", "TOOL_EXECUTION_UNKNOWN")])
 async def test_post_dispatch_errors_are_unknown_and_safe(api_client, db_session, monkeypatch, model, tools, condition, code, caplog):
-    agent, value = await setup(api_client, db_session, monkeypatch)
-    await store_credentials(api_client, agent["id"], "bitrix", {"webhook_url": "https://synthetic.invalid/rest"}, owner_id=UUID(agent["user_id"]))
-    tools.result = RuntimeError(SENTINEL) if condition == "tool" else build_tool_result('{"ok":true}')
-    tools.cleanup_error = condition == "cleanup"
-    model.chat.completions.queue(build_llm_response(tool_calls=[build_tool_call("one", "mutate", '{}')]),
-                                 APIError(SENTINEL, httpx.Request("POST", "http://synthetic"), body={}) if condition == "model" else build_llm_response(content="answer"))
+    _, value = await setup(api_client, db_session, monkeypatch)
+    provider = await install_business(monkeypatch, value, db_session, mode="unknown" if condition == "tool" else "success")
+    provider.cleanup_error = condition == "cleanup"
+    model.chat.completions.queue(build_llm_response(tool_calls=[build_tool_call("one", "business_execute_plan", plan_arguments())]),
+        APIError(SENTINEL, httpx.Request("POST", "http://synthetic"), body={}) if condition == "model" else build_llm_response(content="answer"))
     with caplog.at_level(logging.DEBUG):
         response = await execute(api_client, value)
     assert response.json()["status"] == "UNKNOWN" and response.json()["error_code"] == code
     assert response.json()["draft_text"] is None
+    assert len(response.json()["operation_refs"]) == 1
+    assert response.json()["operation_refs"][0]["outcome"] == ("UNKNOWN" if condition == "tool" else "SUCCEEDED")
+    assert len(provider.commands) == 1 and tools.calls == tools.init_calls == []
     assert SENTINEL not in response.text + caplog.text + json.dumps(model.chat.completions.calls)
     assert model.closed
 

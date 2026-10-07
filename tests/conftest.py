@@ -127,7 +127,9 @@ async def clean_database(db_engine) -> AsyncIterator[None]:
     async with db_engine.begin() as connection:
         await connection.execute(
             text(
-                "TRUNCATE TABLE conversation_sessions, agent_credentials, agent_templates "
+                "TRUNCATE TABLE business_operations, business_turn_plan_links, business_plans, "
+                "business_turn_contexts, business_scopes, business_bindings, "
+                "conversation_sessions, agent_credentials, agent_templates "
                 "RESTART IDENTITY CASCADE"
             )
         )
@@ -194,11 +196,23 @@ def override_db_session(
         async with db_session_factory() as session:
             yield session
 
+    from services.business_registry import EMPTY_BUSINESS_REGISTRY
+
+    absent = object()
+    old_factory = getattr(main.app.state, "business_session_factory", absent)
+    old_registry = getattr(main.app.state, "business_registry", absent)
+    main.app.state.business_session_factory = db_session_factory
+    main.app.state.business_registry = EMPTY_BUSINESS_REGISTRY
     main.app.dependency_overrides[get_db] = _override_get_db
     try:
         yield db_session_factory
     finally:
         main.app.dependency_overrides.clear()
+        for name, previous in (("business_session_factory", old_factory), ("business_registry", old_registry)):
+            if previous is absent:
+                delattr(main.app.state, name)
+            else:
+                setattr(main.app.state, name, previous)
 
 
 @pytest.fixture

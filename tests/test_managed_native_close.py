@@ -23,6 +23,7 @@ import services.managed_http_cleanup as cleanup
 from core.config import get_settings
 from tests.fakes import build_llm_response, build_tool_result
 from tests.test_chat_flow import store_credentials
+from tests.test_managed_business_fakes import install_business, plan_arguments
 from tests.test_managed_http_cleanup import db_probe, direct_sdk, helper_clients, tls_contexts
 from tests.test_managed_turns import execute, model, setup, tools
 
@@ -63,7 +64,7 @@ async def paused_peer(tmp_path, *, post_tool=False, operation=False, tls=False, 
                     message = {"role": "assistant", "content": "safe draft", "tool_calls": None}
                     if post_tool and not target:
                         message = {"role": "assistant", "content": None, "tool_calls": [{"id": "native-close-call",
-                            "type": "function", "function": {"name": "mutate", "arguments": "{}"}}]}
+                            "type": "function", "function": {"name": "business_execute_plan", "arguments": plan_arguments()}}]}
                     value = {"id": "synthetic", "object": "chat.completion", "created": 1, "model": "synthetic",
                              "choices": [{"index": 0, "finish_reason": "stop", "message": message}]}
                 encoded = json.dumps(value).encode()
@@ -203,7 +204,7 @@ async def run_native_case(api_client, db_session, db_probe, monkeypatch, model, 
     if post_tool:
         await store_credentials(api_client, agent["id"], "bitrix", {"webhook_url": "https://synthetic.invalid/rest"},
                                 owner_id=UUID(agent["user_id"]))
-        tools.result = build_tool_result('{"ok": true}')
+        provider = await install_business(monkeypatch, value, db_session)
     model.chat.completions.queue(build_llm_response(content="safe draft"))
     async with paused_peer(tmp_path, post_tool=post_tool, operation=operation, tls=tls, proxy=proxy) as server:
         monkeypatch.setattr(settings, "knowledge_base_service_url", server.origin)
@@ -252,8 +253,13 @@ async def run_native_case(api_client, db_session, db_probe, monkeypatch, model, 
             assert result["status"] == ("DRAFT_READY" if mode == "success" else "UNKNOWN" if post_tool else "FAILED")
             if mode != "success":
                 assert result["error_code"] == "TOOL_CLEANUP_FAILED"
-                assert result["draft_text"] is None and result["operation_refs"] == []
-        assert len(server.calls) == server.target and len(tools.calls) == int(post_tool)
+                assert result["draft_text"] is None
+            assert len(result["operation_refs"]) == int(post_tool)
+            if post_tool:
+                assert result["operation_refs"][0]["outcome"] == "SUCCEEDED"
+        assert len(server.calls) == server.target and tools.calls == tools.init_calls == []
+        if post_tool:
+            assert len(provider.commands) == 1
         assert len(model.chat.completions.calls) == int(family == "kb" and mode == "success")
         assert fault.resources and fault.resources[0].queued > 0
         # Physical resource and actual DB assertions PRECEDE peer drain/fixture

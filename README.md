@@ -480,10 +480,17 @@ reads/writes no Redis history, sends no provider message and returns a draft plu
 safe processing outcome. Its dedicated optional registry defaults to empty;
 `INTERNAL_API_TOKEN` and `CHAT_S2S_TOKEN` cannot authorize it. See
 [the managed internal contract](docs/managed-turns.md) for exact grants, bounds,
-resource lifetime and ambiguity limitations. Existing chat callers stay on
-`/v1/chat/completions`.
+resource lifetime and ambiguity limitations. Managed execution quarantines all raw
+MCP before credential lookup/acquisition and accepts only an explicitly injected
+code-owned durable business registry; the production registry is empty. Genuine
+PostgreSQL operation refs survive model/draft/cleanup failure. The new protected
+read-only `POST /internal/v1/managed-turns/evidence` returns scoped retained refs
+with a4096-byte strict JSON cap, without model/provider/recovery work. Conversation
+keeps only opaque refs, with an explicit manual pre-terminal crash-F recovery;
+already-terminal empty refs cannot be enriched by current APIs. Existing chat
+callers stay on `/v1/chat/completions`. No real provider/channel/deployment is enabled.
 
-Эндпоинты под префиксом `/internal/v1` предназначены для вызовов из других внутренних сервисов (например, `subscription-service` и `control-plane-service`) и **не проходят через API Gateway**. Каждый запрос должен содержать заголовок `X-Service-Token` со значением, равным `INTERNAL_API_TOKEN`. Сравнение выполняется через `secrets.compare_digest` для защиты от timing-атак. Если `INTERNAL_API_TOKEN` не задан на сервере — любой запрос отклоняется (fail-closed).
+Существующие legacy-эндпоинты под префиксом `/internal/v1`, кроме отдельно описанных managed-turns, предназначены для вызовов из других внутренних сервисов (например, `subscription-service` и `control-plane-service`) и **не проходят через API Gateway**. Каждый такой запрос должен содержать заголовок `X-Service-Token` со значением, равным `INTERNAL_API_TOKEN`. Сравнение выполняется через `secrets.compare_digest` для защиты от timing-атак. Если `INTERNAL_API_TOKEN` не задан на сервере — запрос отклоняется (fail-closed).
 
 - `GET /internal/v1/agents/count?user_id=<uuid>` — вернуть количество агентов пользователя.
   - Response `200`: `{ "total": int, "active": int }` — `total` считает всех агентов пользователя, `active` — только тех, у кого `is_active = true`.

@@ -1,4 +1,4 @@
-"""Real pinned SDK subprocess/session scope tests, through the managed HTTP route."""
+"""Real pinned SDK scopes at the direct resource-owner seam outside managed policy."""
 import asyncio
 import json
 import os
@@ -61,6 +61,9 @@ def owned_resources(monkeypatch, tmp_path):
 
     def create_client(**kwargs):
         async def response(request):
+            if state.get("block_model"):
+                state["model_started"].set()
+                await state["model_release"].wait()
             if state["model_error"]:
                 raise RuntimeError(SENTINEL)
             return httpx.Response(200, json={"id":"synthetic", "object":"chat.completion", "created":0,
@@ -89,6 +92,58 @@ def configure_child(monkeypatch, state, mode, second=None):
         configs["google_workspace"] = dict(script_path=script,
             env_mapping={"mode":"GOAL2_CHILD_MODE", "pids":"GOAL2_CHILD_PIDS"})
     monkeypatch.setattr(get_settings(), "mcp_services", configs)
+
+
+async def component_execute(state, db_session, mode, second=None):
+    """Actual MCPManager/Goal2 owner, never a managed policy override.
+
+    The endpoint intentionally cannot exercise stdio now. Preserve real SDK
+    acquisition/cancellation/LIFO/child-reap proof by directly owning components
+    with the existing same-task resource owner and native client cleanup.
+    """
+    import anyio
+    from services.managed_runtime import ManagedRuntime, join_owner
+    from services.managed_turn_service import _OwnedDBContext, _close_client
+    from services.managed_tools import ManagedExecutionError
+    from services.managed_http_cleanup import own_managed_http
+
+    runtime = ManagedRuntime(get_settings().managed_ai_execution_seconds)
+    async def provider():
+        async with db_session() as db:
+            yield db
+    async def owned():
+        status, code = "DRAFT_READY", None
+        cancellation = None
+        with anyio.CancelScope(shield=True) as lifecycle:
+            try:
+                await runtime.stack.enter_async_context(_OwnedDBContext(provider))
+                client = llm_module.LLMService()._create_llm_client("synthetic", UUID(int=1), managed=True)
+                runtime.stack.push_async_callback(_close_client, client)
+                own_managed_http(client._client)
+                for family, child_mode in [("bitrix", mode), *([("google_workspace", second)] if second else [])]:
+                    manager = manager_module.MCPManager(family, {"mode": child_mode, "pids": str(state["pids"])})
+                    try:
+                        await manager.acquire_owned(runtime.stack, runtime)
+                        await runtime.operation(manager.get_tools_metadata())
+                    except ManagedExecutionError:
+                        raise
+                    except Exception:
+                        raise ManagedExecutionError("TOOL_SETUP_FAILED") from None
+                await runtime.operation(client.chat.completions.create(model="synthetic", messages=[{"role":"user", "content":"fixture"}]))
+            except asyncio.CancelledError as error:
+                cancellation = error
+            except ManagedExecutionError as error:
+                status, code = "FAILED", error.code
+            finally:
+                try:
+                    await runtime.cleanup(lifecycle)
+                except BaseException:
+                    status, code = "FAILED", "TOOL_CLEANUP_FAILED"
+        if cancellation or runtime.cancel_requested:
+            raise cancellation or asyncio.CancelledError()
+        return {"status": status, "error_code": code, "operation_refs": []}
+    owner = asyncio.create_task(owned(), name="managed-turn-owner")
+    return await join_owner(owner, runtime)
 
 
 def assert_released(state, before):
@@ -121,15 +176,14 @@ async def test_real_owned_lifo_deadline_partial_setup_and_stubborn_child(api_cli
     await store_credentials(api_client, agent["id"], "bitrix", {"mode":mode, "pids":str(state["pids"]), "webhook_url":"https://synthetic.invalid/rest", "client_id":"fake", "client_secret":"fake", "refresh_token":"fake"}, owner_id=UUID(agent["user_id"]))
     before = set(asyncio.all_tasks())
     started = time.monotonic()
-    response = await execute(api_client, value)
+    result = await component_execute(state, db_session, mode)
     assert time.monotonic() - started < 9
-    result = response.json()
     assert result["error_code"] == code, result
     assert result["status"] == ("FAILED" if code else "DRAFT_READY")
     assert result["operation_refs"] == []
     assert_released(state, before)
     output = capfd.readouterr()
-    assert SENTINEL not in response.text + caplog.text + output.err + output.out
+    assert SENTINEL not in json.dumps(result) + caplog.text + output.err + output.out
 
 
 @pytest.mark.integration
@@ -141,7 +195,7 @@ async def test_successful_manager_then_partial_second_unwinds_every_scope(api_cl
     for service, child_mode in (("bitrix","success"), ("google_workspace",mode)):
         await store_credentials(api_client, agent["id"], service, {"mode":child_mode, "pids":str(state["pids"]), "webhook_url":"https://synthetic.invalid/rest", "client_id":"fake", "client_secret":"fake", "refresh_token":"fake"}, owner_id=UUID(agent["user_id"]))
     before = set(asyncio.all_tasks())
-    result = (await execute(api_client, value)).json()
+    result = await component_execute(state, db_session, "success", second=mode)
     assert result["error_code"] == ("TOOL_SETUP_FAILED" if mode == "fail_list" else "EXECUTION_TIMEOUT")
     assert len(state["pids"].read_text().splitlines()) == 2
     assert_released(state, before)
@@ -154,7 +208,7 @@ async def test_raw_http_cancellation_repeated_joins_owner_and_resources(api_clie
     configure_child(monkeypatch, state, "ignore_term")
     await store_credentials(api_client, agent["id"], "bitrix", {"mode":"ignore_term", "pids":str(state["pids"]), "webhook_url":"https://synthetic.invalid/rest", "client_id":"fake", "client_secret":"fake", "refresh_token":"fake"}, owner_id=UUID(agent["user_id"]))
     before = set(asyncio.all_tasks())
-    request = asyncio.create_task(execute(api_client, value), name="cancelled-raw-http-request")
+    request = asyncio.create_task(component_execute(state, db_session, "ignore_term"), name="cancelled-component-request")
     for _ in range(150):
         if state["pids"].exists():
             break
@@ -189,7 +243,7 @@ async def test_cancel_during_real_stdio_enter_defers_until_resource_registered(a
     configure_child(monkeypatch, state, "success")
     await store_credentials(api_client, agent["id"], "bitrix", {"mode":"success", "pids":str(state["pids"]), "webhook_url":"https://synthetic.invalid/rest"}, owner_id=UUID(agent["user_id"]))
     before = set(asyncio.all_tasks())
-    request = asyncio.create_task(execute(api_client, value))
+    request = asyncio.create_task(component_execute(state, db_session, "success"))
     await state["in_enter"].wait()
     request.cancel()
     await asyncio.sleep(.03)
@@ -214,7 +268,7 @@ async def test_real_stdio_spawn_failure_closes_registered_handles(api_client, db
         return params
     monkeypatch.setattr(manager_module.MCPManager, "_build_server_params", invalid_command)
     before = set(asyncio.all_tasks())
-    result = (await execute(api_client, value)).json()
+    result = await component_execute(state, db_session, "success")
     assert result["status"] == "FAILED" and result["error_code"] == "TOOL_SETUP_FAILED"
     assert_released(state, before)
 
@@ -228,17 +282,15 @@ async def test_actual_asgi_disconnect_signals_and_joins_owner(api_client, db_ses
     agent, value = await setup(api_client, db_session, monkeypatch)
     configure_child(monkeypatch, state, "ignore_term")
     await store_credentials(api_client, agent["id"], "bitrix", {"mode":"ignore_term", "pids":str(state["pids"]), "webhook_url":"https://synthetic.invalid/rest"}, owner_id=UUID(agent["user_id"]))
+    state.update(block_model=True, model_started=asyncio.Event(), model_release=asyncio.Event())
     received = 0
     async def receive():
         nonlocal received
         received += 1
         if received == 1:
             return dict(type="http.request", body=json.dumps(value).encode(), more_body=False)
-        for _ in range(150):
-            if state["pids"].exists():
-                return dict(type="http.disconnect")
-            await asyncio.sleep(.01)
-        raise AssertionError("Synthetic child never started")
+        await asyncio.wait_for(state["model_started"].wait(), 2)
+        return dict(type="http.disconnect")
     sent = []
     async def send(event):
         sent.append(event)
@@ -249,5 +301,5 @@ async def test_actual_asgi_disconnect_signals_and_joins_owner(api_client, db_ses
     before = set(asyncio.all_tasks())
     with pytest.raises(asyncio.CancelledError):
         await main.app(scope, receive, send)
-    assert not sent
+    assert not sent and not state["pids"].exists()
     assert_released(state, before)

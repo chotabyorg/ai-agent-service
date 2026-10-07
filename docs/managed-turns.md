@@ -104,20 +104,62 @@ DRAFT_READY/NO_RESPONSE/FAILED/UNKNOWN, `draft_text`, closed safe `error_code`, 
 `operation_refs`. DRAFT_READY requires valid nonnull draft and null error; NO_RESPONSE
 requires both null; FAILED/UNKNOWN require null draft and a safe code. Normal empty
 model answers keep the existing fallback draft. Serialized result cap262144 bytes.
-Current main always returns empty refs: tools have no durable business receipts.
-The reserved extension accepts at most32 `{origin:AI_AGENT_SERVICE,operation_id:
+AI business PostgreSQL rows supply genuine refs through every outcome, including
+model, invalid draft and cleanup failures. RESERVED maps to explicit null;
+DISPATCHING/UNKNOWN maps to UNKNOWN; terminal outcomes stay immutable. Only
+positively committed reservations/reads/receipts enter the collector; an unavailable
+final reload retains its known conservative snapshot. The contract accepts at most32 `{origin:AI_AGENT_SERVICE,operation_id:
 opaque ASCII1..128,outcome:SUCCEEDED|FAILED|UNKNOWN|null}` values; it is not a ledger.
 
 ## Shared execution and runtime lifetime
 
-Legacy and managed adapters use one `LLMService._execute_core` for existing
-PromptBuilder, KB, model parameters, allowed tools/tier selection, first-name wins,
-max20 model steps, raw-call dedupe, thinking removal and fallback. The legacy
-completion hook persists only original history/current user/final answer inside
+Legacy and managed adapters use one `LLMService._execute_core` for PromptBuilder,
+KB, model parameters, max20 model steps, thinking removal and fallback. Legacy
+keeps its allowed tools/tier selection, first-name wins and raw-call dedupe.
+Managed execution skips credential lookup/decryption, MCP construction/acquisition,
+subprocesses, tool listing, metadata and resource reads entirely. All42 raw writes,
+all33 bundled reads and dynamic/custom/spoofed tools are quarantined. Invocation
+independently denies hidden/unknown/disabled names before argument parsing or
+another model response; annotations, names, dry-run and script overrides confer
+no permission. No production raw-MCP bypass exists.
+
+The real app uses immutable `EMPTY_BUSINESS_REGISTRY`. Only explicit code-owned
+application dependencies may inject approved typed adapters and the independent
+short-session factory on the same agent database. An overridden agent DB without
+an explicit business factory fails closed; no request/env JSON can choose an
+adapter, connection, owner, URL, key, receipt or operation ID. Legacy runtime=None
+never opens this business runtime. Managed no-tool prompt/KB/envelope parity stays;
+raw-MCP/read parity is an intentional capability limitation.
+
+Enabled business controls freeze one immutable ordered1..32-action plan per Turn.
+Identity is `(business_scope_id,origin_platform_turn_id,ordinal)`, with a separately
+normalized server fingerprint. Changed plan/order/count/payload conflicts; model
+call IDs/JSON formatting do not change identity. Later deliberate Turns get new
+operations; confirming/recovery Turns select the original plan. Approved repeated
+calls reach durable replay/conflict checks instead of the legacy string guard.
+Reservation COMMIT precedes separate dispatch-permission COMMIT and provider send.
+Every admission rechecks current authority/consent/facts and all same-scope
+DISPATCHING/UNKNOWN blockers, including old reservations and expired attempts.
+Blocking preserves RESERVED/null refs and original consent, halts continuation,
+and returns processing UNKNOWN/TOOL_EXECUTION_UNKNOWN with no draft. Ordered
+predecessors must be durably SUCCEEDED. No database lock spans provider/model HTTP.
+
+A positive receipt COMMIT survives draft non-delivery and downstream faults.
+UNKNOWN is not FAILED; native recovery is an explicit trusted same-original-key
+permission with current checks and sufficient retained guarantee, never model or
+Conversation retry. Non-native ambiguity permits only authoritative read lookup
+or manual attention; BLIND may remain UNKNOWN indefinitely. Real providers are
+unregistered. Pending proposals return deterministic bounded frozen public fields
+and their handle. Consent requires a later selected canonical CUSTOMER TEXT equal
+to `confirm <canonical-lowercase-proposal-uuid>` or `подтверждаю <canonical-lowercase-proposal-uuid>`
+after outer ASCII spaces only; prompt/model booleans or bare yes/да grant nothing.
+FAILED/UNKNOWN business results stop additional model/mutation continuation.
+
+The legacy completion hook persists only original history/current user/final answer inside
 its ExitStack before MCP cleanup. Cleanup failure can still yield plain500 after
 Redis save, matching existing behavior. Legacy raw tool-error continuation remains.
 
-Managed configuration, DB work, client/MCP acquisition, execution and teardown
+Managed configuration, DB work, model/business transport acquisition, execution and teardown
 run in one retained owner task. HTTP cancellation/disconnect signals the active
 operation CancelScope and joins that owner before propagating cancellation;
 it never cancels the owner task or closes resources from another task. Repeated
@@ -157,8 +199,9 @@ Supported private ABI is HTTPX0.28.1/httpcore1.0.9 with AnyIO4.12.1 on asyncio.
 Socketless MockTransport is an explicit test seam; HTTP/2, custom transports/backends
 and other native versions are unsupported, rather than silently assumed safe.
 
-The direct managed OpenAI client uses the same retained HTTP teardown after MCP
-scopes exit. OpenAI2.26.0 is also pinned to the inspected existing runtime because
+The direct managed OpenAI client uses the same retained HTTP teardown after inner
+business transport scopes exit; direct component tests also exercise MCP scopes.
+OpenAI2.26.0 is also pinned to the inspected existing runtime because
 that narrow seam reads its SDK-owned HTTPX client before SDK.close. The initial
 SDK close still runs; a failure/deadline subsequently joins actual retained sockets,
 connection handles and pools in the same owner and returns TOOL_CLEANUP_FAILED.
@@ -176,7 +219,10 @@ relay drains its inner session provider; an earlier SDK cleanup exception stays
 with the ExitStack instead of being thrown into that relay. Managed session exit
 does not commit a transaction. Legacy dependency behavior is unchanged.
 
-Pinned MCP1.26.0 and AnyIO4.12.1 scopes enter/exit in the same owner and strict LIFO.
+Raw MCP is unreachable through the managed endpoint. Direct component regression
+coverage retains pinned MCP1.26.0 and AnyIO4.12.1 acquisition/partial setup/stdio/
+cancellation/child-reap scopes in the same owner and strict LIFO, without a
+production managed-policy override.
 One lifecycle shield enters before any SDK scope. The owner's ExitStack registers
 devnull before stdio, then stdio/session before initialize/list/metadata awaits.
 Only unsupported/missing credentials before acquisition may skip a service;
@@ -197,28 +243,51 @@ case-insensitively from subprocess env on both adapters, and denied after creden
 mappings. Existing per-agent mapped tool credentials remain available. This is
 not a subprocess filesystem sandbox.
 
+## Retained read-only evidence and crash F
+
+`POST /internal/v1/managed-turns/evidence` uses the same independent managed
+principal registry. Authentication precedes body receive; exact scope grant
+selection precedes DB work. Only the canonical POST path is accepted; evidence
+slash aliases return safe404 and other methods safe405, with no body read.
+Actual streamed uncompressed UTF8 JSON is capped at4096 bytes. Duplicate keys,
+nonfinite values, extra fields and invalid versions/types are rejected using the
+same fixed safe errors and no-store. Old internal/chat tokens cannot authorize it.
+
+Request fields: strict `contract_version=1`, exact `owner_id`, `integration_id`,
+`channel`, `agent_id`, `conversation_id`, `turn_id`. Response: version1,
+`conversation_id`, `turn_id`, `agent_id`, and the existing sorted unique≤32
+`operation_refs`. Foreign/guessed/nonexistent scope/Turn share404; retained Turn
+with no selected plan returns[]. It accepts no caller operation ID/provider
+receipt/hash/URL. Complete existing grants may read retained evidence after live
+agent deletion/revocation. It invokes no BusinessRuntime, model, MCP, provider,
+reconciliation, recovery normalization or state transition. Receipt payloads,
+credentials and confirmation details never cross this boundary.
+
+Conversation already stores genuine refs on the same AgentTurn through existing
+complete/fail under winning proof, lease and immutable terminal fingerprint.
+No Conversation source/schema/second ledger is added. The explicit unconsumed
+crash-F procedure is: kill CS after AI result but before its finalizer COMMIT;
+restart/reclaim the same T1 with new proof; read scoped AI evidence; submit existing
+CS fail(EXECUTION_UNKNOWN,refs) before marker-only execute recovery. AI/model/provider
+execution is not repeated. A CS result already terminalized with empty refs cannot
+be enriched by current APIs; retained AI origin evidence remains independently
+readable. No automatic scheduler/enrichment or supersede policy is supplied.
+
 ## Ambiguity and retries
 
-The endpoint is not idempotent. Turn echoes are association, not execution receipts.
-After any actual tool attempt, tool/model/privacy/budget/result/cleanup failure is
-UNKNOWN, with no draft and no refs. The dispatch flag is set before awaiting tool
-execution. Protocol isError and known nominal-success Bitrix root error/singleton/
-exact result-wrapper or Google ok=false/error envelopes stop immediately, before
-result append, another tool or another model call. Structured and each ordinary
-complete JSON text representation are independently bounded/inspected; either error
-wins. Caps:131072 combined UTF8 bytes,32 blocks, depth32,4096 JSON nodes, no cycles,
-surrogates, duplicate keys or nonfinite values. Raw error never enters model/result/log.
-Legacy bypasses this classifier and retains its error text continuation.
+The reasoning HTTP attempt is not a general safe retry API. Business operations
+have durable identity and provider-specific recovery authority; Conversation still
+must not blindly repeat its marked managed execute. A received draft is neither
+delivery nor rollback permission. Processing failure after a committed attempted
+effect returns UNKNOWN with a null draft and genuine independent refs. No earlier
+SUCCEEDED/UNKNOWN is deleted or downgraded because a later model/draft/cleanup fails.
+Before any business attempt, known failures use existing FAILED/error vocabulary;
+a scope/predecessor block explicitly uses UNKNOWN even for a RESERVED candidate.
+Cancellation may prevent an HTTP response; scoped evidence recovers durable refs.
 
-Before any tool attempt, known failures return FAILED with safe configuration,
-model, timeout, context, setup, result or cleanup codes. KB remains fail-open.
-Cancellation can prevent any response and does not undo effects. Conversation
-must not retry a marked dispatch or treat transport timeout as proof of no effect.
-Hidden/opaque/free-text errors, adapter-internal behavior, semantically repeated
-successful calls and cross-Turn effects remain Goal3 business receipt/idempotency
-work. No real channel is migrated or safe business retry guarantee claimed here.
-
-No AI schema migration is added. Source syntax/import, package closure, full tests,
-existing migration/drift and Python3.11 Docker build are author/fresh-verifier gates.
-This repository has no configured lint/typecheck gate. Final acceptance additionally
-requires independently reviewed and verified two-service HTTP tests.
+All native KB/privacy/OpenAI timeout/body/TLS/proxy/socket ownership and last DB
+close guarantees above remain. Post-effect resource faults use typed fake adapters
+through the real ledger; raw MCP resource regressions use direct component seams.
+No real channel, provider, deployment or GitOps state changes. Full relevant
+legacy/managed/business suites, additive migration/drift/import/package/Python3.11
+build and independent paired-process verification are separate required gates.

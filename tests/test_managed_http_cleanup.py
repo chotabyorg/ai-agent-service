@@ -29,6 +29,7 @@ from api.dependencies import get_db
 from core.config import get_settings
 from tests.fakes import build_llm_response, build_tool_result
 from tests.test_chat_flow import store_credentials
+from tests.test_managed_business_fakes import install_business, plan_arguments
 from tests.test_managed_turns import SENTINEL, execute, model, setup, tools
 
 
@@ -135,7 +136,7 @@ async def loopback_service(tmp_path, *, tls=False, proxy=False, post_tool=False,
                     message = {"role": "assistant", "content": "safe draft", "tool_calls": None}
                     if post_tool and len(state.calls) == 1:
                         message = {"role": "assistant", "content": None, "tool_calls": [{"id": "fake-call", "type": "function",
-                            "function": {"name": "mutate", "arguments": "{}"}}]}
+                            "function": {"name": "business_execute_plan", "arguments": plan_arguments()}}]}
                     value, status = {"id": "synthetic-completion", "object": "chat.completion", "created": 1,
                         "model": "synthetic", "choices": [{"index": 0, "finish_reason": "stop", "message": message}]}, b"200 OK"
                 encoded = json.dumps(value).encode()
@@ -436,7 +437,7 @@ async def test_operation_close_failure_before_pool_snapshot_retains_actual_socke
     if post_tool:
         await store_credentials(api_client, agent["id"], "bitrix", {"webhook_url": "https://synthetic.invalid/rest"},
                                 owner_id=UUID(agent["user_id"]))
-        tools.result = build_tool_result('{"ok": true}')
+        provider = await install_business(monkeypatch, value, db_session)
     model.chat.completions.queue(build_llm_response(content="must remain unconsumed"))
     async with loopback_service(tmp_path, post_tool=post_tool, operation_error=operation_error, tls=tls) as server:
         monkeypatch.setattr(settings, "knowledge_base_service_url", server.origin)
@@ -453,9 +454,14 @@ async def test_operation_close_failure_before_pool_snapshot_retains_actual_socke
         result = response.json()
         assert result["status"] == ("UNKNOWN" if post_tool else "FAILED")
         assert result["error_code"] == "TOOL_CLEANUP_FAILED"
-        assert result["draft_text"] is None and result["operation_refs"] == []
+        assert result["draft_text"] is None
+        assert len(result["operation_refs"]) == int(post_tool)
+        if post_tool:
+            assert result["operation_refs"][0]["outcome"] == "SUCCEEDED"
         assert len(server.calls) == (2 if post_tool else 1)
-        assert len(tools.calls) == int(post_tool) and model.chat.completions.calls == []
+        assert tools.calls == tools.init_calls == []
+        if post_tool:
+            assert len(provider.commands) == 1 and model.chat.completions.calls == []
         await assert_released(state, server, before, db_probe)
         captured = capfd.readouterr()
         assert SENTINEL not in response.text + caplog.text + captured.out + captured.err
@@ -490,7 +496,8 @@ async def test_native_proxy_mount_operation_close_loss_retains_forward_and_conne
         before = set(asyncio.all_tasks())
         result = (await execute(api_client, value)).json()
         assert result["status"] == "FAILED" and result["error_code"] == "TOOL_CLEANUP_FAILED"
-        assert result["draft_text"] is None and result["operation_refs"] == []
+        assert result["draft_text"] is None
+        assert result["operation_refs"] == []
         assert len(server.calls) == 1
         await assert_released(state, server, before, db_probe)
 
@@ -508,7 +515,7 @@ async def test_helper_fault_stops_draft_and_joins_real_pool_socket(api_client, d
     if post_tool:
         await store_credentials(api_client, agent["id"], "bitrix", {"webhook_url": "https://synthetic.invalid/rest"},
                                 owner_id=UUID(agent["user_id"]))
-        tools.result = build_tool_result('{"ok": true}')
+        provider = await install_business(monkeypatch, value, db_session)
     model.chat.completions.queue(build_llm_response(content="must remain unconsumed"))
     async with loopback_service(tmp_path, post_tool=post_tool) as server:
         monkeypatch.setattr(settings, "knowledge_base_service_url", server.origin)
@@ -521,10 +528,15 @@ async def test_helper_fault_stops_draft_and_joins_real_pool_socket(api_client, d
         result = response.json()
         assert result["status"] == ("UNKNOWN" if post_tool else "FAILED")
         assert result["error_code"] == "TOOL_CLEANUP_FAILED"
-        assert result["draft_text"] is None and result["operation_refs"] == []
+        assert result["draft_text"] is None
+        assert len(result["operation_refs"]) == int(post_tool)
+        if post_tool:
+            assert result["operation_refs"][0]["outcome"] == "SUCCEEDED"
         assert len(server.calls) == (2 if post_tool else 1)
         assert model.chat.completions.calls == []
-        assert len(tools.calls) == int(post_tool)
+        assert tools.calls == tools.init_calls == []
+        if post_tool:
+            assert len(provider.commands) == 1
         if post_tool:
             assert [item["role"] for item in server.calls[1][1]["chat_completion"]["messages"]][-2:] == ["assistant", "tool"]
         if mode == "deadline":
@@ -547,7 +559,7 @@ async def test_caller_cancel_joins_helper_and_preserves_original_cancellation(ap
     if post_tool:
         await store_credentials(api_client, agent["id"], "bitrix", {"webhook_url": "https://synthetic.invalid/rest"},
                                 owner_id=UUID(agent["user_id"]))
-        tools.result = build_tool_result('{"ok": true}')
+        provider = await install_business(monkeypatch, value, db_session)
     async with loopback_service(tmp_path, stall=during == "request", post_tool=post_tool) as server:
         monkeypatch.setattr(settings, "knowledge_base_service_url", server.origin)
         monkeypatch.setattr(settings, "privacy_filter_base_url", server.origin)
@@ -566,7 +578,9 @@ async def test_caller_cancel_joins_helper_and_preserves_original_cancellation(ap
         assert cancelled.value.args == ("original cancellation",)
         assert time.monotonic() - started < 5
         assert len(server.calls) == (2 if post_tool else 1) and model.chat.completions.calls == []
-        assert len(tools.calls) == int(post_tool)
+        assert tools.calls == tools.init_calls == []
+        if post_tool:
+            assert len(provider.commands) == 1
         await assert_released(state, server, before, db_probe)
         captured = capfd.readouterr()
         assert SENTINEL not in caplog.text + captured.out + captured.err
@@ -624,7 +638,7 @@ async def test_real_direct_sdk_close_fault_joins_pool_socket_without_resend(api_
     if post_tool:
         await store_credentials(api_client, agent["id"], "bitrix", {"webhook_url": "https://synthetic.invalid/rest"},
                                 owner_id=UUID(agent["user_id"]))
-        tools.result = build_tool_result('{"ok": true}')
+        provider = await install_business(monkeypatch, value, db_session)
     async with loopback_service(tmp_path, post_tool=post_tool) as server:
         monkeypatch.setattr(get_settings(), "llm_base_url", server.origin + "/v1")
         state = helper_clients(monkeypatch, server, mode, patch=False)
@@ -636,9 +650,14 @@ async def test_real_direct_sdk_close_fault_joins_pool_socket_without_resend(api_
         result = response.json()
         assert result["status"] == ("UNKNOWN" if post_tool else "FAILED")
         assert result["error_code"] == "TOOL_CLEANUP_FAILED"
-        assert result["draft_text"] is None and result["operation_refs"] == []
+        assert result["draft_text"] is None
+        assert len(result["operation_refs"]) == int(post_tool)
+        if post_tool:
+            assert result["operation_refs"][0]["outcome"] == "SUCCEEDED"
         assert len(server.calls) == (2 if post_tool else 1)
-        assert len(tools.calls) == int(post_tool)
+        assert tools.calls == tools.init_calls == []
+        if post_tool:
+            assert len(provider.commands) == 1
         assert len(state.sdk_closes) == 1 and state.sdk_closes[0].get_name() == "managed-turn-owner"
         assert all(sdk.is_closed() for sdk in state.sdks)
         if mode == "deadline":
@@ -658,7 +677,7 @@ async def test_direct_caller_cancel_joins_sdk_and_preserves_cancellation(api_cli
     if post_tool:
         await store_credentials(api_client, agent["id"], "bitrix", {"webhook_url": "https://synthetic.invalid/rest"},
                                 owner_id=UUID(agent["user_id"]))
-        tools.result = build_tool_result('{"ok": true}')
+        provider = await install_business(monkeypatch, value, db_session)
     async with loopback_service(tmp_path, post_tool=post_tool, stall=during == "request") as server:
         monkeypatch.setattr(get_settings(), "llm_base_url", server.origin + "/v1")
         state = helper_clients(monkeypatch, server, "deadline" if during == "close" else "success", patch=False)
@@ -675,7 +694,9 @@ async def test_direct_caller_cancel_joins_sdk_and_preserves_cancellation(api_cli
             await request
         assert cancelled.value.args == ("original direct cancellation",)
         assert time.monotonic() - started < 5
-        assert len(server.calls) == (2 if post_tool else 1) and len(tools.calls) == int(post_tool)
+        assert len(server.calls) == (2 if post_tool else 1) and tools.calls == tools.init_calls == []
+        if post_tool:
+            assert len(provider.commands) == 1
         assert len(state.sdk_closes) == 1
         await assert_released(state, server, before, db_probe)
         captured = capfd.readouterr()
@@ -772,7 +793,7 @@ async def test_final_production_db_exit_joins_close_and_preserves_failure_or_can
     if post_tool:
         await store_credentials(api_client, agent["id"], "bitrix", {"webhook_url": "https://synthetic.invalid/rest"},
                                 owner_id=UUID(agent["user_id"]))
-        tools.result = build_tool_result('{"ok": true}')
+        provider = await install_business(monkeypatch, value, db_session)
     async with loopback_service(tmp_path, post_tool=post_tool) as server:
         monkeypatch.setattr(get_settings(), "llm_base_url", server.origin + "/v1")
         state = helper_clients(monkeypatch, server, "success", patch=False)
@@ -793,10 +814,15 @@ async def test_final_production_db_exit_joins_close_and_preserves_failure_or_can
             result = response.json()
             assert result["status"] == ("UNKNOWN" if post_tool else "FAILED")
             assert result["error_code"] == "TOOL_CLEANUP_FAILED"
-            assert result["draft_text"] is None and result["operation_refs"] == []
+            assert result["draft_text"] is None
+            assert len(result["operation_refs"]) == int(post_tool)
+            if post_tool:
+                assert result["operation_refs"][0]["outcome"] == "SUCCEEDED"
             assert SENTINEL not in response.text
         assert time.monotonic() - started < 5
-        assert len(server.calls) == (2 if post_tool else 1) and len(tools.calls) == int(post_tool)
+        assert len(server.calls) == (2 if post_tool else 1) and tools.calls == tools.init_calls == []
+        if post_tool:
+            assert len(provider.commands) == 1
         assert len(state.sdk_closes) == 1
         await assert_released(state, server, before, db_probe)
         captured = capfd.readouterr()

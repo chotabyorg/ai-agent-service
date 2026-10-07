@@ -64,14 +64,32 @@ def _communication(message):
     return {"role": "user", "content": text}
 
 
-async def execute_managed_owned(request, grant, runtime, db_provider):
+async def execute_managed_owned(request, grant, runtime, db_provider, session_factory, registry):
     """All DB/runtime/resource work and strict LIFO teardown run in this task."""
-    outcome = dict(status="FAILED", draft_text=None, error_code="INTERNAL_ERROR", operation_refs=[])
+    from schemas.business import BusinessSafetyError
+    from services.business_repository import BusinessRepository
+    from services.business_runtime import BusinessRuntime, CommittedReferenceCollector
+
+    collector = CommittedReferenceCollector()
+    runtime.collector = collector
+
+    def processing_status(explicit=None):
+        attempted = runtime.tool_dispatch_attempted or any(
+            ref.outcome in {"SUCCEEDED", "UNKNOWN"} for ref in collector.snapshot())
+        return "UNKNOWN" if attempted or explicit == "UNKNOWN" else "FAILED"
+
+    outcome = dict(status="FAILED", draft_text=None, error_code="INTERNAL_ERROR")
     missing = False
     cancellation = None
     with anyio.CancelScope(shield=True) as lifecycle:
         try:
             runtime.check()
+            # Retained read permission is independent from current mutation/key
+            # permission. Already committed effects survive early setup errors.
+            existing = await runtime.operation(BusinessRepository.read_evidence(
+                request, grant, session_factory))
+            if existing is not None:
+                collector.observe_committed(existing)
             db = await runtime.stack.enter_async_context(_OwnedDBContext(db_provider))
             runtime.check()
             service = LLMService()
@@ -93,6 +111,12 @@ async def execute_managed_owned(request, grant, runtime, db_provider):
             ])
             if len(query) > 32768 or len(query.encode("utf-8")) > 65536:
                 raise ManagedExecutionError("CONTEXT_LIMIT")
+            # End the configuration read transaction before any model/provider
+            # lifetime. expire_on_commit=False retains the loaded agent values.
+            await runtime.operation(db.commit())
+            runtime.business = await runtime.operation(BusinessRuntime.open(
+                request, grant, session_factory, registry, execution=runtime,
+                collector=collector))
             runtime.check()
             client = service._create_llm_client(key, privacy_id(request), managed=True)
             # The proxy creates/closes each owned HTTP request client in its helper.
@@ -100,9 +124,8 @@ async def execute_managed_owned(request, grant, runtime, db_provider):
                 runtime.stack.push_async_callback(_close_client, client)
             if isinstance(client, AsyncOpenAI):
                 own_managed_http(client._client)
-            credentials = await runtime.operation(service.agent_service.get_credentials(db, agent.id))
             answer = await service._execute_core(
-                db, agent=agent, llm_client=client, credentials_records=credentials,
+                db, agent=agent, llm_client=client, credentials_records=(),
                 communication=[_communication(message) for message in request.messages],
                 chat_context=ChatContext(channel=CHANNEL_PROMPT[request.channel],
                                          external_client_id=f"{EXECUTION_NAMESPACE}:{request.conversation_id}"),
@@ -113,31 +136,49 @@ async def execute_managed_owned(request, grant, runtime, db_provider):
             )
             try:
                 ready = ManagedTurnResult.from_request(
-                    request, status="DRAFT_READY", draft_text=answer, error_code=None, operation_refs=[],
+                    request, status="DRAFT_READY", draft_text=answer, error_code=None,
+                    operation_refs=collector.snapshot(),
                 )
                 if len(ready.model_dump_json().encode("utf-8")) > MAX_RESULT_BYTES:
                     raise ValueError
             except Exception:
                 raise ManagedExecutionError("INVALID_RESULT") from None
-            outcome = dict(status="DRAFT_READY", draft_text=answer, error_code=None, operation_refs=[])
+            outcome = dict(status="DRAFT_READY", draft_text=answer, error_code=None)
         except ManagedAgentNotFound:
             missing = True
         except asyncio.CancelledError as exc:
             cancellation = exc
         except ManagedExecutionError as exc:
-            outcome = dict(status="UNKNOWN" if runtime.tool_dispatch_attempted else "FAILED",
-                           draft_text=None, error_code=exc.code, operation_refs=[])
+            outcome = dict(status=processing_status(exc.processing_status),
+                           draft_text=None, error_code=exc.code)
+        except BusinessSafetyError as exc:
+            # Repository categories are internal. Keep the existing closed v1
+            # error vocabulary; no mirrored Conversation schema change.
+            outcome = dict(status=processing_status(exc.processing_status),
+                           draft_text=None, error_code="TOOL_EXECUTION_UNKNOWN"
+                           if exc.processing_status == "UNKNOWN" else "TOOL_SETUP_FAILED")
         except Exception:
-            outcome = dict(status="UNKNOWN" if runtime.tool_dispatch_attempted else "FAILED",
-                           draft_text=None, error_code="INTERNAL_ERROR", operation_refs=[])
+            outcome = dict(status=processing_status(),
+                           draft_text=None, error_code="INTERNAL_ERROR")
         finally:
+            if runtime.business is not None and not runtime.cancel_requested:
+                try:
+                    await runtime.operation(runtime.business.collect_refs())
+                except ManagedExecutionError as exc:
+                    outcome = dict(status=processing_status(exc.processing_status),
+                                   draft_text=None, error_code=exc.code)
+                except BaseException:
+                    # Collector keeps only genuine positively acknowledged DB
+                    # evidence; a failed reload never fabricates success or IDs.
+                    pass
             try:
                 await runtime.cleanup(lifecycle)
             except BaseException:
-                outcome = dict(status="UNKNOWN" if runtime.tool_dispatch_attempted else "FAILED",
-                               draft_text=None, error_code="TOOL_CLEANUP_FAILED", operation_refs=[])
+                outcome = dict(status=processing_status(),
+                               draft_text=None, error_code="TOOL_CLEANUP_FAILED")
     if cancellation is not None or runtime.cancel_requested:
         raise cancellation or asyncio.CancelledError()
     if missing:
         raise ManagedAgentNotFound
-    return ManagedTurnResult.from_request(request, **outcome)
+    return ManagedTurnResult.from_request(request, **outcome,
+                                          operation_refs=collector.snapshot())

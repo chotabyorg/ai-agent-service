@@ -33,6 +33,8 @@ class ManagedRuntime:
         self.cancel_requested = False
         self.active_scope = None
         self.tool_dispatch_attempted = False
+        self.business = None
+        self.collector = None
         self.started_stdio_count = 0
         self.managers = []
 
