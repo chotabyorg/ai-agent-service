@@ -4,10 +4,12 @@ import asyncio
 from contextlib import asynccontextmanager
 
 import anyio
+from openai import AsyncOpenAI
 
 from core.managed_security import EXECUTION_NAMESPACE
 from schemas.managed_turn import MAX_RESULT_BYTES, ManagedTurnResult
 from services.llm_service import LLMService
+from services.managed_http_cleanup import close_managed_helper
 from services.managed_runtime import CHANNEL_PROMPT, privacy_id
 from services.managed_tools import ManagedExecutionError
 from services.prompt_builder import ChatContext
@@ -17,8 +19,37 @@ class ManagedAgentNotFound(Exception):
     pass
 
 
+class _OwnedDBContext:
+    def __init__(self, provider):
+        self.context = asynccontextmanager(provider)()
+
+    async def __aenter__(self):
+        return await self.context.__aenter__()
+
+    async def __aexit__(self, *args):
+        # Registered first, so all MCP scopes and HTTP close operations have
+        # exited before this new shield. SQLAlchemy's provider exit shields a
+        # library-owned session.close task; an expired outer cleanup deadline
+        # must not detach that task by interrupting its join. The outer scope
+        # still records its deadline miss and prevents a successful result.
+        with anyio.CancelScope(shield=True):
+            # This provider owns session lifetime, without commit-on-success
+            # policy. Resume its yield normally so the production async-for
+            # relay drains and joins its inner provider. Throwing an earlier
+            # SDK close error into the relay would detach that inner generator's
+            # finalization. False leaves that earlier error with ExitStack.
+            await self.context.__aexit__(None, None, None)
+        return False
+
+
 async def _close_client(client):
     # Registered before MCP scopes; called only after they exit in reverse order.
+    if isinstance(client, AsyncOpenAI):
+        # OpenAI2.26.0's SDK-owned HTTPX client must be retained before SDK.close
+        # marks it CLOSED/removes pool connections. That ABI is pinned as well.
+        await close_managed_helper(client._client, initial_close=client.close)
+        return
+    # Scripted model test doubles have no SDK-owned HTTP transport.
     with anyio.CancelScope(shield=True, deadline=anyio.current_time() + 2) as scope:
         await client.close()
     if scope.cancel_called:
@@ -41,7 +72,7 @@ async def execute_managed_owned(request, grant, runtime, db_provider):
     with anyio.CancelScope(shield=True) as lifecycle:
         try:
             runtime.check()
-            db = await runtime.stack.enter_async_context(asynccontextmanager(db_provider)())
+            db = await runtime.stack.enter_async_context(_OwnedDBContext(db_provider))
             runtime.check()
             service = LLMService()
             agent = await runtime.operation(service.agent_service.get_agent_by_id(

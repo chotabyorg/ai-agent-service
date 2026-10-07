@@ -124,7 +124,42 @@ it never cancels the owner task or closes resources from another task. Repeated
 cancellation still joins the same owner. Every runtime await uses one monotonic
 work deadline (`MANAGED_AI_EXECUTION_SECONDS`, default90, validated1..240).
 Direct AsyncOpenAI owns/closes its HTTP pool, finite timeout and max_retries0.
-Independent KB/privacy clients close in bounded finally blocks.
+Independent KB/privacy clients use `trust_env=false` and close in their owner's
+finally blocks. KB retrieval/formatting stays fail-open; resource cleanup is a
+separate certainty requirement. A raised or expired two-second helper close stops
+execution with TOOL_CLEANUP_FAILED (FAILED before any tool, UNKNOWN afterward),
+even if the retained final teardown subsequently succeeds. No model/tool/HTTP
+request is repeated for cleanup.
+
+HTTPX0.28.1 and httpcore1.0.9 are pinned to the already inspected versions. Their
+client/pool bookkeeping can report closed/remove connections before socket close
+finishes. The narrow managed cleanup module retains the HTTP/1 pool and actual
+AnyIO socket close handles before its first await, including the socket underlying
+TLS. A failed finite close joins those retained streams/pools in the same owner;
+it does not rely on client.is_closed or repeat a potentially no-op client.aclose.
+Legacy HTTP helper defaults/context manager/lifetime remain unchanged. No environment
+proxy pool is used in managed helper requests. The final retained join, like the
+SDK's final process reap, cannot promise an absolute bound for an uncooperative
+resource/OS; the owner remains joined instead of abandoning resources.
+
+The direct managed OpenAI client uses the same retained HTTP teardown after MCP
+scopes exit. OpenAI2.26.0 is also pinned to the inspected existing runtime because
+that narrow seam reads its SDK-owned HTTPX client before SDK.close. The initial
+SDK close still runs; a failure/deadline subsequently joins actual retained sockets,
+connection handles and pools in the same owner and returns TOOL_CLEANUP_FAILED.
+Proxy connection wrappers are traversed to their native HTTP/1 stream when present.
+SDK/client closed flags and an emptied pool alone are never cleanup evidence.
+The legacy direct SDK constructor, retry/default behavior and lifetime are unchanged.
+The managed DB provider is the first resource registered and the last to exit.
+After all MCP/HTTP scopes unwind, its exit joins SQLAlchemy's shielded session-close
+task under a final owner shield. An already expired outer cleanup budget cannot
+detach that close task or release the dependency early. The outer budget miss still
+prevents a successful result. This final retained provider join also has no absolute
+bound if the underlying resource remains uncooperative; the owner stays joined.
+The lifetime-only DB provider is resumed normally so the production async-for
+relay drains its inner session provider; an earlier SDK cleanup exception stays
+with the ExitStack instead of being thrown into that relay. Managed session exit
+does not commit a transaction. Legacy dependency behavior is unchanged.
 
 Pinned MCP1.26.0 and AnyIO4.12.1 scopes enter/exit in the same owner and strict LIFO.
 One lifecycle shield enters before any SDK scope. The owner's ExitStack registers

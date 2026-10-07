@@ -9,7 +9,6 @@ from types import SimpleNamespace
 from typing import Any
 from uuid import UUID
 
-import anyio
 import httpx
 from openai import (
     APIConnectionError,
@@ -24,6 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from mcp_clients.manager import MCPManager, MCPPreAcquisitionError
 from core.managed_security import managed_logging
 from services.managed_tools import ManagedExecutionError, inspect_managed_tool_result
+from services.managed_http_cleanup import close_managed_helper
 from services.chat_diagnostics import ChatFailureStage, set_chat_failure_stage
 from services.agent_service import AgentService
 from services.encryption_service import EncryptionService
@@ -138,12 +138,11 @@ class PrivacyProxyCompletions:
 
         try:
             if managed_logging.get():
-                client = httpx.AsyncClient(timeout=self.privacy_filter_timeout_seconds)
+                client = httpx.AsyncClient(timeout=self.privacy_filter_timeout_seconds, trust_env=False)
                 try:
                     response = await client.post(url, headers=headers, json=payload)
                 finally:
-                    with anyio.CancelScope(shield=True, deadline=anyio.current_time() + 2):
-                        await client.aclose()
+                    await close_managed_helper(client)
             else:
                 async with httpx.AsyncClient(timeout=self.privacy_filter_timeout_seconds) as client:
                     response = await client.post(url, headers=headers, json=payload)
@@ -257,6 +256,7 @@ class LLMService:
                 base_url=self.settings.knowledge_base_service_url,
                 service_token=self.settings.internal_api_token,
                 timeout=self.settings.knowledge_base_timeout_seconds,
+                **({"managed": True} if runtime else {}),
             )
             try:
                 pending = client.retrieve_context(
@@ -266,11 +266,7 @@ class LLMService:
                 )
                 response = await runtime.operation(pending) if runtime else await pending
             finally:
-                if runtime:
-                    with anyio.CancelScope(shield=True, deadline=anyio.current_time() + 2):
-                        await client.aclose()
-                else:
-                    await client.aclose()
+                await client.aclose()
 
             if not response.contexts:
                 return None
