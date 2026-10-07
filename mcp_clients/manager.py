@@ -11,6 +11,11 @@ from mcp.client.session import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
 
 from core.config import get_settings
+from core.managed_security import MANAGED_SECRET_ENV_KEYS
+
+
+class MCPPreAcquisitionError(ValueError):
+    """Unsupported service or missing credential before any resource acquisition."""
 
 
 def _set_chat_failure_stage(stage: str) -> None:
@@ -46,7 +51,8 @@ class MCPManager:
         return config
 
     def _build_env(self) -> dict[str, str]:
-        env = os.environ.copy()
+        env = {key: value for key, value in os.environ.items()
+               if key.lower() not in MANAGED_SECRET_ENV_KEYS}
         config = self._get_service_config()
         for cred_key, env_key in config["env_mapping"].items():
             value = self.credentials.get(cred_key)
@@ -57,7 +63,37 @@ class MCPManager:
             value = self.credentials.get(cred_key)
             if value:
                 env[env_key] = str(value)
+        if any(key.lower() in MANAGED_SECRET_ENV_KEYS for key in env):
+            raise RuntimeError("MCP environment configuration is invalid")
         return env
+
+    async def acquire_owned(self, stack: AsyncExitStack, runtime) -> "MCPManager":
+        """Register each SDK resource in its owner task before setup awaits.
+
+        ValueError during parameter validation is the sole skippable stage. Failed
+        post-spawn initialize/list/metadata unwinds through the owner's stack.
+        """
+        try:
+            server_params = self._build_server_params()
+        except ValueError:
+            raise MCPPreAcquisitionError("MCP configuration unavailable") from None
+        runtime.check()
+        errlog = open(os.devnull, "w", encoding="utf-8")
+        stack.callback(errlog.close)
+        # Clear fields after transport/session exits, also on partial acquisition.
+        # A separate finally callback is kept outside the SDK scope callbacks.
+        runtime.managers.append(self)
+        runtime.started_stdio_count += 1
+        read_stream, write_stream = await stack.enter_async_context(
+            stdio_client(server_params, errlog=errlog)
+        )
+        runtime.check()
+        self.session = await stack.enter_async_context(ClientSession(read_stream, write_stream))
+        runtime.check()
+        await runtime.operation(self.session.initialize())
+        server_tools = await runtime.operation(self.session.list_tools())
+        self._tools = list(server_tools.tools)
+        return self
 
     def _get_server_script_path(self) -> Path:
         config = self._get_service_config()

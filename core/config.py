@@ -2,7 +2,7 @@
 
 from functools import lru_cache
 
-from pydantic import Field, SecretStr, model_validator
+from pydantic import Field, PrivateAttr, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -58,6 +58,30 @@ class Settings(BaseSettings):
     # existing management endpoints.
     chat_s2s_token: SecretStr = Field(default="")
     chat_s2s_auth_required: bool = Field(default=False)
+
+    # Optional and fail-closed. No production registration is created by this code.
+    managed_ai_auth_principals: SecretStr = Field(default="", repr=False)
+    managed_ai_execution_seconds: float = Field(default=90.0, ge=1, le=240, allow_inf_nan=False)
+    managed_ai_context_bytes: int = Field(default=131072, ge=1024, le=1048576)
+    _managed_principals: tuple = PrivateAttr(default=())
+
+    @model_validator(mode="after")
+    def validate_managed_registry(self) -> "Settings":
+        from core.managed_security import parse_principals
+
+        try:
+            self._managed_principals = parse_principals(
+                self.managed_ai_auth_principals.get_secret_value(),
+                (self.chat_s2s_token.get_secret_value(), self.internal_api_token),
+            )
+        except ValueError:
+            # RuntimeError avoids Pydantic's startup rendering of rejected env input.
+            raise RuntimeError("Invalid managed AI authentication configuration") from None
+        return self
+
+    @property
+    def managed_principals(self) -> tuple:
+        return self._managed_principals
 
     @model_validator(mode="after")
     def require_chat_s2s_token_when_auth_is_strict(self) -> "Settings":

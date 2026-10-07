@@ -6,6 +6,8 @@ from uuid import UUID
 import httpx
 from pydantic import BaseModel, Field, ValidationError
 
+from services.managed_http_cleanup import close_managed_helper, own_managed_http
+
 
 class KnowledgeBaseClientError(Exception):
     """Base error for knowledge-base-service client failures."""
@@ -45,13 +47,21 @@ class KnowledgeBaseClient:
         service_token: str,
         timeout: float = 2.0,
         transport: httpx.AsyncBaseTransport | None = None,
+        managed: bool = False,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._service_token = service_token
-        self._client = httpx.AsyncClient(timeout=timeout, transport=transport)
+        self._managed = managed
+        self._client = httpx.AsyncClient(timeout=timeout, transport=transport,
+                                        **({"trust_env": False} if managed else {}))
+        if managed:
+            own_managed_http(self._client)
 
     async def aclose(self) -> None:
-        await self._client.aclose()
+        if self._managed:
+            await close_managed_helper(self._client)
+        else:
+            await self._client.aclose()
 
     async def retrieve_context(
         self,

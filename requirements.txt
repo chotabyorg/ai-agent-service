@@ -8,8 +8,9 @@ pydantic
 pydantic-settings
 python-dotenv
 redis
-openai
+openai==2.26.0
 mcp==1.26.0
+anyio==4.12.1
 fast-bitrix24
 google-api-python-client
 google-auth
@@ -17,7 +18,8 @@ google-auth-httplib2
 google-auth-oauthlib
 pytest
 pytest-asyncio
-httpx
+httpx==0.28.1
+httpcore==1.0.9
 fakeredis
 testcontainers[postgresql]
 pytz
