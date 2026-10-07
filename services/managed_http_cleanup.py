@@ -6,8 +6,14 @@ socket owners before either operation. These inspected private seams require
 the matching requirements pins, and are confined to this module.
 """
 
+import asyncio
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
+from typing import Any
+
 import anyio
 import httpx
+from anyio._backends._asyncio import SocketStream, UNIXSocketStream
 from importlib.metadata import version
 from httpcore._backends.auto import AutoBackend
 from httpcore._backends.anyio import AnyIOBackend, AnyIOStream
@@ -77,6 +83,14 @@ class _OwnedBackend(AsyncNetworkBackend):
         await self.native.sleep(seconds)
 
 
+@dataclass(frozen=True)
+class _NativeSocket:
+    close: Callable[[], Awaitable[None]]
+    abort: Callable[[], None]
+    socket: Any
+    buffer_size: Callable[[], int]
+
+
 class _HTTPResourceOwner:
     def __init__(self):
         self.sockets = {}
@@ -85,8 +99,44 @@ class _HTTPResourceOwner:
     def retain(self, stream):
         while hasattr(stream, "transport_stream"):
             stream = stream.transport_stream
-        # Bound method retains the stream object, never just a reusable FD.
-        self.sockets.setdefault(id(stream), stream.aclose)
+        if isinstance(stream, SocketStream):
+            # Native AnyIO owns the actual loop transport. Uvicorn's existing
+            # uvloop TCPTransport implements that protocol without inheriting
+            # asyncio.Transport; the pinned native stream/backend is the guard.
+            transport = stream._transport
+            socket = transport.get_extra_info("socket")
+            abort = transport.abort
+            buffer_size = transport.get_write_buffer_size
+        elif isinstance(stream, UNIXSocketStream):
+            # Pinned native Unix streams close the captured socket synchronously;
+            # they do not use asyncio's graceful buffered transport close.
+            socket = stream._raw_socket
+            abort = socket.close
+            buffer_size = lambda: 0
+        else:
+            raise ManagedExecutionError("TOOL_CLEANUP_FAILED")
+        if socket is None:
+            raise ManagedExecutionError("TOOL_CLEANUP_FAILED")
+        # Capture the actual native owner, never a reusable descriptor number.
+        self.sockets.setdefault(id(stream), _NativeSocket(stream.aclose, abort, socket, buffer_size))
+
+    async def aclose(self):
+        # Final join runs in the retained task after operation scopes unwind.
+        with anyio.CancelScope(shield=True):
+            for resource in reversed(list(self.sockets.values())):
+                try:
+                    await resource.close()
+                except (Exception, asyncio.CancelledError):
+                    self.failed = True
+                finally:
+                    # Native aclose can skip abort on an already-closing stream
+                    # after its own error/deadline at the graceful checkpoint.
+                    # Always finish and join the captured actual physical owner.
+                    resource.abort()
+                    # uvloop can close its socket one callback before discarding
+                    # the native pending write buffer. Join both actual states.
+                    while resource.socket.fileno() != -1 or resource.buffer_size() != 0:
+                        await anyio.sleep(0)
 
 
 def own_managed_http(client):
@@ -117,9 +167,10 @@ def own_managed_http(client):
 
 
 async def close_managed_helper(client: httpx.AsyncClient, *, initial_close=None) -> None:
+    owner = getattr(client, "_managed_http_owner", None) or _HTTPResourceOwner()
     transports = [client._transport, *client._mounts.values()]
     transports = list({id(value): value for value in transports if value is not None}.values())
-    pools, socket_closers, connection_closers, other_transports = [], [], [], []
+    pools, connection_closers, other_transports = [], [], []
     for transport in transports:
         if not isinstance(transport, httpx.AsyncHTTPTransport):
             # In-process MockTransport tests have no sockets/pool.
@@ -137,19 +188,15 @@ async def close_managed_helper(client: httpx.AsyncClient, *, initial_close=None)
             if not hasattr(protocol, "_network_stream"):
                 continue
             stream = protocol._network_stream._stream
-            # On failed graceful TLS close, join the underlying socket owner.
-            while hasattr(stream, "transport_stream"):
-                stream = stream.transport_stream
-            socket_closers.append(stream.aclose)
+            owner.retain(stream)
 
-    owner = getattr(client, "_managed_http_owner", None)
-    failed = bool(owner and owner.failed)
+    failed = owner.failed
     with anyio.CancelScope(shield=True, deadline=anyio.current_time() + 2) as scope:
         try:
             await (initial_close or client.aclose)()
         except BaseException:
             failed = True
-    failed = failed or scope.cancel_called or bool(owner and owner.failed)
+    failed = failed or scope.cancel_called or owner.failed
     # No client.aclose retry: its CLOSED flag may make it a no-op. Finish the
     # retained actual socket/pool ownership in this same task, even if pool
     # bookkeeping was already emptied. Never repeat an HTTP/model/tool request.
@@ -158,11 +205,7 @@ async def close_managed_helper(client: httpx.AsyncClient, *, initial_close=None)
     with anyio.CancelScope(shield=True):
         # Always join acquisition owners. A cancelled native TLS handshake can
         # leave no protocol/pool connection at all, even with successful aclose.
-        if owner:
-            for close in reversed(list(owner.sockets.values())):
-                await close()
-        for close in socket_closers:
-            await close()
+        await owner.aclose()
         for close in connection_closers:
             try:
                 await close()
@@ -182,5 +225,5 @@ async def close_managed_helper(client: httpx.AsyncClient, *, initial_close=None)
                 pass
     # Recovery releases resources, but does not turn failed finite close into
     # a successful execution or permit processing another model/tool response.
-    if failed:
+    if failed or owner.failed:
         raise ManagedExecutionError("TOOL_CLEANUP_FAILED") from None

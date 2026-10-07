@@ -135,14 +135,19 @@ HTTPX0.28.1 and httpcore1.0.9 are pinned to the already inspected versions. Thei
 client/pool bookkeeping can report closed/remove connections before socket close
 finishes. Before any HTTP operation, the narrow managed cleanup module installs a
 request-local backend/stream owner on every native HTTP/1 pool, including default
-forward and CONNECT proxy mounts. It retains actual AnyIO socket objects/bound
-close handles immediately after TCP/Unix acquisition, with no await before retention,
+forward and CONNECT proxy mounts. It retains actual AnyIO stream close handles,
+native transport abort handles and captured socket objects immediately after
+TCP/Unix acquisition, with no await before retention,
 and retains them across TLS setup. A malformed header, read/body failure or cancelled
 TLS handshake can therefore discard pool/protocol bookkeeping without losing the
 actual owner. Operation-time stream close also has a two-second detection window;
 its error/deadline marks cleanup uncertain and prevents later model/tool work.
 Every final close joins acquired streams even when ordinary client.close succeeds
-against an empty pool. A failed finite close joins retained streams/pools in the same owner;
+against an empty pool. It always aborts the captured native transport and joins
+the captured socket's physical closure and empty native write buffer, including already-closing state
+left by the native close checkpoint's own error/deadline. Native Unix closure uses
+its captured socket owner. No bare descriptor integer is closed. A failed finite
+close joins all retained streams/pools in the same owner;
 it does not rely on client.is_closed or repeat a potentially no-op client.aclose.
 Legacy HTTP helper defaults/context manager/lifetime remain unchanged. No environment
 proxy pool is used in managed helper requests. The final retained join, like the
