@@ -39,7 +39,7 @@ def _restore_env(previous):
 def test_business_migration_preserves_current_main_data_and_refuses_populated_downgrade(postgres_url, migrated_postgres):
     project = Path(__file__).resolve().parents[1]
     config = Config(str(project / "alembic.ini"))
-    assert ScriptDirectory.from_config(config).get_heads() == ["d5e6f7g8h9i0"]
+    assert ScriptDirectory.from_config(config).get_heads() == ["bv2_20261008_01"]
     previous = _set_postgres_env(postgres_url)
     get_settings.cache_clear()
     async_url = migrated_postgres
@@ -62,7 +62,7 @@ def test_business_migration_preserves_current_main_data_and_refuses_populated_do
                     assert row == (True, "encrypted-test-value")
                     assert await connection.scalar(text("SELECT count(*) FROM agent_credentials WHERE agent_id=:id"), {"id": agent_id}) == 1
                     assert await connection.scalar(text("SELECT count(*) FROM conversation_sessions WHERE id=:id"), {"id": session_id}) == 1
-                    assert await connection.scalar(text("SELECT version_num FROM alembic_version")) == "d5e6f7g8h9i0"
+                    assert await connection.scalar(text("SELECT version_num FROM alembic_version")) == "bv2_20261008_01"
                     await connection.execute(text("INSERT INTO business_bindings(id,owner_id,agent_owner_id,agent_id,integration_id,channel,adapter_id,connection_id,authorization_generation,context_generation,catalog_revision,enabled_capabilities,active) "
                         "VALUES (:binding,'retained',:owner,:id,:integration,'TELEGRAM','fake',:connection,1,1,:hash,'[]',false)"),
                         {"binding": uuid4(), "owner": owner_id, "id": agent_id, "integration": uuid4(), "connection": uuid4(), "hash": "a" * 64})

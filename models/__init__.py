@@ -2,6 +2,7 @@
 
 from models.agent import AgentCredentials, AgentTemplate
 from models.session import ConversationSession
+from models.business_connection import BusinessConnection
 from models.business import (BusinessBinding, BusinessOperation, BusinessPlan, BusinessScope,
                              BusinessTurnContext, BusinessTurnPlanLink)
 

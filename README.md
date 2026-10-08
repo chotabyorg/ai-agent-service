@@ -1,5 +1,10 @@
 # AI Agent Service
 
+Business V2 source adds a gated real ChotaCRM registry on the current managed
+foundation. See [current business capabilities](docs/business-capabilities-current.md)
+and [Prompt Runtime V2](docs/prompt-runtime-v2.md). Legacy channels remain unchanged;
+enabling owner CRM settings does not migrate a channel or deploy the feature.
+
 ![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white)
 ![FastAPI](https://img.shields.io/badge/FastAPI-REST-009688?logo=fastapi&logoColor=white)
 ![PostgreSQL](https://img.shields.io/badge/PostgreSQL-config%20storage-4169E1?logo=postgresql&logoColor=white)
