@@ -11,6 +11,31 @@ from business_capabilities.registry import DEFAULTS
 from services.business_connection_service import BusinessConnectionService
 
 
+@pytest.mark.parametrize('origin,allowed', [
+    ('https://agents.chota.by', True), ('https://chota.by', True),
+    ('https://evil.example', False), ('https://agents.chota.by.evil.example', False),
+    ('null', False), ('', False),
+])
+def test_default_owner_mutation_origins(monkeypatch, origin, allowed):
+    from fastapi import HTTPException
+    from starlette.requests import Request
+    from api.v1 import business_tools
+    from core.config import Settings
+
+    # Inspect the actual shipped default independently of developer .env files.
+    settings = SimpleNamespace(business_config_origins=Settings.model_fields['business_config_origins'].default_factory())
+    monkeypatch.setattr(business_tools, 'get_settings', lambda: settings)
+    request = Request({'type': 'http', 'headers': [
+        (b'cookie', b'access_token=synthetic'), (b'origin', origin.encode()),
+    ]})
+    if allowed:
+        assert business_tools.browser(request, mutation=True) == 'access_token=synthetic'
+    else:
+        with pytest.raises(HTTPException) as error:
+            business_tools.browser(request, mutation=True)
+        assert error.value.status_code == 403
+
+
 class Provider:
     def __init__(self, factory):
         self.factory = factory
