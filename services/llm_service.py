@@ -32,6 +32,7 @@ from services.history_service import HistoryService
 from services.knowledge_base_client import KnowledgeBaseClient
 from services.knowledge_base_prompt import build_knowledge_base_system_message
 from services.prompt_builder import ChatContext, PromptBuilder
+from services.prompt_composer import PromptComposer, RuntimeCapabilityContext
 from services.session_service import SessionService
 
 logger = logging.getLogger(__name__)
@@ -209,6 +210,7 @@ class LLMService:
         self.agent_service = agent_service or AgentService()
         self.session_service = session_service or SessionService()
         self.prompt_builder = PromptBuilder()
+        self.prompt_composer = PromptComposer(self.prompt_builder)
         self.encryption_service = EncryptionService()
 
     def _get_agent_api_key(self, agent: object) -> str | None:
@@ -426,7 +428,16 @@ class LLMService:
         chat_context, query, completion_hook=None, runtime=None, selected_indices=None, simple_selection=True,
     ) -> str:
         """Shared prompt/KB/model/tools/normalization; adapters own persistence."""
-        system_prompt = self.prompt_builder.build(agent, chat_context)
+        prompt_context = None
+        if runtime and runtime.business is not None:
+            project = getattr(runtime.business, "prompt_context", None)
+            if callable(project):
+                prompt_context = RuntimeCapabilityContext.model_validate(
+                    await runtime.operation(project())
+                )
+        system_prompt = self.prompt_composer.compose(
+            agent, chat_context, runtime_context=prompt_context,
+        )
         knowledge_base_message = await self._build_knowledge_base_message(
             agent=agent,
             query=query,
@@ -437,7 +448,7 @@ class LLMService:
             {"role": "system", "content": system_prompt},
         ]
         if knowledge_base_message:
-            messages.append({"role": "system", "content": knowledge_base_message})
+            messages.append({"role": "system", "content": self.prompt_composer.knowledge_section(knowledge_base_message)})
         messages.extend(communication)
 
         executed_calls: set[str] = set()

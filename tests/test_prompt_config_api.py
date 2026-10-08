@@ -58,6 +58,8 @@ async def test_get_prompt_config_returns_config_for_structured_agent(
     body = resp.json()
     assert body["prompt_config"] is not None
     assert body["prompt_config"]["company"]["name"] == "TestCo"
+    # Reading an old saved config must not rewrite its compatibility field.
+    assert body["prompt_config"]["capabilities"] == ["Консультация"]
 
 
 @pytest.mark.integration
@@ -91,6 +93,7 @@ async def test_put_prompt_config_updates_config_and_rebuilds_system_prompt(
     )
     assert resp.status_code == 200
     assert resp.json()["prompt_config"]["company"]["name"] == "TestCo"
+    assert resp.json()["prompt_config"]["capabilities"] == ["Консультация"]
 
     # Verify system_prompt was rebuilt
     agent_resp = await api_client.get(
@@ -100,6 +103,33 @@ async def test_put_prompt_config_updates_config_and_rebuilds_system_prompt(
     rebuilt_prompt = agent_resp.json()["system_prompt"]
     assert "<identity>" in rebuilt_prompt
     assert "TestCo" in rebuilt_prompt
+    assert "Текущая дата" not in rebuilt_prompt
+
+
+@pytest.mark.integration
+async def test_explicit_empty_responsibilities_wins_legacy_alias(api_client, db_session, fake_redis):
+    headers = build_headers()
+    agent = await create_agent(api_client, headers)
+    response = await api_client.put(
+        f"/v1/agents/{agent['id']}/prompt-config",
+        json={**MINIMAL_PROMPT_CONFIG, "responsibilities": []}, headers=headers,
+    )
+    assert response.status_code == 200
+    assert response.json()["prompt_config"]["responsibilities"] == []
+    preview = await api_client.get(f"/v1/agents/{agent['id']}/prompt-preview", headers=headers)
+    assert "Консультация" not in preview.json()["rendered_prompt"]
+    assert preview.json()["rendered_prompt"].startswith("<platform_policy>")
+
+
+@pytest.mark.integration
+async def test_raw_legacy_preview_always_has_policy(api_client, db_session, fake_redis):
+    headers = build_headers()
+    agent = await create_agent(api_client, headers)
+    response = await api_client.get(f"/v1/agents/{agent['id']}/prompt-preview", headers=headers)
+    assert response.status_code == 200
+    rendered = response.json()["rendered_prompt"]
+    assert rendered.startswith("<platform_policy>")
+    assert "Be concise and helpful." in rendered
 
 
 @pytest.mark.integration

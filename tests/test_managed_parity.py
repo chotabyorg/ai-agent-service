@@ -15,7 +15,7 @@ from services.managed_runtime import privacy_id
 from models.agent import AgentCredentials, AgentTemplate
 from schemas.managed_turn import ManagedTurnRequest
 from services.credentials_cipher import encrypt_credentials
-from services.prompt_builder import PromptBuilder
+from services.prompt_composer import PromptComposer
 from tests.fakes import build_llm_response, build_tool_call, build_tool_result
 from tests.test_chat_flow import FakeKnowledgeBaseClient, store_credentials
 from tests.test_managed_turns import SENTINEL, execute, model, setup, tools
@@ -28,7 +28,7 @@ async def test_shared_kb_prompt_model_and_tool_continuation_golden_parity(api_cl
     agent,value=await setup(api_client,db_session,monkeypatch,channel=canonical)
     await store_credentials(api_client,agent["id"],"bitrix",{"webhook_url":"https://synthetic.invalid/rest"},owner_id=UUID(agent["user_id"]))
     tools.result=build_tool_result('{"result":[{"ID":"fake"}]}')
-    monkeypatch.setattr(PromptBuilder,"build",lambda self,agent,context: "trusted channel="+context.channel)
+    monkeypatch.setattr(PromptComposer,"_channel_and_time",lambda self,agent,context: "trusted channel="+context.channel)
     FakeKnowledgeBaseClient.reset()
     FakeKnowledgeBaseClient.contexts=[SimpleNamespace(content="Known company fact",source_filename="fixture.pdf",chunk_index=2,score=.9,metadata={"hidden":SENTINEL})]
     monkeypatch.setattr(llm_module,"KnowledgeBaseClient",FakeKnowledgeBaseClient)
@@ -52,7 +52,8 @@ async def test_shared_kb_prompt_model_and_tool_continuation_golden_parity(api_cl
     assert len(calls) == 3 and calls[2]["tools"] is None
     assert len(tools.calls) == 1
     messages=calls[0]["messages"]
-    assert messages[0]["content"]=="trusted channel="+channel
+    assert "trusted channel="+channel in messages[0]["content"]
+    assert messages[0]["content"].startswith("<platform_policy>")
     assert messages[1]["role"]=="system" and "Known company fact" in messages[1]["content"]
     assert SENTINEL not in json.dumps(calls)
     assert [call["query"] for call in FakeKnowledgeBaseClient.calls]==[value["messages"][0]["text"]]*2
