@@ -51,8 +51,9 @@ class MCPManager:
         return config
 
     def _build_env(self) -> dict[str, str]:
+        denied = MANAGED_SECRET_ENV_KEYS | {'business_crm_private_key'}
         env = {key: value for key, value in os.environ.items()
-               if key.lower() not in MANAGED_SECRET_ENV_KEYS}
+               if key.lower() not in denied}
         config = self._get_service_config()
         for cred_key, env_key in config["env_mapping"].items():
             value = self.credentials.get(cred_key)
@@ -63,7 +64,7 @@ class MCPManager:
             value = self.credentials.get(cred_key)
             if value:
                 env[env_key] = str(value)
-        if any(key.lower() in MANAGED_SECRET_ENV_KEYS for key in env):
+        if any(key.lower() in denied for key in env):
             raise RuntimeError("MCP environment configuration is invalid")
         return env
 

@@ -53,6 +53,13 @@ class Settings(BaseSettings):
 
     internal_api_token: str = Field(default="")
 
+    business_capabilities_enabled: bool = False
+    business_crm_url: str = 'http://chota-crm-service:8000'
+    business_crm_private_key: SecretStr = Field(default='', repr=False)
+    business_crm_key_id: str = ''
+    business_crm_timeout_seconds: float = Field(default=5.0, ge=1, le=30)
+    business_config_origins: list[str] = Field(default_factory=lambda: ['https://chota.by'])
+
     # Dedicated credential for callers of /v1/chat/completions. It is
     # intentionally independent from INTERNAL_API_TOKEN, which protects the
     # existing management endpoints.

@@ -217,10 +217,14 @@ class BusinessRepository:
             .with_for_update(nowait=session.info.get("business_nowait", False)).execution_options(populate_existing=True))
         if agent is None or not agent.is_active:
             raise BusinessSafetyError("AUTHORITY_DENIED")
+        from business_capabilities.connections import lock_agent_connection, validate_connection_authority
+        await lock_agent_connection(session, value.agent_id)
         binding = await session.scalar(select(BusinessBinding).filter_by(**values, active=True)
                                        .with_for_update(nowait=session.info.get("business_nowait", False)).execution_options(populate_existing=True))
         if binding is None:
             raise BusinessSafetyError("BINDING_UNAVAILABLE")
+        if binding.adapter_id == 'chotacrm':
+            await validate_connection_authority(session, binding)
         scope = await self._scope_query(session, value, grant)
         if scope is None and create_scope:
             scope = BusinessScope(id=uuid4(), conversation_id=value.conversation_id, **values)
@@ -565,6 +569,84 @@ class BusinessRepository:
                 BusinessPlan.id == plan_id, BusinessPlan.scope_id == scope.id))
             return await self._snapshot(session, scope, plan) if plan else None
 
+    @staticmethod
+    async def _latest_plan(session, scope_id):
+        # Canonical input order wins over worker timing. Include terminal and
+        # cancelled plans: a newer intent must not resurrect an older proposal.
+        return await session.scalar(select(BusinessPlan).join(BusinessTurnContext,
+            (BusinessTurnContext.scope_id == BusinessPlan.scope_id) &
+            (BusinessTurnContext.turn_id == BusinessPlan.origin_turn_id))
+            .where(BusinessPlan.scope_id == scope_id)
+            .order_by(BusinessTurnContext.input_last_sequence.desc(),
+                      BusinessPlan.created_at.desc(), BusinessPlan.id.desc()).limit(1))
+
+    @staticmethod
+    def _semantic_inputs(request, origin):
+        selected = request.messages[request.input_first_sequence - 1:request.input_last_sequence]
+        if (origin is None or request.turn_id == origin.turn_id
+                or request.input_first_sequence <= origin.input_last_sequence
+                or not selected or any(m.actor != "CUSTOMER" or m.direction != "INBOUND"
+                    or m.content_type != "TEXT" or str(m.id) in origin.selected_input_message_ids
+                    for m in selected)):
+            raise BusinessSafetyError("CONFIRMATION_REQUIRED")
+        return selected
+
+    async def pending_proposal(self, request, grant, registration):
+        """Read pending public context without selecting its refs for this Turn."""
+        async with self._session() as session:
+            async with session.begin():
+                binding, scope = await self._authority(session, request, grant)
+                self._registration(binding, registration)
+                await self._turn(session, scope, request)
+                plan = await self._latest_plan(session, scope.id)
+                now = await self._clock(session)
+                if (plan is None or plan.proposal_state != "PREPARED"
+                        or not plan.requires_confirmation or plan.expires_at <= now
+                        or plan.binding_id != binding.id
+                        or plan.authorization_generation != binding.authorization_generation
+                        or plan.context_generation != binding.context_generation
+                        or plan.catalog_revision != binding.catalog_revision
+                        or await self._unresolved(session, scope.id)):
+                    return None
+                origin = await session.get(BusinessTurnContext, (scope.id, plan.origin_turn_id))
+                try:
+                    self._semantic_inputs(request, origin)
+                except BusinessSafetyError:
+                    return None
+                snapshot = await self._snapshot(session, scope, plan)
+                if any(op.status != "RESERVED" or op.command.capability not in binding.enabled_capabilities
+                       for op in snapshot.operations):
+                    return None
+                return snapshot
+
+    async def cancel_proposal(self, request, grant, plan_id, registration):
+        """Cancel only an undispatched frozen proposal; never rewrite its actions."""
+        async with self._session(decisive=True) as session:
+            async with session.begin():
+                binding, scope = await self._authority(session, request, grant)
+                self._registration(binding, registration)
+                await self._turn(session, scope, request)
+                plan = await session.scalar(select(BusinessPlan).where(
+                    BusinessPlan.id == plan_id, BusinessPlan.scope_id == scope.id)
+                    .with_for_update(nowait=True).execution_options(populate_existing=True))
+                if plan is None:
+                    raise BusinessSafetyError("PLAN_DENIED")
+                origin = await session.get(BusinessTurnContext, (scope.id, plan.origin_turn_id))
+                self._semantic_inputs(request, origin)
+                latest = await self._latest_plan(session, scope.id)
+                if latest is None or latest.id != plan.id:
+                    raise BusinessSafetyError("STALE_CONFIRMATION")
+                snapshot = await self._snapshot(session, scope, plan)
+                if plan.proposal_state not in {"PREPARED", "CANCELLED"} or any(
+                        op.status != "RESERVED" for op in snapshot.operations):
+                    raise BusinessSafetyError("PLAN_DENIED")
+                if await self._unresolved(session, scope.id):
+                    raise BusinessSafetyError("BLOCKED_UNRESOLVED_EFFECT", processing_status="UNKNOWN")
+                plan.proposal_state = "CANCELLED"
+                # No link: this Turn can now freeze a replacement, but cannot
+                # confirm it until a later canonical customer Turn.
+                await session.flush()
+
     async def select_recovery_plan(self, request, grant, plan_id):
         async with self._session() as session:
             async with session.begin():
@@ -761,17 +843,19 @@ class BusinessRepository:
                     result = DispatchDecision(token, reason, await self._snapshot(session, scope, plan))
             return result
 
-    async def confirm_plan(self, request, grant, plan_id, registration, facts_resolver):
+    async def confirm_plan(self, request, grant, plan_id, registration, facts_resolver, *, semantic=False):
+        if semantic and getattr(registration, "confirmation_mode", "REFERENCE_V1") != "SEMANTIC_V1":
+            raise BusinessSafetyError("CONFIRMATION_REQUIRED")
         probe = await self._admission_probe(request, grant, plan_id)
         facts = await self._resolve_fresh(facts_resolver)
         try:
-            return await self._confirm_plan(request, grant, plan_id, registration, facts, probe=probe)
+            return await self._confirm_plan(request, grant, plan_id, registration, facts, probe=probe, semantic=semantic)
         except DBAPIError as error:
             if not self._contention(error):
                 raise
             raise BusinessSafetyError("ADMISSION_CONTENDED", processing_status="UNKNOWN") from None
 
-    async def _confirm_plan(self, request, grant, plan_id, registration, facts, *, probe):
+    async def _confirm_plan(self, request, grant, plan_id, registration, facts, *, probe, semantic=False):
         async with self._session(decisive=True) as session:
             async with session.begin():
                 binding, scope = await self._authority(session, request, grant)
@@ -804,8 +888,14 @@ class BusinessRepository:
                 else:
                     origin = await session.get(BusinessTurnContext, (scope.id, plan.origin_turn_id))
                     selected = request.messages[request.input_first_sequence - 1:request.input_last_sequence]
-                    valid = [m for m in selected if m.actor == "CUSTOMER" and m.direction == "INBOUND" and m.content_type == "TEXT"
-                             and m.text.strip(" ") in {"confirm " + str(plan.id), "подтверждаю " + str(plan.id)}]
+                    if semantic:
+                        latest = await self._latest_plan(session, scope.id)
+                        if latest is None or latest.id != plan.id:
+                            raise BusinessSafetyError("STALE_CONFIRMATION")
+                        valid = self._semantic_inputs(request, origin)
+                    else:
+                        valid = [m for m in selected if m.actor == "CUSTOMER" and m.direction == "INBOUND" and m.content_type == "TEXT"
+                                 and m.text.strip(" ") in {"confirm " + str(plan.id), "подтверждаю " + str(plan.id)}]
                     if (request.turn_id == plan.origin_turn_id or request.input_first_sequence <= origin.input_last_sequence
                             or not valid or any(str(m.id) in origin.selected_input_message_ids for m in selected)):
                         raise BusinessSafetyError("CONFIRMATION_REQUIRED")
@@ -818,7 +908,7 @@ class BusinessRepository:
                         plan.proposal_state = "CONFIRMED"
                         plan.confirmed_turn_id = request.turn_id
                         plan.confirmation_input_ids = [str(m.id) for m in valid]
-                        plan.confirmation_policy = CONFIRMATION_POLICY
+                        plan.confirmation_policy = "SEMANTIC_CUSTOMER_TURN_V1" if semantic else CONFIRMATION_POLICY
                         plan.confirmed_at = now
                         result = None
                 if link is None:

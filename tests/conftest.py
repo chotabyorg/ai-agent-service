@@ -128,7 +128,7 @@ async def clean_database(db_engine) -> AsyncIterator[None]:
         await connection.execute(
             text(
                 "TRUNCATE TABLE business_operations, business_turn_plan_links, business_plans, "
-                "business_turn_contexts, business_scopes, business_bindings, "
+                "business_turn_contexts, business_scopes, business_bindings, business_connections, "
                 "conversation_sessions, agent_credentials, agent_templates "
                 "RESTART IDENTITY CASCADE"
             )

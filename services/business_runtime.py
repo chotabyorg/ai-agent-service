@@ -1,6 +1,7 @@
 """Durable business execution inside the managed shared-core extension."""
 
 import asyncio
+import json
 from uuid import UUID
 
 import anyio
@@ -51,6 +52,8 @@ class BusinessRuntime:
         self.repository = BusinessRepository(session_factory)
         self.registry, self.execution = registry, execution
         self.collector = collector if collector is not None else CommittedReferenceCollector()
+        from business_capabilities.connections import sync_business_binding
+        await sync_business_binding(request, grant, session_factory, registry)
         context = await self.repository.open_context(request, grant, registry)
         self.scope, self.binding, self.registration = context if context else (None, None, None)
         # Explicit same-scope normalization, never a new provider command.
@@ -58,6 +61,7 @@ class BusinessRuntime:
             await self.repository.recover_attempts(request, grant)
         self.last_gate = None
         self.business_scope_seen = self.scope is not None
+        self._proposal_decision = None
         await self.collect_refs()
         return self
 
@@ -105,6 +109,9 @@ class BusinessRuntime:
         if gate.disposition == "INCOMPLETE" and allow_incomplete:
             return None
         if gate.disposition == "FAILED":
+            if (self.registration is not None and self.registration.adapter_id == 'chotacrm'
+                    and all(op.status == 'FAILED' for op in gate.plan.operations)):
+                return self._failed_business_draft()
             return self._halt(any(op.status in {"SUCCEEDED", "DISPATCHING", "UNKNOWN"} for op in gate.plan.operations))
         return self._halt(True)
 
@@ -127,7 +134,7 @@ class BusinessRuntime:
                                  "arguments": {"type": "object"}}}
         plan = {"type": "object", "additionalProperties": False, "required": ["actions"],
                 "properties": {"actions": {"type": "array", "minItems": 1, "maxItems": 32, "items": action}}}
-        return [
+        tools = [
             {"type": "function", "function": {"name": "business_execute_plan",
                 "description": "Execute one immutable ordered business plan. Required consent is enforced by the server.",
                 "parameters": plan}},
@@ -139,6 +146,30 @@ class BusinessRuntime:
                 "parameters": {"type": "object", "additionalProperties": False,
                                "required": ["proposal_id"], "properties": {"proposal_id": {"type": "string", "format": "uuid"}}}}},
         ]
+        if self.semantic_confirmation:
+            tools[1]["function"]["description"] = "Freeze a business proposal without provider effects. Ask naturally using its frozen summary."
+            tools[-1] = {"type": "function", "function": {
+                "name": "business_decide_proposal",
+                "description": "Interpret the complete selected customer reply about the existing frozen proposal. CONFIRM only unchanged acceptance; CHANGE for any requested modification; REJECT for cancellation; UNRELATED for other messages. Never supply new action contents.",
+                "parameters": {"type": "object", "additionalProperties": False,
+                    "required": ["proposal_id", "intent"], "properties": {
+                        "proposal_id": {"type": "string", "format": "uuid"},
+                        "intent": {"type": "string", "enum": ["CONFIRM", "REJECT", "CHANGE", "UNRELATED"]}}}}}
+        if self.registration.adapter_id == 'chotacrm':
+            from business_capabilities.runtime_tools import canonical_tools
+            return canonical_tools(self, tools)
+        return tools
+
+    @property
+    def semantic_confirmation(self):
+        return getattr(self.registration, "confirmation_mode", "REFERENCE_V1") == "SEMANTIC_V1"
+
+    async def prompt_context(self):
+        if not self.semantic_confirmation or self.scope is None:
+            return {"pending": None}
+        plan = await self.repository.pending_proposal(self.request, self.grant, self.registration)
+        return {"pending": None if plan is None else {
+            "proposal_id": str(plan.id), "summary": self._proposal_summary(plan), "confirmable": True}}
 
     async def call_tool(self, name, arguments):
         if name not in {tool["function"]["name"] for tool in self.openai_tools()}:
@@ -146,6 +177,34 @@ class BusinessRuntime:
         try:
             if not isinstance(arguments, dict):
                 raise BusinessSafetyError("ACTION_INVALID")
+            if self.registration.adapter_id == 'chotacrm':
+                from business_capabilities.runtime_tools import call_capability
+                result = await call_capability(self, name, arguments)
+                if result is not None:
+                    return result
+            if name == "business_decide_proposal":
+                if (set(arguments) != {"proposal_id", "intent"}
+                        or not isinstance(arguments["proposal_id"], str)
+                        or arguments["intent"] not in {"CONFIRM", "REJECT", "CHANGE", "UNRELATED"}):
+                    raise BusinessSafetyError("ACTION_INVALID")
+                proposal_id = UUID(arguments["proposal_id"])
+                if str(proposal_id) != arguments["proposal_id"]:
+                    raise BusinessSafetyError("ACTION_INVALID")
+                decision = (proposal_id, arguments["intent"])
+                if self._proposal_decision is not None and self._proposal_decision != decision:
+                    raise BusinessSafetyError("CONFIRMATION_CONFLICT")
+                self._proposal_decision = decision
+                if arguments["intent"] == "CONFIRM":
+                    return await self.confirm(proposal_id, semantic=True)
+                if arguments["intent"] in {"REJECT", "CHANGE"}:
+                    await self.repository.cancel_proposal(self.request, self.grant, proposal_id, self.registration)
+                    return BusinessToolResult(tool_payload={"status": "CANCELLED", "intent": arguments["intent"],
+                                                            "new_confirmation_required": arguments["intent"] == "CHANGE"})
+                # Unrelated text grants no effect or selected operation refs.
+                pending = await self.repository.pending_proposal(self.request, self.grant, self.registration)
+                if pending is None or pending.id != proposal_id:
+                    raise BusinessSafetyError("PLAN_DENIED")
+                return BusinessToolResult(tool_payload={"status": "UNCHANGED", "intent": "UNRELATED"})
             if name == "business_confirm":
                 if set(arguments) != {"proposal_id"} or not isinstance(arguments["proposal_id"], str):
                     raise BusinessSafetyError("ACTION_INVALID")
@@ -218,9 +277,38 @@ class BusinessRuntime:
                                 "arguments": {key: operation.command.arguments[key]
                                               for key in definition.public_fields
                                               if key in operation.command.arguments}})
+        if self.semantic_confirmation:
+            summary = self._proposal_summary(plan)
+            return BusinessToolResult(tool_payload={"status": "AWAITING_CONFIRMATION", "proposal_id": str(plan.id),
+                                                    "summary": summary}, safe_draft=summary + " Подтверждаете?")
         return BusinessToolResult(tool_payload={"status": "AWAITING_CONFIRMATION", "proposal_id": str(plan.id),
                                                 "actions": projections},
                                   safe_draft="Предложение подготовлено. Для подтверждения отправьте: confirm " + str(plan.id))
+
+    def _proposal_summary(self, plan):
+        if self.registration.adapter_id == 'chotacrm':
+            from business_capabilities.runtime_tools import proposal_summary
+            return proposal_summary(plan)
+        labels = {"booking.create": "Запись", "booking.reschedule": "Перенос записи",
+                  "booking.cancel": "Отмена записи", "deal.create": "Заказ", "deal.move": "Изменение заказа"}
+        fields = {"slot": "время", "start_at": "дата и время", "end_at": "окончание",
+                  "offering_name": "услуга", "resource_name": "мастер", "display_name": "имя",
+                  "customer_name": "имя", "phone": "телефон", "summary": "детали",
+                  "title": "название", "comment": "комментарий", "stage": "статус"}
+        parts = []
+        for operation in plan.operations:
+            definition = self.registration.capability(operation.command.capability)
+            values = []
+            for key in definition.public_fields:
+                if key in operation.command.arguments:
+                    value = operation.command.arguments[key]
+                    rendered = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
+                    values.append(f"{fields.get(key, 'детали')}: {rendered}")
+            parts.append(labels.get(definition.name, "Действие") + (": " + "; ".join(values) if values else ""))
+        summary = ". ".join(parts) + "."
+        if len(summary) > 8000:
+            raise BusinessSafetyError("PROPOSAL_BOUNDS")
+        return summary
 
     async def propose_plan(self, actions):
         plan = await self.freeze_plan(actions, propose=True)
@@ -244,6 +332,11 @@ class BusinessRuntime:
         return BusinessToolResult(halt_status="UNKNOWN" if unknown else "FAILED",
                                   error_code="TOOL_EXECUTION_UNKNOWN")
 
+    @staticmethod
+    def _failed_business_draft():
+        return BusinessToolResult(tool_payload={'status': 'FAILED'},
+            safe_draft='Не удалось выполнить действие: условия изменились. Давайте уточним детали и попробуем другой вариант.')
+
     async def _execute_frozen(self, plan):
         identities = tuple(op.id for op in plan.operations)
         for identity in identities:
@@ -251,6 +344,8 @@ class BusinessRuntime:
             if operation.status == "SUCCEEDED":
                 continue
             if operation.status == "FAILED":
+                if self.registration.adapter_id == 'chotacrm' and all(op.status == 'FAILED' for op in plan.operations):
+                    return self._failed_business_draft()
                 return self._halt(any(op.status in {"SUCCEEDED", "DISPATCHING", "UNKNOWN"} for op in plan.operations))
             actions = [BusinessAction(capability=op.command.capability, arguments=op.command.arguments)
                        for op in plan.operations]
@@ -268,7 +363,12 @@ class BusinessRuntime:
                                   or any(op.status in {"SUCCEEDED", "DISPATCHING", "UNKNOWN"} for op in plan.operations))
             plan = await self._send(decision.token)
             if next(op for op in plan.operations if op.id == identity).status != "SUCCEEDED":
+                if self.registration.adapter_id == 'chotacrm' and all(op.status == 'FAILED' for op in plan.operations):
+                    return self._failed_business_draft()
                 return self._halt(True)
+        if self.registration.adapter_id == 'chotacrm':
+            from business_capabilities.runtime_tools import successful_results
+            return await successful_results(self, plan)
         return BusinessToolResult(tool_payload={"status": "SUCCEEDED", "operation_refs":
                                   [ref.model_dump(mode="json") for ref in self.collector.snapshot()]})
 
@@ -308,14 +408,14 @@ class BusinessRuntime:
                 raise BusinessSafetyError("PROVIDER_UNKNOWN", processing_status="UNKNOWN") from None
             return plan
 
-    async def confirm(self, proposal_id):
+    async def confirm(self, proposal_id, *, semantic=False):
         proposal_id = UUID(str(proposal_id))
         plan = await self.repository.lookup_plan(self.request, self.grant, proposal_id)
         if plan is None:
             raise BusinessSafetyError("PLAN_DENIED")
         actions = [BusinessAction(capability=op.command.capability, arguments=op.command.arguments) for op in plan.operations]
         plan = await self.repository.confirm_plan(self.request, self.grant, plan.id, self.registration,
-                                                   self.facts_resolver(actions))
+                                                   self.facts_resolver(actions), semantic=semantic)
         self.collector.observe_committed(plan.references)
         return await self._execute_frozen(plan)
 

@@ -83,6 +83,7 @@ class AdapterRegistration:
     adapter: BusinessAdapter
     execution_contract: ExecutionContract = ExecutionContract()
     retained_catalog_revisions: tuple[str, ...] = ()
+    confirmation_mode: Literal["REFERENCE_V1", "SEMANTIC_V1"] = "REFERENCE_V1"
 
     def __post_init__(self):
         import re
@@ -98,6 +99,17 @@ class AdapterRegistration:
 
     @property
     def legacy_catalog_revision(self) -> str:
+        if self.confirmation_mode == 'SEMANTIC_V1':
+            # Hash each code-owned schema independently. A full eighteen-tool
+            # catalog exceeds the per-business-value node bound; do not relax
+            # that bound for caller/model payloads or alter existing v1 hashes.
+            return fingerprint('chota.business.catalog.semantic.v1', {
+                'adapter_id': self.adapter_id, 'profile': self.profile.model_dump(mode='json'),
+                'capabilities': [dict(name=c.name, schema_version=c.schema_version,
+                    requires_confirmation=c.requires_confirmation, public_fields=list(c.public_fields),
+                    schema_hash=fingerprint('chota.business.schema.v1', c.argument_model.model_json_schema()))
+                    for c in self.capabilities],
+            })
         return fingerprint("chota.business.catalog.v1", {
             "adapter_id": self.adapter_id, "profile": self.profile.model_dump(mode="json"),
             "capabilities": [{"name": c.name, "schema_version": c.schema_version,
@@ -108,10 +120,13 @@ class AdapterRegistration:
 
     @property
     def catalog_revision(self) -> str:
-        return fingerprint("chota.business.catalog.v2", {
+        value = {
             "legacy_catalog_revision": self.legacy_catalog_revision,
             "execution_contract": self.execution_contract.model_dump(mode="json"),
-        })
+        }
+        if self.confirmation_mode != "REFERENCE_V1":
+            value["confirmation_mode"] = self.confirmation_mode
+        return fingerprint("chota.business.catalog.v2", value)
 
     def accepts_catalog(self, revision: str) -> bool:
         return revision == self.catalog_revision or revision in self.retained_catalog_revisions

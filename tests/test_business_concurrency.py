@@ -215,7 +215,10 @@ async def test_expiry_normalization_overlap_blocks_an_already_reserved_plan(db_s
         await release.wait()
         return row
     monkeypatch.setattr(first.repository, "_lock_scope", gated_lock)
-    recovery = asyncio.create_task(first.recover_attempts())
+    # Isolate normalization's COMMIT. The runtime wrapper also performs a
+    # separate result-gate read whose scope lock can legitimately cause the
+    # contender's decisive NOWAIT phase to return ADMISSION_CONTENDED.
+    recovery = asyncio.create_task(first.repository.recover_attempts(first.request, first.grant))
     await asyncio.wait_for(locked.wait(), 5)
     contender = asyncio.create_task(second.repository.claim_dispatch(second.request, second.grant, plan2.id,
         plan2.operations[0].id, second.registration, second.facts_resolver(actions("13"))))
@@ -225,6 +228,8 @@ async def test_expiry_normalization_overlap_blocks_an_already_reserved_plan(db_s
     blocked = await asyncio.wait_for(contender, 5)
     assert blocked.reason == "BLOCKED_UNRESOLVED_EFFECT" and blocked.token is None
     assert blocked.plan.operations[0].status == "RESERVED"
+    retained = await first.repository.selected_plan(first.request, first.grant)
+    assert retained.operations[0].status == "UNKNOWN"
 
 
 @pytest.mark.asyncio

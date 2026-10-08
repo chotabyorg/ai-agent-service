@@ -12,6 +12,7 @@ from api.v1.mcp_services import router as mcp_services_router
 from api.v1.models import router as models_router
 from api.v1.openrouter_key import router as openrouter_key_router
 from api.v1.tools import router as tools_router
+from api.v1.business_tools import router as business_tools_router
 from core.config import get_settings
 from core.managed_boundary import ManagedTurnBoundary
 from core.redis import close_redis, init_redis
@@ -42,6 +43,10 @@ app = FastAPI(
     lifespan=lifespan,
 )
 app.add_middleware(ManagedTurnBoundary)
+from business_capabilities.registration import create_business_registry
+from db.database import AsyncSessionLocal
+app.state.business_registry = create_business_registry(settings, AsyncSessionLocal)
+app.include_router(business_tools_router, prefix=f"{settings.api_v1_prefix}/agents", tags=['business-tools'])
 
 app.include_router(
     agents_router,
