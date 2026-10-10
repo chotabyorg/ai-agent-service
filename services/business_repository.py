@@ -582,7 +582,7 @@ class BusinessRepository:
 
     @staticmethod
     def _semantic_inputs(request, origin):
-        selected = request.messages[request.input_first_sequence - 1:request.input_last_sequence]
+        selected = request.selected_messages
         if (origin is None or request.turn_id == origin.turn_id
                 or request.input_first_sequence <= origin.input_last_sequence
                 or not selected or any(m.actor != "CUSTOMER" or m.direction != "INBOUND"
@@ -887,7 +887,7 @@ class BusinessRepository:
                         raise BusinessSafetyError("CONFIRMATION_REPLAY_DENIED")
                 else:
                     origin = await session.get(BusinessTurnContext, (scope.id, plan.origin_turn_id))
-                    selected = request.messages[request.input_first_sequence - 1:request.input_last_sequence]
+                    selected = request.selected_messages
                     if semantic:
                         latest = await self._latest_plan(session, scope.id)
                         if latest is None or latest.id != plan.id:

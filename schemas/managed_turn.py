@@ -1,4 +1,4 @@
-"""Version-one internal execution values; canonical storage belongs to Conversation."""
+"""Versioned internal execution values; canonical storage belongs to Conversation."""
 
 import unicodedata
 from typing import Annotated, Literal
@@ -8,6 +8,8 @@ from pydantic import BaseModel, ConfigDict, Field, StrictInt, field_validator, m
 
 MAX_REQUEST_BYTES = 1048576
 MAX_RESULT_BYTES = 262144
+MAX_MESSAGES = 256
+MAX_PROJECTED_TEXT_BYTES = 524288
 Channel = Literal["TELEGRAM", "INSTAGRAM", "WEBSITE_WIDGET", "WHATSAPP", "VOICE"]
 Counter = Annotated[StrictInt, Field(ge=1, le=9223372036854775807)]
 Revision = Annotated[StrictInt, Field(ge=0, le=9223372036854775807)]
@@ -52,7 +54,7 @@ class ManagedMessage(ManagedValue):
 
 
 class ManagedTurnRequest(ManagedValue):
-    contract_version: Annotated[StrictInt, Field(ge=1, le=1)] = 1
+    contract_version: Annotated[StrictInt, Field(ge=1, le=2)] = 1
     conversation_id: UUID
     turn_id: UUID
     owner_id: str
@@ -64,23 +66,65 @@ class ManagedTurnRequest(ManagedValue):
     input_first_sequence: Counter
     input_last_sequence: Counter
     context_last_sequence: Counter
-    messages: Annotated[list[ManagedMessage], Field(min_length=1, max_length=256)]
-    selected_input_message_ids: Annotated[list[UUID], Field(min_length=1, max_length=256)]
+    messages: Annotated[list[ManagedMessage], Field(min_length=1, max_length=MAX_MESSAGES)]
+    selected_input_message_ids: Annotated[list[UUID], Field(min_length=1, max_length=MAX_MESSAGES)]
 
     _owner = field_validator("owner_id")(validate_owner)
+
+    @property
+    def window_first_sequence(self) -> int:
+        return 1 if self.contract_version == 1 else self.messages[0].sequence
+
+    def local_index(self, sequence: int) -> int:
+        """Resolve an absolute canonical sequence inside this validated window."""
+        if not self.window_first_sequence <= sequence <= self.context_last_sequence:
+            raise ValueError("Sequence outside canonical window")
+        return sequence - self.window_first_sequence
+
+    @property
+    def selected_sequence_range(self) -> range:
+        return range(self.input_first_sequence, self.input_last_sequence + 1)
+
+    @property
+    def selected_message_slice(self) -> slice:
+        return slice(self.local_index(self.input_first_sequence),
+                     self.local_index(self.input_last_sequence) + 1)
+
+    @property
+    def selected_messages(self) -> list[ManagedMessage]:
+        return self.messages[self.selected_message_slice]
+
+    @property
+    def selected_local_indices(self) -> list[int]:
+        selection = self.selected_message_slice
+        return list(range(selection.start, selection.stop))
+
+    @property
+    def simple_selection(self) -> bool:
+        return (self.input_first_sequence == self.input_last_sequence == self.context_last_sequence
+                and self.selected_messages[0].actor == "CUSTOMER")
 
     @model_validator(mode="after")
     def ordered_projection(self):
         first, last, bound = self.input_first_sequence, self.input_last_sequence, self.context_last_sequence
-        if not 1 <= first <= last <= bound or bound != len(self.messages):
-            raise ValueError("Invalid frozen boundary")
-        if [m.sequence for m in self.messages] != list(range(1, bound + 1)):
-            raise ValueError("Invalid canonical ordering")
+        if self.contract_version == 1:
+            if not 1 <= first <= last <= bound or bound != len(self.messages):
+                raise ValueError("Invalid frozen boundary")
+            if [m.sequence for m in self.messages] != list(range(1, bound + 1)):
+                raise ValueError("Invalid canonical ordering")
+        else:
+            window_first = self.window_first_sequence
+            if not window_first <= first <= last <= bound or self.messages[-1].sequence != bound:
+                raise ValueError("Invalid frozen boundary")
+            if [m.sequence for m in self.messages] != list(range(window_first, window_first + len(self.messages))):
+                raise ValueError("Invalid canonical ordering")
         ids = [m.id for m in self.messages]
-        if len(set(ids)) != len(ids) or self.selected_input_message_ids != ids[first - 1:last]:
+        if len(set(ids)) != len(ids) or self.selected_input_message_ids != [m.id for m in self.selected_messages]:
             raise ValueError("Invalid selected input")
-        if sum(len(m.text.encode("utf-8")) for m in self.messages) > 524288:
+        if sum(len(m.text.encode("utf-8")) for m in self.messages) > MAX_PROJECTED_TEXT_BYTES:
             raise ValueError("Projection exceeds limit")
+        if self.contract_version == 2 and len(self.model_dump_json().encode("utf-8")) > MAX_REQUEST_BYTES:
+            raise ValueError("Request exceeds limit")
         return self
 
 
@@ -91,7 +135,7 @@ class OperationReference(ManagedValue):
 
 
 class ManagedTurnResult(ManagedValue):
-    contract_version: Annotated[StrictInt, Field(ge=1, le=1)] = 1
+    contract_version: Annotated[StrictInt, Field(ge=1, le=2)] = 1
     conversation_id: UUID
     turn_id: UUID
     agent_id: UUID
