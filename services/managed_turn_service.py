@@ -120,9 +120,7 @@ async def execute_managed_owned(request, grant, runtime, db_provider, session_fa
                 raise ManagedExecutionError("AGENT_CONFIGURATION_ERROR") from None
             if not key:
                 raise ManagedExecutionError("AGENT_KEY_MISSING")
-            query = "\n\n".join(message.text for message in request.messages[
-                request.input_first_sequence - 1:request.input_last_sequence
-            ])
+            query = "\n\n".join(message.text for message in request.selected_messages)
             if len(query) > 32768 or len(query.encode("utf-8")) > 65536:
                 raise ManagedExecutionError("CONTEXT_LIMIT")
             # End the configuration read transaction before any model/provider
@@ -150,9 +148,8 @@ async def execute_managed_owned(request, grant, runtime, db_provider, session_fa
                     chat_context=ChatContext(channel=CHANNEL_PROMPT[request.channel],
                                              external_client_id=f"{EXECUTION_NAMESPACE}:{request.conversation_id}"),
                     query=query, runtime=runtime,
-                    selected_indices=list(range(request.input_first_sequence - 1, request.input_last_sequence)),
-                    simple_selection=(request.input_first_sequence == request.input_last_sequence ==
-                                      request.context_last_sequence and request.messages[-1].actor == "CUSTOMER"),
+                    selected_indices=request.selected_local_indices,
+                    simple_selection=request.simple_selection,
                 )
             try:
                 ready = ManagedTurnResult.from_request(

@@ -1,4 +1,4 @@
-# Internal managed AgentTurn execution v1
+# Internal managed AgentTurn execution v1 / v2
 
 `POST /internal/v1/managed-turns/execute` is an internal harness contract for
 Conversation Service. No public gateway route, scheduler, consumer, deployment,
@@ -64,17 +64,31 @@ All request objects forbid extra fields. Required UUIDs: `conversation_id`,
 `turn_id`, `integration_id`, `agent_id`. Required `owner_id` is exact nonblank
 opaque text of1..255 characters/1020 UTF8 bytes, without Cc/Cs controls or wildcard.
 `channel` is TELEGRAM/INSTAGRAM/WEBSITE_WIDGET/WHATSAPP/VOICE.
-`contract_version` defaults to strict integer1. Counters are strict bounded bigint
+`contract_version` accepts strict integers1 or2; omission still defaults to1.
+Wire version is independent of the unchanged execution namespace
+`main-chota.conversation.v1`. Counters are strict bounded bigint
 integers: positive `input_revision`, `input_first_sequence`, `input_last_sequence`,
 `context_last_sequence`; nonnegative `authority_revision`.
 
-`messages` is the full frozen canonical prefix of1..256 values, each with UUID
+`messages` contains1..256 values, each with UUID
 `id`, positive `sequence`, actor CUSTOMER/AGENT/HUMAN/SYSTEM, direction
 INBOUND/OUTBOUND, literal `content_type=TEXT` and exact `text` (1..16384 characters,
-32768 UTF8 bytes, no NUL/surrogate). Sequences must be exactly1..context_last,
-without gaps/duplicates/reorder; total text is bounded to524288 UTF8 bytes.
+32768 UTF8 bytes, no NUL/surrogate). v1 remains the full frozen canonical prefix
+with sequences exactly1..context_last. v2 is one contiguous canonical window
+`messages[0].sequence..context_last_sequence`; its final Message must have sequence
+`context_last_sequence`. There is no wire `context_first_sequence` field and
+canonical sequence numbers are never renumbered. Both versions reject
+gaps/duplicates/reorder and duplicate Message IDs; total text is bounded to524288
+UTF8 bytes. v2 additionally checks its complete compact JSON representation
+against the same1048576-byte request cap; the authenticated transport caps actual
+body bytes for both versions.
 `selected_input_message_ids` must equal the IDs in the inclusive first..last
-range in canonical order. Selection may include multiple messages or be nonsuffix;
+range in canonical order. For v2, the inclusive input range must fit wholly inside
+the window. The shared `ManagedTurnRequest` window accessors map a canonical
+sequence to local index `sequence - window_first_sequence` for query selection,
+model selectors and Business confirmation; v1 uses window start1. For example,
+window245..500 selects sequence500 at local index255, or497..500 at252..255.
+Selection may include multiple messages or be nonsuffix;
 selected text is never appended again or reordered.
 
 AI maps CUSTOMER to user, AGENT/HUMAN to assistant, SYSTEM to ordinary user with
@@ -99,7 +113,7 @@ context/tool descriptors that cannot fit fail CONTEXT_LIMIT. Later steps never
 drop tool protocol pairs. Legacy budgeting and configured completion token cap
 remain unchanged.
 
-Runtime results always return200 with exact UUID/counter echoes, status
+Runtime results always return200 with exact wire contract version and UUID/counter echoes, status
 DRAFT_READY/NO_RESPONSE/FAILED/UNKNOWN, `draft_text`, closed safe `error_code`, and
 `operation_refs`. DRAFT_READY requires valid nonnull draft and null error; NO_RESPONSE
 requires both null; FAILED/UNKNOWN require null draft and a safe code. Normal empty
@@ -110,6 +124,21 @@ DISPATCHING/UNKNOWN maps to UNKNOWN; terminal outcomes stay immutable. Only
 positively committed reservations/reads/receipts enter the collector; an unavailable
 final reload retains its known conservative snapshot. The contract accepts at most32 `{origin:AI_AGENT_SERVICE,operation_id:
 opaque ASCII1..128,outcome:SUCCEEDED|FAILED|UNKNOWN|null}` values; it is not a ledger.
+
+Each wire projection is immutable: request fingerprints include its version and
+exact Messages and remain fenced by the existing Business retained Turn context.
+v1 fingerprint bytes and retained evidence are unchanged; a v1 and v2 projection
+of the same Turn are not equivalent. No old Turn/evidence migration is performed.
+`OperationReference` and the read-only `ManagedEvidenceRequest`/Result remain v1
+with their existing fields, limits and scope. The evidence endpoint may read refs
+for a v2 execution through the existing v1 identity request.
+
+A pending proposal's origin may be outside a later v2 model window. Business
+continues to use its separately frozen proposal/origin authority. Its selected
+CUSTOMER messages come from the current window; later-Turn ordering checks use
+absolute canonical sequence boundaries, and selected Message ID overlap/replay
+checks remain enforced. Confirmation, CHANGE, REJECT, UNRELATED, operation
+identity, receipts and UNKNOWN handling are unchanged.
 
 ## Shared execution and runtime lifetime
 

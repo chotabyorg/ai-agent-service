@@ -33,7 +33,7 @@ def evidence_input(request):
 
 def later_request(request, text_value="Запиши меня на 13:00", *, distinct=False, cross=None):
     value = copy.deepcopy(request)
-    message = dict(value["messages"][-1], id=str(uuid4()), sequence=len(value["messages"]) + 1, text=text_value)
+    message = dict(value["messages"][-1], id=str(uuid4()), sequence=value["context_last_sequence"] + 1, text=text_value)
     value["messages"].append(message)
     value.update(turn_id=str(uuid4()), input_revision=value["input_revision"] + 1,
         input_first_sequence=message["sequence"], input_last_sequence=message["sequence"],

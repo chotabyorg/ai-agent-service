@@ -10,6 +10,7 @@ jobs:
     with:
       service: ai-agent-service
       gitops_repo: chotabyorg/gitops
+      gitops_branch: releases/ai-agent-service
     permissions:
       contents: read
       packages: write
