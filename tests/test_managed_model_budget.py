@@ -115,4 +115,3 @@ async def test_ignored_control_and_empty_truncated_completion_still_fail_without
     assert result['status'] == 'FAILED' and result['error_code'] == 'INVALID_RESULT'
     assert result['draft_text'] is None and result['operation_refs'] == []
     assert len(captured) == 1 and captured[0]['reasoning'] == {'enabled': False}
-
