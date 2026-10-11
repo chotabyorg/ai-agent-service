@@ -22,7 +22,8 @@ async def confirmed(factory, settings):
     result = await customer.call_tool('business_decide_proposal', {
         'proposal_id': proposal.tool_payload['proposal_id'], 'intent': 'CONFIRM'})
     assert result.halt_status is None and provider['posts'] == 1
-    # Normal first-execution completion remains the model's responsibility.
+    assert result.safe_draft and 'Запись была подтверждена' in result.safe_draft
+    # General ALL_SUCCEEDED guard remains unchanged; only confirmation is terminal.
     assert await customer.guard_result() is None
     return customer, registry, provider
 

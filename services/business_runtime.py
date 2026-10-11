@@ -116,11 +116,11 @@ class BusinessRuntime:
         return self._halt(True)
 
     def completed_confirmation_replay(self):
-        """Entry-only reply from this confirmation Turn's retained booking receipt.
+        """Reply from this confirmation Turn's validated retained booking receipt.
 
-        The fresh result gate has already checked scope and request fingerprint.
-        This grants no dispatch authority and does not alter the final guard or
-        normal model continuation after the first successful confirmation.
+        The caller must first obtain a fresh result gate checking scope and
+        request fingerprint. Used both at replay entry and after semantic CONFIRM;
+        this grants no dispatch authority and does not alter the final guard.
         """
         gate = self.last_gate
         if (gate is None or gate.scope_unresolved or gate.disposition != "ALL_SUCCEEDED"
@@ -133,7 +133,7 @@ class BusinessRuntime:
                 or plan.origin_turn_id == self.request.turn_id or len(plan.operations) != 1):
             return None
         operation = plan.operations[0]
-        if operation.command.capability != "booking.create":
+        if operation.command.capability not in {"booking.create", "booking.reschedule", "booking.cancel"}:
             return None
         try:
             from business_capabilities.runtime_tools import completed_booking_reply
@@ -452,7 +452,24 @@ class BusinessRuntime:
         plan = await self.repository.confirm_plan(self.request, self.grant, plan.id, self.registration,
                                                    self.facts_resolver(actions), semantic=semantic)
         self.collector.observe_committed(plan.references)
-        return await self._execute_frozen(plan)
+        result = await self._execute_frozen(plan)
+        if (not semantic or self.registration.adapter_id != "chotacrm"
+                or len(plan.operations) != 1 or plan.operations[0].command.capability not in {
+                    "booking.create", "booking.reschedule", "booking.cancel"}
+                or result.halt_status or result.safe_draft is not None):
+            return result
+        # A completed canonical confirmation is terminal for this customer Turn.
+        # Reload durable scope/receipt evidence before answering, rather than
+        # giving the model stale pending-proposal context and another tool step.
+        guard = await self.guard_result()
+        if guard is not None:
+            return guard
+        completed = self.completed_confirmation_replay()
+        if completed is None:
+            return self._halt(True)
+        if completed.halt_status:
+            return completed
+        return result.model_copy(update={"safe_draft": completed.safe_draft})
 
     async def select_recovery_plan(self, plan_id):
         plan = await self.repository.select_recovery_plan(self.request, self.grant, UUID(str(plan_id)))
