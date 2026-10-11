@@ -10,6 +10,7 @@ from uuid import UUID
 from pydantic import Field, SecretStr, field_validator
 
 from schemas.managed_turn import Channel, ManagedValue, validate_owner
+from core.managed_completion_diagnostics import _trusted_completion_record
 
 EXECUTION_NAMESPACE = "main-chota.conversation.v1"
 MANAGED_SECRET_ENV_KEYS = frozenset({"managed_ai_auth_principals"})
@@ -83,7 +84,9 @@ def install_managed_log_boundary() -> None:
     def make_record(self, *args, **kwargs):
         record = original(self, *args, **kwargs)
         if managed_logging.get():
-            safe = logging.LogRecord(record.name, record.levelno, record.pathname,
+            safe = _trusted_completion_record(record)
+            if safe is None:
+                safe = logging.LogRecord(record.name, record.levelno, record.pathname,
                                      record.lineno, "Managed execution diagnostic", (), None)
             record.__dict__.clear()
             record.__dict__.update(safe.__dict__)

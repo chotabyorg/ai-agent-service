@@ -4,6 +4,8 @@ from dataclasses import dataclass, field
 from types import SimpleNamespace
 from typing import Any
 
+_DEFAULT_FINISH = object()
+
 
 def build_tool_call(tool_id: str, name: str, arguments: str) -> SimpleNamespace:
     return SimpleNamespace(
@@ -16,10 +18,12 @@ def build_llm_response(
     *,
     content: str | None = None,
     tool_calls: list[SimpleNamespace] | None = None,
+    finish_reason: Any = _DEFAULT_FINISH,
 ) -> SimpleNamespace:
     return SimpleNamespace(
         choices=[
             SimpleNamespace(
+                finish_reason=("tool_calls" if tool_calls else "stop") if finish_reason is _DEFAULT_FINISH else finish_reason,
                 message=SimpleNamespace(
                     content=content,
                     tool_calls=tool_calls,
