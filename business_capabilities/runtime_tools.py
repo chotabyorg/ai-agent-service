@@ -21,7 +21,13 @@ def canonical_tools(runtime, controls):
     # Model never chooses a provider or arbitrary plan. The one supported bundle
     # combines at most one booking and one order under the same agreement.
     propose = next(t for t in controls if t['function']['name'] == 'business_propose')
-    propose['function']['description'] = 'Freeze one confirmed business action, or booking.create plus deal.create for the SAME EXISTING customer_ref. Other combinations are unsupported. Present all facts and ask once; no effects before confirmation.'
+    propose['function']['description'] = (
+        'Prepare and persist a proposal BEFORE asking the customer to confirm. '
+        'Propose one business action, or booking.create plus deal.create for the SAME EXISTING customer_ref. '
+        'Other combinations are unsupported. Present the returned frozen business summary, '
+        'ask once for confirmation, and wait for a later customer turn. '
+        'Preparing a proposal does not execute provider effects; execution requires that later confirmation.'
+    )
     actions = [{'type': 'object', 'additionalProperties': False, 'required': ['capability','arguments'],
                 'properties': {'capability': {'const': c.id}, 'arguments': tool_schema(c.input)}}
                for c in available if c.risk == Risk.WRITE_CONFIRM]
