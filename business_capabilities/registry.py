@@ -93,6 +93,15 @@ def tool_schema(model):
             'Use a short distinctive word, not the full customer sentence. '
             'Omit or use an empty string to browse; if no matches, broaden the query.'
         )
+    if issubclass(model, s.Availability) or model is s.BookingReschedule:
+        result['properties']['start_at']['description'] = (
+            'The customer-requested appointment start as an ISO 8601 instant. '
+            'Keep the requested local clock time with its correct timezone offset, '
+            'or convert the clock time to UTC and use Z; do not apply both conversions. '
+            'For example, 14:00 in UTC+03:00 is 14:00+03:00 or 11:00Z, '
+            'never 11:00+03:00. For a move, use the newly requested time, '
+            'not the existing appointment start returned by booking lookup.'
+        )
     if model is s.BookingCreate:
         # Expose the existing runtime validator to the model without changing
         # the durable catalog schema fingerprint or its accepted input set.

@@ -58,3 +58,46 @@ def test_guidance_does_not_relax_or_coerce_arguments(arguments, accepted):
     else:
         with pytest.raises(ValidationError):
             s.CatalogSearch.model_validate(arguments)
+
+
+@pytest.mark.parametrize('model,accepted_hash', [
+    (s.Availability, 'f2046bcb1f119075f0f8a07b23d335a184023f9748acd0792114450c8c85fbac'),
+    (s.BookingCreate, '47d14b4111bd684db67be085c30c53e2ef9de89686d2a44c726bac8105b6d49c'),
+    (s.BookingReschedule, '68ece496ae44f9b88b19c9560e6f6b09579efa43d425c71c3658480ac3190fec'),
+])
+def test_appointment_time_guidance_preserves_canonical_schema(model, accepted_hash):
+    before = model.model_json_schema()
+    advertised = tool_schema(model)
+    Draft202012Validator.check_schema(advertised)
+    description = advertised['properties']['start_at']['description']
+    assert '14:00+03:00 or 11:00Z' in description
+    assert 'newly requested time' in description
+    assert advertised['properties']['start_at']['format'] == 'date-time'
+    assert model.model_json_schema() == before
+    assert fingerprint('chota.business.schema.v1', before) == accepted_hash
+
+
+def test_requested_move_time_keeps_its_instant_without_silent_correction():
+    arguments = dict(resource_ref='resource', offering_ref='offering')
+    local = s.Availability(**arguments, start_at='2026-10-15T14:00:00+03:00')
+    utc = s.Availability(**arguments, start_at='2026-10-15T11:00:00Z')
+    old = s.Availability(**arguments, start_at='2026-10-15T11:00:00+03:00')
+    assert local.start_at == utc.start_at
+    assert local.start_at != old.start_at
+    assert old.model_dump(mode='json')['start_at'] == '2026-10-15T08:00:00Z'
+    with pytest.raises(ValidationError):
+        s.Availability(**arguments, start_at='2026-10-15T14:00:00')
+
+
+def test_actual_runtime_advertises_time_guidance_for_reads_and_moves():
+    runtime = BusinessRuntime()
+    runtime.binding = SimpleNamespace(enabled_capabilities=DEFAULTS)
+    runtime.registration = SimpleNamespace(adapter_id='chotacrm', confirmation_mode='SEMANTIC_V1',
+        capabilities=[SimpleNamespace(name=c.id) for c in CAPABILITIES])
+    tools = {t['function']['name']: t['function']['parameters'] for t in runtime.openai_tools()}
+    for name in ('booking_check_availability', 'booking_create', 'booking_reschedule'):
+        assert 'newly requested time' in tools[name]['properties']['start_at']['description']
+    actions = tools['business_propose']['properties']['actions']['items']['oneOf']
+    by_capability = {a['properties']['capability']['const']: a['properties']['arguments'] for a in actions}
+    for capability in ('booking.create', 'booking.reschedule'):
+        assert 'newly requested time' in by_capability[capability]['properties']['start_at']['description']
