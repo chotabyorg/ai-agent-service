@@ -1,7 +1,9 @@
 import os
+import asyncio
 import sys
 from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
+from uuid import uuid4
 
 # Ensure a valid Fernet key is available BEFORE importing the app.
 # LLMService (and its EncryptionService) is instantiated at module level
@@ -97,6 +99,28 @@ def migrated_postgres(postgres_url: str) -> str:
         _restore_env(previous)
         get_settings.cache_clear()
     return postgres_url.replace("psycopg2", "asyncpg")
+
+
+@pytest.fixture
+def isolated_migration_postgres(postgres_url: str) -> Iterator[str]:
+    """Keep historical/irreversible migration exercises off the shared test DB."""
+    admin_url = make_url(postgres_url).set(drivername="postgresql+asyncpg")
+    database = "migration_" + uuid4().hex
+
+    async def manage(action: str) -> None:
+        engine = create_async_engine(admin_url, isolation_level="AUTOCOMMIT", poolclass=NullPool)
+        try:
+            async with engine.connect() as connection:
+                # The identifier is generated locally from a UUID, never user input.
+                await connection.execute(text(f'{action} DATABASE "{database}"'))
+        finally:
+            await engine.dispose()
+
+    asyncio.run(manage("CREATE"))
+    try:
+        yield admin_url.set(database=database).render_as_string(hide_password=False)
+    finally:
+        asyncio.run(manage("DROP"))
 
 
 @pytest_asyncio.fixture

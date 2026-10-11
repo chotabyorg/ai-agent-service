@@ -7,7 +7,9 @@ from uuid import uuid4
 
 import pytest
 from alembic import command
+from alembic.autogenerate import compare_metadata
 from alembic.config import Config
+from alembic.migration import MigrationContext
 from alembic.script import ScriptDirectory
 from sqlalchemy import text
 from sqlalchemy.engine import make_url
@@ -15,6 +17,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import NullPool
 
 from core.config import get_settings
+from db.database import Base
 
 
 def _set_postgres_env(url):
@@ -36,20 +39,28 @@ def _restore_env(previous):
             os.environ[key] = value
 
 
-def test_business_migration_preserves_current_main_data_and_refuses_populated_downgrade(postgres_url, migrated_postgres):
+def test_business_migration_preserves_current_main_data_and_refuses_populated_downgrade(isolated_migration_postgres):
     project = Path(__file__).resolve().parents[1]
     config = Config(str(project / "alembic.ini"))
-    assert ScriptDirectory.from_config(config).get_heads() == ["bv2_20261008_01"]
-    previous = _set_postgres_env(postgres_url)
+    # Exercise this historical schema boundary independently of later irreversible
+    # data migrations. The model migration tests assert the current single head.
+    assert ScriptDirectory.from_config(config).get_revision("bv2_20261008_01") is not None
+    previous = _set_postgres_env(isolated_migration_postgres)
     get_settings.cache_clear()
-    async_url = migrated_postgres
+    async_url = isolated_migration_postgres
     agent_id, owner_id, session_id = uuid4(), uuid4(), uuid4()
 
     async def query(mode):
         engine = create_async_engine(async_url, poolclass=NullPool)
         try:
             async with engine.begin() as connection:
-                if mode == "clear":
+                if mode == "drift":
+                    # command.check requires the newest revision even when a later
+                    # data-only migration leaves this historical schema unchanged.
+                    differences = await connection.run_sync(lambda sync: compare_metadata(
+                        MigrationContext.configure(sync, opts={"compare_type": True}), Base.metadata))
+                    assert differences == []
+                elif mode == "clear":
                     await connection.execute(text("TRUNCATE business_operations,business_turn_plan_links,business_plans,"
                         "business_turn_contexts,business_scopes,business_bindings,conversation_sessions,agent_credentials,agent_templates CASCADE"))
                 elif mode == "seed":
@@ -70,19 +81,20 @@ def test_business_migration_preserves_current_main_data_and_refuses_populated_do
             await engine.dispose()
 
     try:
+        command.upgrade(config, "bv2_20261008_01")
         asyncio.run(query("clear"))
         command.downgrade(config, "c4d5e6f7g8h9")
         asyncio.run(query("seed"))
-        command.upgrade(config, "head")
+        command.upgrade(config, "bv2_20261008_01")
         command.current(config)
-        command.check(config)
+        asyncio.run(query("drift"))
         asyncio.run(query("verify"))
         with pytest.raises(RuntimeError, match="Refusing downgrade"):
             command.downgrade(config, "c4d5e6f7g8h9")
         asyncio.run(query("clear"))
         command.downgrade(config, "c4d5e6f7g8h9")
-        command.upgrade(config, "head")
-        command.check(config)
+        command.upgrade(config, "bv2_20261008_01")
+        asyncio.run(query("drift"))
     finally:
         _restore_env(previous)
         get_settings.cache_clear()
