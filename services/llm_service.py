@@ -25,6 +25,7 @@ from core.managed_security import managed_logging
 from services.managed_tools import (ManagedExecutionError, inspect_managed_tool_result,
                                     parse_managed_tool_arguments, _bounded_json)
 from services.managed_http_cleanup import close_managed_helper, own_managed_http
+from services.managed_reasoning import managed_reasoning_fields
 from services.chat_diagnostics import ChatFailureStage, set_chat_failure_stage
 from services.agent_service import AgentService
 from services.encryption_service import EncryptionService
@@ -290,7 +291,7 @@ class LLMService:
             return None
 
     @staticmethod
-    def _assistant_message_to_dict(message: object) -> dict[str, object]:
+    def _assistant_message_to_dict(message: object, *, managed: bool = False) -> dict[str, object]:
         tool_calls = []
         for tool_call in getattr(message, "tool_calls", []) or []:
             tool_calls.append(
@@ -310,6 +311,8 @@ class LLMService:
         }
         if tool_calls:
             payload["tool_calls"] = tool_calls
+            if managed:
+                payload.update(managed_reasoning_fields(message))
         return payload
 
     @staticmethod
@@ -601,7 +604,7 @@ class LLMService:
                     set_chat_failure_stage(ChatFailureStage.MCP_CLEANUP)
                     return clean_answer
 
-                messages.append(self._assistant_message_to_dict(message))
+                messages.append(self._assistant_message_to_dict(message, managed=runtime is not None))
                 if runtime:
                     self._check_managed_envelope(agent, messages, openai_tools)
 
