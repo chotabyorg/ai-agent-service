@@ -91,16 +91,37 @@ async def setup(factory, settings):
 
 
 @pytest.mark.asyncio
-async def test_reads_do_not_consume_plan_then_natural_booking_uses_frozen_aggregate(db_session, crm_settings):
+async def test_proposal_tool_instructs_preparation_before_later_confirmation(db_session, crm_settings):
+    runtime, _, _, _ = await setup(db_session, crm_settings)
+    tools = {tool['function']['name']: tool['function'] for tool in runtime.openai_tools()}
+    description = tools['business_propose']['description'].lower()
+    # Check the model-facing ordering and effect boundary, not the whole wording.
+    assert 'prepare and persist a proposal before asking the customer to confirm' in description
+    assert 'returned frozen business summary' in description
+    assert 'wait for a later customer turn' in description
+    assert 'preparing a proposal does not execute provider effects' in description
+    assert 'execution requires that later confirmation' in description
+    assert 'one business action' in description
+    assert 'same existing customer_ref' in description
+    assert 'other combinations are unsupported' in description
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('proposal_tool', ['booking_create', 'business_propose'])
+async def test_reads_do_not_consume_plan_then_natural_booking_uses_frozen_aggregate(db_session, crm_settings, proposal_tool):
     runtime, registry, provider, args = await setup(db_session, crm_settings)
     result = await runtime.call_tool('catalog_search', {})
     assert result.tool_payload['status'] == 'OK'
     async with db_session() as db:
         assert await db.scalar(select(func.count()).select_from(BusinessPlan)) == 0
-    proposed = await runtime.call_tool('booking_create', args)
+    arguments = {'actions': [{'capability': 'booking.create', 'arguments': args}]} if proposal_tool == 'business_propose' else args
+    proposed = await runtime.call_tool(proposal_tool, arguments)
     assert 'Окрашивание' in proposed.safe_draft and '18:00' in proposed.safe_draft
     assert 'resource_test' not in proposed.safe_draft and 'confirm ' not in proposed.safe_draft
     assert provider['posts'] == 0
+    plan = await runtime.repository.selected_plan(runtime.request, runtime.grant)
+    assert plan.proposal_state == 'PREPARED'
+    assert len(plan.operations) == 1 and plan.operations[0].status == 'RESERVED'
     later_runtime = await BusinessRuntime.open(later(runtime.request, '+'), runtime.grant, db_session, registry)
     result = await later_runtime.call_tool('business_decide_proposal',
         dict(proposal_id=proposed.tool_payload['proposal_id'], intent='CONFIRM'))
