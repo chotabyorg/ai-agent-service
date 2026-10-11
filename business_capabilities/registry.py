@@ -78,4 +78,9 @@ def tool_schema(model):
             else:
                 result['anyOf'] = branches
         return result
-    return visit(source)
+    result = visit(source)
+    if model is s.BookingCreate:
+        # Expose the existing runtime validator to the model without changing
+        # the durable catalog schema fingerprint or its accepted input set.
+        result['oneOf'] = [{'required': ['customer_ref']}, {'required': ['customer']}]
+    return result

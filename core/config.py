@@ -70,7 +70,19 @@ class Settings(BaseSettings):
     managed_ai_auth_principals: SecretStr = Field(default="", repr=False)
     managed_ai_execution_seconds: float = Field(default=90.0, ge=1, le=240, allow_inf_nan=False)
     managed_ai_context_bytes: int = Field(default=131072, ge=1024, le=1048576)
+    # Explicit model IDs only; no default override, pattern matching or routing change.
+    managed_openrouter_disable_reasoning_models: list[str] = Field(default_factory=list, max_length=16)
     _managed_principals: tuple = PrivateAttr(default=())
+
+    @model_validator(mode="after")
+    def validate_managed_reasoning_transport(self) -> "Settings":
+        if self.managed_openrouter_disable_reasoning_models:
+            if (self.privacy_filter_enabled
+                    or self.llm_base_url.rstrip('/') != 'https://openrouter.ai/api/v1'):
+                # Do not silently drop an unsupported proxy/provider parameter or
+                # render settings (which contain credentials) in validation errors.
+                raise RuntimeError("Managed reasoning control requires direct OpenRouter transport")
+        return self
 
     @model_validator(mode="after")
     def validate_managed_registry(self) -> "Settings":

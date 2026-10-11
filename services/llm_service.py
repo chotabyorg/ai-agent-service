@@ -513,9 +513,27 @@ class LLMService:
                             continue
                         tool_registry[tool_name] = manager
                         openai_tools.append(tool)
+            required_proposal_id = (
+                str(prompt_context.pending.proposal_id)
+                if runtime and prompt_context is not None and prompt_context.pending is not None
+                else None
+            )
+            if required_proposal_id is not None and "business_decide_proposal" not in tool_registry:
+                raise ManagedExecutionError("INVALID_RESULT")
+            tool_choice = ({"type": "function", "function": {"name": "business_decide_proposal"}}
+                           if required_proposal_id is not None else None)
+            preparation_schemas = {}
+            if runtime:
+                from services.managed_preparation import PREPARATION_TOOLS, PreparationSchema
+                preparation_schemas = {tool["function"]["name"]: PreparationSchema(tool["function"]["parameters"])
+                    for tool in openai_tools if tool["function"]["name"] in PREPARATION_TOOLS}
+            preparation_correction = None
+            correction_used = False
+            seen_tool_ids = set()
             if runtime:
                 messages = self._budget_managed_messages(
                     agent, messages, openai_tools, selected_indices, communication, simple_selection,
+                    tool_choice=tool_choice,
                 )
             for step_index in range(self.MAX_TOOL_STEPS):
                 set_chat_failure_stage(ChatFailureStage.LLM_REQUEST)
@@ -528,7 +546,8 @@ class LLMService:
                                 if gate.halt_status:
                                     raise ManagedExecutionError(gate.error_code, processing_status=gate.halt_status)
                                 return gate.safe_draft
-                        self._check_managed_envelope(agent, messages, openai_tools)
+                        self._check_managed_envelope(agent, messages, openai_tools, tool_choice=tool_choice)
+                    model_extra_body = self._managed_model_extra_body(agent) if runtime else {}
                     pending_response = llm_client.chat.completions.create(
                         model=agent.model_name or self.settings.llm_default_model,
                         temperature=agent.temperature,
@@ -536,6 +555,8 @@ class LLMService:
                         messages=messages,
                         tools=openai_tools or None,
                         parallel_tool_calls=False,
+                        **({"tool_choice": tool_choice} if tool_choice is not None else {}),
+                        **({"extra_body": model_extra_body} if model_extra_body else {}),
                         extra_headers=self._build_extra_headers(),
                     )
                     response = await runtime.operation(pending_response) if runtime else await pending_response
@@ -595,6 +616,32 @@ class LLMService:
                     message = selected.message
                 else:
                     message = response.choices[0].message
+                if preparation_correction is not None:
+                    calls = getattr(message, "tool_calls", None)
+                    if selected.branch != "TOOL_CALLS" or type(calls) is not list or len(calls) != 1:
+                        raise ManagedExecutionError("INVALID_RESULT")
+                    call = calls[0]
+                    if (getattr(call, "type", None) != "function"
+                            or not isinstance(getattr(call, "id", None), str) or not call.id
+                            or call.id in seen_tool_ids
+                            or getattr(getattr(call, "function", None), "name", None) != preparation_correction):
+                        raise ManagedExecutionError("INVALID_RESULT")
+                if required_proposal_id is not None:
+                    # A pending customer's reply must reach the semantic runtime
+                    # before reads or ordinary prose can bypass that decision.
+                    calls = getattr(message, "tool_calls", None)
+                    if selected.branch != "TOOL_CALLS" or type(calls) is not list or len(calls) != 1:
+                        raise ManagedExecutionError("INVALID_RESULT")
+                    call = calls[0]
+                    function = getattr(call, "function", None)
+                    if (getattr(call, "type", None) != "function"
+                            or not isinstance(getattr(call, "id", None), str) or not call.id
+                            or getattr(function, "name", None) != "business_decide_proposal"):
+                        raise ManagedExecutionError("INVALID_RESULT")
+                    decision_args = parse_managed_tool_arguments(getattr(function, "arguments", None))
+                    if (set(decision_args) != {"proposal_id", "intent"}
+                            or decision_args["proposal_id"] != required_proposal_id):
+                        raise ManagedExecutionError("INVALID_RESULT")
                 if (selected is not None and selected.branch != "TOOL_CALLS") or (
                         selected is None and not getattr(message, "tool_calls", None)):
                     if runtime and runtime.business is not None:
@@ -618,9 +665,47 @@ class LLMService:
                     set_chat_failure_stage(ChatFailureStage.MCP_CLEANUP)
                     return clean_answer
 
+                if runtime:
+                    feedback = None
+                    invalid_call = None
+                    # Preflight preparation members before dispatching ANY call
+                    # in this completion, including an earlier WRITE_SAFE call.
+                    for call in message.tool_calls:
+                        name = getattr(getattr(call, "function", None), "name", None)
+                        if name not in PREPARATION_TOOLS:
+                            continue
+                        if name not in preparation_schemas:
+                            raise ManagedExecutionError("TOOL_SETUP_FAILED")
+                        arguments = parse_managed_tool_arguments(call.function.arguments)
+                        feedback = preparation_schemas[name].feedback(arguments)
+                        if feedback is not None:
+                            invalid_call = call
+                            break
+                    if invalid_call is not None:
+                        if (correction_used or required_proposal_id is not None or len(message.tool_calls) != 1
+                                or getattr(invalid_call, "type", None) != "function"
+                                or not isinstance(getattr(invalid_call, "id", None), str) or not invalid_call.id
+                                or runtime.tool_dispatch_attempted or runtime.business is None):
+                            raise ManagedExecutionError("TOOL_SETUP_FAILED")
+                        gate = await runtime.operation(runtime.business.guard_result(allow_incomplete=True))
+                        if gate is not None and gate.halt_status:
+                            raise ManagedExecutionError(gate.error_code, processing_status=gate.halt_status)
+                        if gate is not None or runtime.business.collector.snapshot():
+                            raise ManagedExecutionError("TOOL_SETUP_FAILED")
+                        preparation_correction = invalid_call.function.name
+                        correction_used = True
+                        tool_choice = {"type": "function", "function": {"name": preparation_correction}}
+                        messages.append(self._assistant_message_to_dict(message, managed=True))
+                        messages.append({"role": "tool", "tool_call_id": invalid_call.id,
+                            "name": preparation_correction, "content": json.dumps(feedback, ensure_ascii=False)})
+                        seen_tool_ids.add(invalid_call.id)
+                        self._check_managed_envelope(agent, messages, openai_tools, tool_choice=tool_choice)
+                        continue
+                    seen_tool_ids.update(call.id for call in message.tool_calls
+                        if isinstance(getattr(call, "id", None), str))
                 messages.append(self._assistant_message_to_dict(message, managed=runtime is not None))
                 if runtime:
-                    self._check_managed_envelope(agent, messages, openai_tools)
+                    self._check_managed_envelope(agent, messages, openai_tools, tool_choice=tool_choice)
 
                 set_chat_failure_stage(ChatFailureStage.TOOL_EXECUTION)
                 for tool_call in message.tool_calls:
@@ -644,6 +729,9 @@ class LLMService:
                         if business_result.halt_status:
                             raise ManagedExecutionError(business_result.error_code,
                                 processing_status=business_result.halt_status)
+                        required_proposal_id = None
+                        preparation_correction = None
+                        tool_choice = None
                         if business_result.safe_draft is not None:
                             # Proposals are bounded frozen public fields. Model
                             # prose is never permission or a completion receipt.
@@ -723,21 +811,31 @@ class LLMService:
             raise ManagedExecutionError("MODEL_ERROR")
         raise ChatProcessingError("Maximum number of LLM tool steps reached.")
 
-    def _managed_envelope(self, agent, messages, tools):
-        return {"model": agent.model_name or self.settings.llm_default_model,
+    def _managed_model_extra_body(self, agent):
+        model = agent.model_name or self.settings.llm_default_model
+        if model in self.settings.managed_openrouter_disable_reasoning_models:
+            return {"reasoning": {"enabled": False}}
+        return {}
+
+    def _managed_envelope(self, agent, messages, tools, *, tool_choice=None):
+        envelope = {"model": agent.model_name or self.settings.llm_default_model,
                 "temperature": agent.temperature, "max_tokens": self.settings.llm_max_tokens,
                 "messages": messages, "tools": tools or None, "parallel_tool_calls": False}
+        if tool_choice is not None:
+            envelope["tool_choice"] = tool_choice
+        envelope.update(self._managed_model_extra_body(agent))
+        return envelope
 
-    def _check_managed_envelope(self, agent, messages, tools):
+    def _check_managed_envelope(self, agent, messages, tools, *, tool_choice=None):
         try:
-            size = len(json.dumps(self._managed_envelope(agent, messages, tools),
+            size = len(json.dumps(self._managed_envelope(agent, messages, tools, tool_choice=tool_choice),
                                   ensure_ascii=False, allow_nan=False).encode("utf-8"))
         except (ValueError, UnicodeError, RecursionError, TypeError):
             raise ManagedExecutionError("INVALID_RESULT") from None
         if size > self.settings.managed_ai_context_bytes:
             raise ManagedExecutionError("CONTEXT_LIMIT")
 
-    def _budget_managed_messages(self, agent, messages, tools, selected_indices, communication, simple):
+    def _budget_managed_messages(self, agent, messages, tools, selected_indices, communication, simple, *, tool_choice=None):
         prefix = messages[:len(messages) - len(communication)]
         retained = list(range(len(communication)))
         selected = set(selected_indices)
@@ -750,7 +848,7 @@ class LLMService:
                     ", ".join(map(str, ordinals)) + ". Other communication messages are context."})
             current.extend(communication[index] for index in retained)
             try:
-                self._check_managed_envelope(agent, current, tools)
+                self._check_managed_envelope(agent, current, tools, tool_choice=tool_choice)
                 return current
             except ManagedExecutionError as exc:
                 if exc.code != "CONTEXT_LIMIT":

@@ -131,6 +131,8 @@ async def execute_managed_owned(request, grant, runtime, db_provider, session_fa
                 collector=collector))
             runtime.check()
             entry = await runtime.operation(runtime.business.guard_result(allow_incomplete=True))
+            if entry is None:
+                entry = runtime.business.completed_confirmation_replay()
             if entry is not None and entry.halt_status:
                 raise ManagedExecutionError(entry.error_code, processing_status=entry.halt_status)
             if entry is not None and entry.safe_draft is not None:

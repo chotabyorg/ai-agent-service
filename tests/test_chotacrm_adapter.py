@@ -198,3 +198,20 @@ async def test_self_invalidating_or_dependent_bundle_denied_before_effect(db_ses
         assert result.halt_status == 'FAILED' and provider['posts'] == 0
     async with db_session() as db:
         assert await db.scalar(select(func.count()).select_from(BusinessPlan)) == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('tool', ['booking_create', 'business_propose'])
+async def test_empty_reference_with_new_customer_still_fails_before_reservation(db_session, crm_settings, tool):
+    runtime, _, provider, args = await setup(db_session, crm_settings)
+    # Real model failure: new-customer details plus an empty optional reference.
+    # Advertising the XOR must not turn this into an accepted/normalized input.
+    arguments = dict(args, customer_ref='')
+    if tool == 'business_propose':
+        arguments = {'actions': [{'capability': 'booking.create', 'arguments': arguments}]}
+    result = await runtime.call_tool(tool, arguments)
+    assert result.halt_status == 'FAILED' and result.error_code == 'TOOL_SETUP_FAILED'
+    assert provider['posts'] == 0
+    async with db_session() as db:
+        assert await db.scalar(select(func.count()).select_from(BusinessPlan)) == 0
+        assert await db.scalar(select(func.count()).select_from(BusinessOperation)) == 0
