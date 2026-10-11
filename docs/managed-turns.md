@@ -113,6 +113,19 @@ context/tool descriptors that cannot fit fail CONTEXT_LIMIT. Later steps never
 drop tool protocol pairs. Legacy budgeting and configured completion token cap
 remain unchanged.
 
+`MANAGED_OPENROUTER_DISABLE_REASONING_MODELS` is an optional JSON list of exact
+model IDs (default empty, at most16). A listed managed model sends OpenRouter
+`reasoning.enabled=false`; unlisted models and all legacy requests preserve their
+existing parameters. The control is included in the complete envelope byte budget.
+It requires direct `https://openrouter.ai/api/v1` transport: startup rejects a
+nonempty list with privacy proxy or another upstream instead of silently dropping
+the control. This does not change model selection, provider routing, completion
+token cap, absolute execution deadline, retries, or Business confirmation policy.
+Provider support and real-model behavior still require verification; a requested
+setting alone does not prove it was honored. No automatic retry follows a truncated
+completion or timeout. See OpenRouter's
+[reasoning budget documentation](https://openrouter.ai/docs/guides/best-practices/reasoning-tokens).
+
 Runtime results always return200 with exact wire contract version and UUID/counter echoes, status
 DRAFT_READY/NO_RESPONSE/FAILED/UNKNOWN, `draft_text`, closed safe `error_code`, and
 `operation_refs`. DRAFT_READY requires valid nonnull draft and null error; NO_RESPONSE

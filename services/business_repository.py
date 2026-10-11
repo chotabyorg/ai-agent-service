@@ -48,6 +48,8 @@ class OperationSnapshot:
     attempt_count: int
     receipt_id: str | None
     object_id: str | None
+    receipt_evidence: dict | None = None
+    receipt_fingerprint: str | None = None
 
 
 @dataclass(frozen=True)
@@ -60,6 +62,8 @@ class PlanSnapshot:
     expires_at: datetime
     operations: tuple[OperationSnapshot, ...]
     catalog_revision: str
+    confirmed_turn_id: UUID | None = None
+    confirmation_input_ids: tuple[str, ...] = ()
 
     @property
     def references(self):
@@ -366,7 +370,10 @@ class BusinessRepository:
                             plan.requires_confirmation, plan.expires_at,
                             tuple(OperationSnapshot(op.id, op.ordinal, op.status, self._command(scope, plan, op),
                                                     op.state_version, op.dispatch_epoch, op.dispatch_nonce,
-                                                    op.attempt_count, op.receipt_id, op.object_id) for op in operations), plan.catalog_revision)
+                                                    op.attempt_count, op.receipt_id, op.object_id,
+                                                    copy.deepcopy(op.receipt_evidence), op.receipt_fingerprint)
+                                  for op in operations), plan.catalog_revision, plan.confirmed_turn_id,
+                            tuple(plan.confirmation_input_ids or ()))
 
     @staticmethod
     async def _unresolved(session, scope_id):

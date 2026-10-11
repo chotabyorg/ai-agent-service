@@ -115,6 +115,41 @@ class BusinessRuntime:
             return self._halt(any(op.status in {"SUCCEEDED", "DISPATCHING", "UNKNOWN"} for op in gate.plan.operations))
         return self._halt(True)
 
+    def completed_confirmation_replay(self):
+        """Entry-only reply from this confirmation Turn's retained booking receipt.
+
+        The fresh result gate has already checked scope and request fingerprint.
+        This grants no dispatch authority and does not alter the final guard or
+        normal model continuation after the first successful confirmation.
+        """
+        gate = self.last_gate
+        if (gate is None or gate.scope_unresolved or gate.disposition != "ALL_SUCCEEDED"
+                or self.registration is None or self.registration.adapter_id != "chotacrm"
+                or not self.semantic_confirmation):
+            return None
+        plan = gate.plan
+        if (plan is None or plan.proposal_state != "CONFIRMED" or not plan.requires_confirmation
+                or plan.confirmed_turn_id != self.request.turn_id
+                or plan.origin_turn_id == self.request.turn_id or len(plan.operations) != 1):
+            return None
+        operation = plan.operations[0]
+        if operation.command.capability != "booking.create":
+            return None
+        try:
+            from business_capabilities.runtime_tools import completed_booking_reply
+
+            receipt = SucceededReceipt.model_validate(operation.receipt_evidence)
+            _, digest = self.repository._evidence(receipt, operation.command)
+            if (plan.confirmation_input_ids != tuple(str(m.id) for m in self.request.selected_messages)
+                    or operation.status != "SUCCEEDED" or operation.command.adapter_id != "chotacrm"
+                    or digest != operation.receipt_fingerprint
+                    or receipt.receipt_id != operation.receipt_id or receipt.object_id != operation.object_id):
+                return self._halt(True)
+            return BusinessToolResult(safe_draft=completed_booking_reply(operation, receipt))
+        except Exception:
+            # Corrupt or incomplete retained evidence cannot become success prose.
+            return self._halt(True)
+
     def facts_resolver(self, actions, *, allow_disabled=True):
         # This callback is invoked only by the repository after its P transaction
         # has fully closed. It contains no admission right or cached witness.

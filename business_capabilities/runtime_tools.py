@@ -9,6 +9,26 @@ from business_capabilities.chotacrm_adapter import action_key
 from business_capabilities.context import BusinessRuntimeError, failure
 
 
+def completed_booking_reply(operation, receipt):
+    """Historical success wording from a validated retained canonical receipt."""
+    from business_capabilities.results import validate_result
+
+    result = validate_result('booking.create', receipt.evidence.get('result'), write=True)
+    if (result.get('status') != 'OK' or result.get('effect') not in {'APPLIED', 'REPLAYED'}
+            or result.get('operation_id') != str(operation.id)
+            or result.get('operation_ref') != receipt.receipt_id
+            or result['data']['ref'] != receipt.object_id
+            or result['data']['status'] != 'CONFIRMED'):
+        raise BusinessSafetyError('RECEIPT_INVALID', processing_status='UNKNOWN')
+    booking = result['data']
+    start = datetime.fromisoformat(booking['start_at'].replace('Z', '+00:00'))
+    time = start.astimezone(ZoneInfo(booking['timezone'])).strftime('%d.%m.%Y в %H:%M')
+    details = booking.get('offering_name') or 'услуга'
+    if booking.get('resource_name'):
+        details += f", специалист {booking['resource_name']}"
+    return f"Запись была подтверждена: {details}, {time} ({booking['timezone']})."
+
+
 def canonical_tools(runtime, controls):
     available = [c for c in CAPABILITIES if c.id in runtime.binding.enabled_capabilities]
     result = []

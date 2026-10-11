@@ -6,6 +6,7 @@ greenlet
 asyncpg
 pydantic
 pydantic-settings
+jsonschema>=4.20
 python-dotenv
 redis
 openai==2.26.0
