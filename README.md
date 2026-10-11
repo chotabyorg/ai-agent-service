@@ -495,6 +495,17 @@ keeps only opaque refs, with an explicit manual pre-terminal crash-F recovery;
 already-terminal empty refs cannot be enriched by current APIs. Existing chat
 callers stay on `/v1/chat/completions`. No real provider/channel/deployment is enabled.
 
+Managed final completions require visible text after the existing thinking-tag
+removal; empty, missing, non-string or cleaned-empty model output returns the
+existing `INVALID_RESULT` instead of manufactured fallback prose. Fresh Business
+guards and retained operation references remain authoritative. Legacy chat keeps
+its existing empty-answer fallback. A literal nonempty model answer, including
+that same fallback phrase, remains valid; finish reason and bounded token usage
+are observational only. Finite completion diagnostics include only canonical
+Turn UUID, step, closed categories and optional integer token counts, never
+model content, reasoning, tool arguments or credentials. These diagnostics do
+not establish the cause of earlier failures or prove a successful business action.
+
 Business admission closes its wait-capable read-only authority probe before a
 fresh external facts read, then obtains a separate complete NOWAIT decision and
 positive COMMIT. Renewed contention returns a bounded safe result; each later

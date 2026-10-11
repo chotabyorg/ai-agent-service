@@ -26,6 +26,7 @@ from services.managed_tools import (ManagedExecutionError, inspect_managed_tool_
                                     parse_managed_tool_arguments, _bounded_json)
 from services.managed_http_cleanup import close_managed_helper, own_managed_http
 from services.managed_reasoning import managed_reasoning_fields
+from services.managed_completion import select_managed_completion, observe_managed_completion
 from services.chat_diagnostics import ChatFailureStage, set_chat_failure_stage
 from services.agent_service import AgentService
 from services.encryption_service import EncryptionService
@@ -516,7 +517,7 @@ class LLMService:
                 messages = self._budget_managed_messages(
                     agent, messages, openai_tools, selected_indices, communication, simple_selection,
                 )
-            for _ in range(self.MAX_TOOL_STEPS):
+            for step_index in range(self.MAX_TOOL_STEPS):
                 set_chat_failure_stage(ChatFailureStage.LLM_REQUEST)
                 try:
                     if runtime:
@@ -586,18 +587,31 @@ class LLMService:
                     raise ChatProcessingError(str(exc))
 
                 set_chat_failure_stage(ChatFailureStage.RESPONSE_PROCESSING)
-                message = response.choices[0].message
-                if not getattr(message, "tool_calls", None):
+                selected = None
+                if runtime:
+                    selected = select_managed_completion(response, self._strip_thinking_tags)
+                    observe_managed_completion(response, selected,
+                        request=runtime.request, step=step_index + 1)
+                    message = selected.message
+                else:
+                    message = response.choices[0].message
+                if (selected is not None and selected.branch != "TOOL_CALLS") or (
+                        selected is None and not getattr(message, "tool_calls", None)):
                     if runtime and runtime.business is not None:
                         gate = await runtime.operation(runtime.business.guard_result())
                         if gate is not None:
                             if gate.halt_status:
                                 raise ManagedExecutionError(gate.error_code, processing_status=gate.halt_status)
                             return gate.safe_draft
-                    raw_answer = message.content or "I processed your request."
-                    clean_answer = self._strip_thinking_tags(raw_answer)
-                    if not clean_answer:
-                        clean_answer = "I processed your request."
+                    if selected is not None:
+                        if selected.branch == "INVALID_SHAPE" or not selected.answer:
+                            raise ManagedExecutionError("INVALID_RESULT")
+                        clean_answer = selected.answer
+                    else:
+                        raw_answer = message.content or "I processed your request."
+                        clean_answer = self._strip_thinking_tags(raw_answer)
+                        if not clean_answer:
+                            clean_answer = "I processed your request."
 
                     if completion_hook:
                         await completion_hook(clean_answer)
