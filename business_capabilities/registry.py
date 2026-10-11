@@ -79,6 +79,20 @@ def tool_schema(model):
                 result['anyOf'] = branches
         return result
     result = visit(source)
+    # Explain existing read semantics only on the model-facing surface. Keep
+    # canonical schemas/fingerprints unchanged for retained Business evidence.
+    if issubclass(model, s.Page) or model is s.CustomerContext:
+        result['properties']['cursor']['description'] = (
+            'Omit on the first request. For a later page, copy an exact next_cursor '
+            'returned by this tool for the same search. Never invent a cursor, '
+            'page number, or "0". If no next_cursor was returned, omit cursor.'
+        )
+    if model in (s.CatalogSearch, s.ResourceSearch):
+        result['properties']['query']['description'] = (
+            'Case-insensitive literal substring of the name, not semantic search. '
+            'Use a short distinctive word, not the full customer sentence. '
+            'Omit or use an empty string to browse; if no matches, broaden the query.'
+        )
     if model is s.BookingCreate:
         # Expose the existing runtime validator to the model without changing
         # the durable catalog schema fingerprint or its accepted input set.
