@@ -13,12 +13,19 @@ def completed_booking_reply(operation, receipt):
     """Historical success wording from a validated retained canonical receipt."""
     from business_capabilities.results import validate_result
 
-    result = validate_result('booking.create', receipt.evidence.get('result'), write=True)
+    capability = operation.command.capability
+    wording = {
+        'booking.create': ('CONFIRMED', 'Запись была подтверждена'),
+        'booking.reschedule': ('CONFIRMED', 'Запись была перенесена'),
+        'booking.cancel': ('CANCELLED', 'Запись была отменена'),
+    }
+    status, prefix = wording[capability]
+    result = validate_result(capability, receipt.evidence.get('result'), write=True)
     if (result.get('status') != 'OK' or result.get('effect') not in {'APPLIED', 'REPLAYED'}
             or result.get('operation_id') != str(operation.id)
             or result.get('operation_ref') != receipt.receipt_id
             or result['data']['ref'] != receipt.object_id
-            or result['data']['status'] != 'CONFIRMED'):
+            or result['data']['status'] != status):
         raise BusinessSafetyError('RECEIPT_INVALID', processing_status='UNKNOWN')
     booking = result['data']
     start = datetime.fromisoformat(booking['start_at'].replace('Z', '+00:00'))
@@ -26,7 +33,7 @@ def completed_booking_reply(operation, receipt):
     details = booking.get('offering_name') or 'услуга'
     if booking.get('resource_name'):
         details += f", специалист {booking['resource_name']}"
-    return f"Запись была подтверждена: {details}, {time} ({booking['timezone']})."
+    return f"{prefix}: {details}, {time} ({booking['timezone']})."
 
 
 def canonical_tools(runtime, controls):

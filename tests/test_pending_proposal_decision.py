@@ -1,7 +1,9 @@
 """Pending semantic replies must reach runtime before ordinary assistant prose."""
 import json
+from datetime import datetime
 from types import SimpleNamespace
 from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 import httpx
 import pytest
@@ -70,18 +72,48 @@ async def test_reject_prose_without_runtime_decision_is_not_a_success(db_session
     ('REJECT', 'нет', 'CANCELLED', 0), ('UNRELATED', 'Как вас найти?', 'PREPARED', 0),
     ('CHANGE', 'да, только на час позже', 'CANCELLED', 0), ('CONFIRM', '+', 'CONFIRMED', 1),
 ])
-async def test_pending_reply_requires_one_decision_then_releases_choice(
+async def test_pending_reply_finalizes_confirmation_or_releases_choice(
         db_session, crm_settings, monkeypatch, intent, text, state, effects):
     original, runtime, provider, proposal_id = await pending(db_session, crm_settings, monkeypatch, text)
     model = ScriptedLLMClient()
+    continuation = build_llm_response(content='Ответ после решения runtime.')
     model.chat.completions.queue(build_llm_response(tool_calls=[decision(proposal_id, intent)]),
-                                 build_llm_response(content='Ответ после решения runtime.'))
-    assert await run_core(db_session, runtime, model) == 'Ответ после решения runtime.'
+                                 continuation)
+    reply = await run_core(db_session, runtime, model)
     assert model.chat.completions.calls[0]['tool_choice'] == CHOICE
-    assert 'tool_choice' not in model.chat.completions.calls[1]
     plan = await original.repository.selected_plan(original.request, original.grant)
     assert plan.proposal_state == state and provider['posts'] == effects
-    assert plan.operations[0].status == ('SUCCEEDED' if effects else 'RESERVED')
+    assert len(plan.operations) == 1
+    operation = plan.operations[0]
+    assert operation.status == ('SUCCEEDED' if effects else 'RESERVED')
+    if intent == 'CONFIRM':
+        assert len(model.chat.completions.calls) == 1
+        assert list(model.chat.completions._responses) == [continuation]
+        assert operation.attempt_count == 1
+        receipt = operation.receipt_evidence['evidence']['result']
+        provider_receipt = provider['receipts'][str(operation.id)]
+        assert {k: v for k, v in receipt.items() if k != 'data'} == {
+            k: v for k, v in provider_receipt.items() if k != 'data'}
+        normalized_booking = dict(provider_receipt['data'])
+        for timestamp in ('start_at', 'end_at'):
+            assert datetime.fromisoformat(receipt['data'][timestamp]) == datetime.fromisoformat(normalized_booking[timestamp])
+            normalized_booking[timestamp] = receipt['data'][timestamp]
+        assert receipt['data'] == normalized_booking
+        assert receipt['status'] == 'OK' and receipt['effect'] == 'APPLIED'
+        assert receipt['operation_id'] == str(operation.id)
+        assert receipt['operation_ref'] == operation.receipt_id
+        booking = receipt['data']
+        assert booking['status'] == 'CONFIRMED' and booking['ref'] == operation.object_id
+        assert reply and 'Запись была подтверждена' in reply
+        assert booking['offering_name'] in reply and booking['resource_name'] in reply
+        local_start = datetime.fromisoformat(booking['start_at']).astimezone(ZoneInfo(booking['timezone']))
+        assert local_start.strftime('%d.%m.%Y в %H:%M') in reply
+        assert booking['timezone'] in reply
+    else:
+        assert reply == 'Ответ после решения runtime.'
+        assert len(model.chat.completions.calls) == 2
+        assert 'tool_choice' not in model.chat.completions.calls[1]
+        assert not model.chat.completions._responses
 
 
 @pytest.mark.asyncio
