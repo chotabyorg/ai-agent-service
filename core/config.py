@@ -5,6 +5,8 @@ from functools import lru_cache
 from pydantic import Field, PrivateAttr, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from config.llm_models import get_default_model_id
+
 
 class Settings(BaseSettings):
     """Environment-backed settings for the microservice."""
@@ -38,7 +40,7 @@ class Settings(BaseSettings):
     llm_provider: str = Field(default="openrouter")
     llm_api_key: str = Field(default="")
     llm_base_url: str = Field(default="https://openrouter.ai/api/v1")
-    llm_default_model: str = Field(default="google/gemini-2.5-flash")
+    llm_default_model: str = Field(default_factory=get_default_model_id)
     llm_default_temperature: float = Field(default=0.7)
     llm_max_tokens: int = Field(default=1024)
     llm_http_referer: str | None = Field(default=None)

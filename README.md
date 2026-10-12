@@ -196,7 +196,7 @@ The chat endpoint keeps its existing JSON request and response. Trusted callers 
 | `LLM_PROVIDER` | `openrouter` | Логический provider label |
 | `LLM_API_KEY` | `""` | API ключ OpenAI/OpenRouter |
 | `LLM_BASE_URL` | `https://openrouter.ai/api/v1` | Base URL OpenAI-compatible API |
-| `LLM_DEFAULT_MODEL` | `google/gemini-2.5-flash` | Модель по умолчанию |
+| `LLM_DEFAULT_MODEL` | `openai/gpt-6-luna` | Модель по умолчанию |
 | `LLM_DEFAULT_TEMPERATURE` | `0.7` | Температура по умолчанию |
 | `LLM_MAX_TOKENS` | `1024` | Максимум output/completion tokens для OpenAI-compatible provider |
 | `LLM_HTTP_REFERER` | `null` | Опциональный `HTTP-Referer` для OpenRouter |
@@ -233,7 +233,7 @@ REDIS_DB=0
 
 LLM_API_KEY=your_api_key
 LLM_BASE_URL=https://openrouter.ai/api/v1
-LLM_DEFAULT_MODEL=google/gemini-2.5-flash
+LLM_DEFAULT_MODEL=openai/gpt-6-luna
 
 PRIVACY_FILTER_ENABLED=false
 PRIVACY_FILTER_BASE_URL=http://privacy-filter-service:8000
@@ -405,7 +405,7 @@ Rollout выполняется двумя этапами, без останов�
 docker-compose up --build -d
 ```
 
-Контейнер приложения при старте сначала выполняет `alembic upgrade head`, а затем поднимает `uvicorn` на `0.0.0.0:8000`.
+В локальном Docker Compose команда приложения сначала выполняет `alembic upgrade head`, затем запускает `uvicorn`. Production GitOps уже использует отдельный migration initContainer перед API-контейнером; Dockerfile сам запускает только `uvicorn`.
 
 ## API Endpoints
 
@@ -435,7 +435,7 @@ curl -X POST http://localhost:8000/v1/agents/ \
   -d '{
     "name": "Sales Agent",
     "system_prompt": "You are a helpful sales assistant.",
-    "model_name": "google/gemini-2.5-flash",
+    "model_name": "openai/gpt-6-luna",
     "temperature": 0.7,
     "is_active": true
   }'
@@ -473,6 +473,12 @@ curl http://localhost:8000/v1/mcp-services
 ```
 
 ### Models API
+
+Каталог содержит ровно четыре модели в порядке GPT-6 Luna, Kimi K3, Qwen3.8 27B, Muse Glimmer 30B. Первая запись определяет выбор onboarding после успешного discovery и runtime fallback (`openai/gpt-6-luna`). `LLM_DEFAULT_MODEL` может явно переопределить только runtime fallback; сохранённый `model_name` агента имеет приоритет. API создания по-прежнему требует явный `model_name`, редактирование сохраняет явный выбор.
+
+Миграция `luna_20261012_01` переводит **все** существующие `agent_templates.model_name` на Luna, не меняя остальные поля или связанные записи. Повторное выполнение data operation безопасно по результату. Старые индивидуальные значения восстановить невозможно, поэтому downgrade явно отклоняется. Перед production upgrade нужны проверенный backup и согласованный image rollout; ручной UPDATE не используется. Прежний image не является готовым rollback: его Alembic не знает новую revision и migration initContainer не запустится. Recovery image должен сохранить новую revision и вернуть нужный предыдущий runtime/catalog; DB downgrade запрещён, прежние индивидуальные модели не восстанавливаются. Production `LLM_DEFAULT_MODEL` необходимо отдельно согласовать с новым default в GitOps.
+
+Frontend при ошибке discovery пока содержит legacy Gemini fallback; эта отдельная проблема не исправляется catalog PR. Гарантия нового default для onboarding относится к успешному discovery.
 
 - `GET /v1/models` — получить список доступных LLM-моделей.
 
@@ -579,7 +585,7 @@ curl -X POST http://localhost:8000/v1/chat/completions \
 
 - SSE streaming пока не реализован.
 - Встроенный MCP manager сейчас настроен прежде всего под Bitrix24.
-- Автоматическое применение миграций при старте сервиса не добавлено.
+- Миграции применяются существующим Compose command или production GitOps initContainer; отдельный запуск Dockerfile не применяет миграции.
 - Авторизация service-to-service реализована только для `/internal/v1/*` эндпоинтов (через `X-Service-Token`). Для публичных `/v1/*` эндпоинтов внутренний вызов ai-agent-service из других микросервисов по-прежнему полагается на доверие внутри Docker-сети.
 
 ## Полезные файлы
