@@ -192,7 +192,12 @@ class BusinessRuntime:
                         "intent": {"type": "string", "enum": ["CONFIRM", "REJECT", "CHANGE", "UNRELATED"]}}}}}
         if self.registration.adapter_id == 'chotacrm':
             from business_capabilities.runtime_tools import canonical_tools
-            return canonical_tools(self, tools)
+            tools = canonical_tools(self, tools)
+        # Omission is part of the tool contract. Some OpenAI-compatible routes
+        # otherwise normalize optional properties into required strict inputs.
+        # This wire hint does not change authoritative closed runtime validation.
+        for tool in tools:
+            tool['function']['strict'] = False
         return tools
 
     @property
