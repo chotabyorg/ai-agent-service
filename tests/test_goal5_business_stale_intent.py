@@ -9,12 +9,14 @@ import pytest
 from sqlalchemy import select
 
 from core.config import get_settings
+from core.voice_latency import VoiceLatencyProfile
 from models.agent import AgentTemplate
 from models.business import BusinessOperation
 from schemas.business import BusinessSafetyError
 from schemas.conversation_effects import EffectReason
 from services.business_registry import BusinessRegistry
 from services.llm_service import LLMService
+from services.managed_tools import ManagedExecutionError
 from services.managed_runtime import ManagedRuntime
 from services.prompt_builder import ChatContext
 from tests.business_effect_helpers import (
@@ -72,8 +74,10 @@ class SplitAwareEffectPort(FakeConversationEffectPort):
 
 async def semantic_business(factory, *, ttl=300, old_reason=EffectReason.INTERVENING_SPLIT,
                             current_reason=EffectReason.ELIGIBLE, corrupt_old_fingerprint=False,
-                            fail_old=False, slots=("18:00",), include_safe_write=False):
-    base, provider, _, binding = await setup_business(factory, confirmation=True)
+                            fail_old=False, slots=("18:00",), include_safe_write=False,
+                            channel="TELEGRAM"):
+    base, provider, _, binding = await setup_business(
+        factory, confirmation=True, channel=channel)
     capabilities = base.registration.capabilities
     enabled_capabilities = ["booking.create"]
     if include_safe_write:
@@ -319,6 +323,86 @@ async def test_stale_change_allows_same_parameters_through_write_safe_policy(
     assert fresh.operations[0].effect_permit_id is not None
     permit = port.permit_requests[0]
     assert permit.turn_id == request.turn_id and permit.origin_turn_id == request.turn_id
+
+
+@pytest.mark.asyncio
+async def test_voice_profile_bytes_are_included_in_stale_change_refresh_budget(
+        db_session, monkeypatch):
+    original, provider, registry, old_plan, port = await semantic_business(
+        db_session, channel="VOICE")
+    request, stale = await later_runtime(
+        db_session, original, registry, port, "Запиши заново на 18:00")
+    settings = get_settings()
+    profile = VoiceLatencyProfile(
+        owner_id=request.owner_id,
+        integration_id=request.integration_id,
+        agent_id=request.agent_id,
+        model="fake",
+    )
+    monkeypatch.setattr(settings, "managed_voice_latency_profiles", [profile])
+    monkeypatch.setattr(settings, "managed_ai_context_bytes", 131072)
+    model = ScriptedLLMClient()
+    model.chat.completions.queue(build_llm_response(tool_calls=[
+        semantic_call(old_plan.id, "CHANGE")]))
+    service = LLMService()
+    original_check = service._check_managed_envelope
+    expected_sizes = {}
+    first_budget_size = None
+    refresh_observations = []
+
+    def bounded_check(agent, messages, tools, *, tool_choice=None, request=None):
+        nonlocal first_budget_size
+        with_profile = len(json.dumps(service._managed_envelope(
+            agent, messages, tools, tool_choice=tool_choice, request=request),
+            ensure_ascii=False, allow_nan=False).encode("utf-8"))
+        without_profile = len(json.dumps(service._managed_envelope(
+            agent, messages, tools, tool_choice=tool_choice, request=None),
+            ensure_ascii=False, allow_nan=False).encode("utf-8"))
+        if tool_choice is not None and first_budget_size is None:
+            first_budget_size = with_profile
+        if tool_choice is None and not refresh_observations:
+            budget = max(1024, first_budget_size or 0, without_profile)
+            assert with_profile > budget
+            expected_sizes.update(with_profile=with_profile,
+                                 without_profile=without_profile, budget=budget)
+            monkeypatch.setattr(settings, "managed_ai_context_bytes", budget)
+            refresh_observations.append(request)
+        return original_check(agent, messages, tools, tool_choice=tool_choice, request=request)
+
+    monkeypatch.setattr(service, "_check_managed_envelope", bounded_check)
+    monkeypatch.setattr(get_settings(), "knowledge_base_enabled", False)
+    managed = ManagedRuntime(20, request=request)
+    managed.business = stale
+    stale.execution = managed
+    async with db_session() as session:
+        agent = await session.get(AgentTemplate, request.agent_id)
+        try:
+            with pytest.raises(ManagedExecutionError, match="CONTEXT_LIMIT") as raised:
+                await service._execute_core(
+                    session,
+                    agent=agent,
+                    llm_client=model,
+                    credentials_records=(),
+                    communication=[{
+                        "role": "user" if item.actor == "CUSTOMER" else "assistant",
+                        "content": item.text,
+                    } for item in request.messages],
+                    chat_context=ChatContext(channel="voice", external_client_id="synthetic"),
+                    query="\n".join(item.text for item in request.selected_messages),
+                    runtime=managed,
+                    selected_indices=request.selected_local_indices,
+                    simple_selection=request.simple_selection,
+                )
+        finally:
+            await managed.stack.aclose()
+    assert raised.value.code == "CONTEXT_LIMIT"
+    assert expected_sizes["without_profile"] <= expected_sizes["budget"]
+    assert expected_sizes["budget"] < expected_sizes["with_profile"]
+    assert len(refresh_observations) == 1 and refresh_observations[0] is request
+    assert len(model.chat.completions.calls) == 1
+    assert model.chat.completions.calls[0]["extra_body"] == {
+        "reasoning": {"effort": "none"}, "provider": {"sort": "latency"}}
+    assert provider.posts == 0 and port.permit_requests == []
 
 
 @pytest.mark.asyncio

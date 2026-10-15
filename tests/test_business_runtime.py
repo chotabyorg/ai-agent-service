@@ -96,12 +96,12 @@ def actions(*slots):
 
 
 def make_request(agent_id, *, conversation_id=None, integration_id=None, turn_id=None, owner_id="Exact owner", messages=None,
-                 contract_version=1, input_revision=None):
+                 contract_version=1, input_revision=None, channel="TELEGRAM"):
     messages = messages or [dict(id=uuid4(), sequence=1, actor="CUSTOMER", direction="INBOUND", content_type="TEXT", text="Book at 12")]
     last = messages[-1]["sequence"]
     return ManagedTurnRequest(contract_version=contract_version, conversation_id=conversation_id or uuid4(), turn_id=turn_id or uuid4(),
                               owner_id=owner_id, integration_id=integration_id or uuid4(), agent_id=agent_id,
-                              channel="TELEGRAM", input_revision=input_revision if input_revision is not None else len(messages), authority_revision=0,
+                              channel=channel, input_revision=input_revision if input_revision is not None else len(messages), authority_revision=0,
                               input_first_sequence=last, input_last_sequence=last,
                               context_last_sequence=last, messages=messages,
                               selected_input_message_ids=[messages[-1]["id"]])
@@ -114,16 +114,18 @@ def later(request, text_value="New intentional action"):
     return make_request(request.agent_id, conversation_id=request.conversation_id,
                         integration_id=request.integration_id, owner_id=request.owner_id, messages=messages,
                         contract_version=request.contract_version,
-                        input_revision=request.input_revision + 1 if request.contract_version == 2 else None)
+                        input_revision=request.input_revision + 1 if request.contract_version == 2 else None,
+                        channel=request.channel)
 
 
-async def setup_business(factory, *, mode="LOOKUP", confirmation=False, retention=None):
+async def setup_business(factory, *, mode="LOOKUP", confirmation=False, retention=None,
+                         channel="TELEGRAM"):
     owner, agent_id = uuid4(), uuid4()
     async with factory() as session:
         session.add(AgentTemplate(id=agent_id, user_id=owner, name="Business fake", system_prompt="Fake",
                                   llm_provider="openai", model_name="fake", temperature=0.7, is_active=True))
         await session.commit()
-    request = make_request(agent_id)
+    request = make_request(agent_id, channel=channel)
     grant = ManagedGrant(owner_id=request.owner_id, integration_id=request.integration_id,
                           channel=request.channel, agent_id=agent_id, agent_owner_id=owner)
     provider = FakeProvider()

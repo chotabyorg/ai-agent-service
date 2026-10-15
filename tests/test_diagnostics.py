@@ -109,11 +109,15 @@ def capture_chat_failure_logs(
 def assert_chat_diagnostic_route_installed() -> None:
     routes = [
         route
-        for route in main.app.routes
-        if getattr(route, "path", None) == "/v1/chat/completions"
+        for route in chat_api_module.router.routes
+        if getattr(route, "path", None) == "/completions"
     ]
     assert len(routes) == 1
     assert isinstance(routes[0], ChatDiagnosticRoute)
+    # FastAPI may retain included routers instead of flattening app.routes.
+    # Verify registration/prefix through the public lookup; requests below still
+    # verify the actual diagnostic handler and safe log behavior end to end.
+    assert str(main.app.url_path_for(routes[0].name)) == "/v1/chat/completions"
 
 
 @pytest.mark.diagnostic

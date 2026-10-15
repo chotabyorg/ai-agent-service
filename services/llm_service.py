@@ -432,6 +432,7 @@ class LLMService:
         chat_context, query, completion_hook=None, runtime=None, selected_indices=None, simple_selection=True,
     ) -> str:
         """Shared prompt/KB/model/tools/normalization; adapters own persistence."""
+        managed_request = runtime.request if runtime else None
         prompt_context = None
         if runtime and runtime.business is not None:
             project = getattr(runtime.business, "prompt_context", None)
@@ -533,7 +534,7 @@ class LLMService:
             if runtime:
                 messages = self._budget_managed_messages(
                     agent, messages, openai_tools, selected_indices, communication, simple_selection,
-                    tool_choice=tool_choice,
+                    tool_choice=tool_choice, request=managed_request,
                 )
             for step_index in range(self.MAX_TOOL_STEPS):
                 set_chat_failure_stage(ChatFailureStage.LLM_REQUEST)
@@ -546,8 +547,9 @@ class LLMService:
                                 if gate.halt_status:
                                     raise ManagedExecutionError(gate.error_code, processing_status=gate.halt_status)
                                 return gate.safe_draft
-                        self._check_managed_envelope(agent, messages, openai_tools, tool_choice=tool_choice)
-                    model_extra_body = self._managed_model_extra_body(agent) if runtime else {}
+                        self._check_managed_envelope(agent, messages, openai_tools,
+                                                     tool_choice=tool_choice, request=managed_request)
+                    model_extra_body = self._managed_model_extra_body(agent, request=managed_request) if runtime else {}
                     pending_response = llm_client.chat.completions.create(
                         model=agent.model_name or self.settings.llm_default_model,
                         temperature=agent.temperature,
@@ -699,13 +701,15 @@ class LLMService:
                         messages.append({"role": "tool", "tool_call_id": invalid_call.id,
                             "name": preparation_correction, "content": json.dumps(feedback, ensure_ascii=False)})
                         seen_tool_ids.add(invalid_call.id)
-                        self._check_managed_envelope(agent, messages, openai_tools, tool_choice=tool_choice)
+                        self._check_managed_envelope(agent, messages, openai_tools,
+                                                     tool_choice=tool_choice, request=managed_request)
                         continue
                     seen_tool_ids.update(call.id for call in message.tool_calls
                         if isinstance(getattr(call, "id", None), str))
                 messages.append(self._assistant_message_to_dict(message, managed=runtime is not None))
                 if runtime:
-                    self._check_managed_envelope(agent, messages, openai_tools, tool_choice=tool_choice)
+                    self._check_managed_envelope(agent, messages, openai_tools,
+                                                 tool_choice=tool_choice, request=managed_request)
 
                 set_chat_failure_stage(ChatFailureStage.TOOL_EXECUTION)
                 for tool_call in message.tool_calls:
@@ -770,7 +774,8 @@ class LLMService:
                             messages[0]["content"] = self.prompt_composer.compose(
                                 agent, chat_context, runtime_context=prompt_context)
                             self._check_managed_envelope(
-                                agent, messages, openai_tools, tool_choice=tool_choice)
+                                agent, messages, openai_tools, tool_choice=tool_choice,
+                                request=managed_request)
                         # Durable normalized replay/conflict owns business
                         # identity; the legacy raw-string loop guard does not.
                         continue
@@ -841,31 +846,33 @@ class LLMService:
             raise ManagedExecutionError("MODEL_ERROR")
         raise ChatProcessingError("Maximum number of LLM tool steps reached.")
 
-    def _managed_model_extra_body(self, agent):
+    def _managed_model_extra_body(self, agent, *, request=None):
         model = agent.model_name or self.settings.llm_default_model
+        if any(profile.matches(request, model) for profile in self.settings.managed_voice_latency_profiles):
+            return {"reasoning": {"effort": "none"}, "provider": {"sort": "latency"}}
         if model in self.settings.managed_openrouter_disable_reasoning_models:
             return {"reasoning": {"enabled": False}}
         return {}
 
-    def _managed_envelope(self, agent, messages, tools, *, tool_choice=None):
+    def _managed_envelope(self, agent, messages, tools, *, tool_choice=None, request=None):
         envelope = {"model": agent.model_name or self.settings.llm_default_model,
                 "temperature": agent.temperature, "max_tokens": self.settings.llm_max_tokens,
                 "messages": messages, "tools": tools or None, "parallel_tool_calls": False}
         if tool_choice is not None:
             envelope["tool_choice"] = tool_choice
-        envelope.update(self._managed_model_extra_body(agent))
+        envelope.update(self._managed_model_extra_body(agent, request=request))
         return envelope
 
-    def _check_managed_envelope(self, agent, messages, tools, *, tool_choice=None):
+    def _check_managed_envelope(self, agent, messages, tools, *, tool_choice=None, request=None):
         try:
-            size = len(json.dumps(self._managed_envelope(agent, messages, tools, tool_choice=tool_choice),
+            size = len(json.dumps(self._managed_envelope(agent, messages, tools, tool_choice=tool_choice, request=request),
                                   ensure_ascii=False, allow_nan=False).encode("utf-8"))
         except (ValueError, UnicodeError, RecursionError, TypeError):
             raise ManagedExecutionError("INVALID_RESULT") from None
         if size > self.settings.managed_ai_context_bytes:
             raise ManagedExecutionError("CONTEXT_LIMIT")
 
-    def _budget_managed_messages(self, agent, messages, tools, selected_indices, communication, simple, *, tool_choice=None):
+    def _budget_managed_messages(self, agent, messages, tools, selected_indices, communication, simple, *, tool_choice=None, request=None):
         prefix = messages[:len(messages) - len(communication)]
         retained = list(range(len(communication)))
         selected = set(selected_indices)
@@ -878,7 +885,7 @@ class LLMService:
                     ", ".join(map(str, ordinals)) + ". Other communication messages are context."})
             current.extend(communication[index] for index in retained)
             try:
-                self._check_managed_envelope(agent, current, tools, tool_choice=tool_choice)
+                self._check_managed_envelope(agent, current, tools, tool_choice=tool_choice, request=request)
                 return current
             except ManagedExecutionError as exc:
                 if exc.code != "CONTEXT_LIMIT":
