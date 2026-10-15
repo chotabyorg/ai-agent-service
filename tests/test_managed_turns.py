@@ -19,7 +19,15 @@ from core.managed_boundary import MANAGED_PATH, ManagedTurnBoundary
 from core.managed_security import managed_logging, parse_principals
 from models.agent import AgentTemplate
 from models.session import ConversationSession
+from schemas.handoff import HandoffScope
 from schemas.managed_turn import ManagedTurnRequest
+from schemas.managed_turn_v3 import ManagedTurnV3Request
+from services.managed_execution_receipts import (
+    ManagedExecutionReceiptService,
+    handoff_request_id,
+    managed_v3_dispatch_id,
+    managed_v3_request_fingerprint,
+)
 from services.history_service import HistoryService
 from services.business_runtime import BusinessRuntime
 from services.managed_runtime import privacy_id
@@ -93,6 +101,225 @@ async def setup(api_client, db_session, monkeypatch, **overrides):
 
 async def execute(api_client, value):
     return await api_client.post(MANAGED_PATH, json=value, headers={"X-Service-Token": TOKEN})
+
+
+async def setup_handoff_v3(api_client, db_session, monkeypatch):
+    agent, value = await setup(api_client, db_session, monkeypatch)
+    value.update(contract_version=3, communication_facts=[], prior_operation_refs=[])
+    request = ManagedTurnV3Request.model_validate(value)
+    value = request.model_dump(mode="json")
+    configure(monkeypatch, value, UUID(agent["user_id"]))
+    scope = HandoffScope(owner_id=value["owner_id"], integration_id=value["integration_id"],
+                         channel=value["channel"], agent_id=value["agent_id"])
+    monkeypatch.setattr(get_settings(), "_handoff_scopes", (scope,))
+    return agent, value, request
+
+
+async def execute_v3(api_client, value):
+    return await api_client.post("/internal/v3/managed-turns/execute", json=value,
+                                 headers={"X-Service-Token": TOKEN})
+
+
+@pytest.mark.integration
+async def test_v3_prompt_projects_human_delivery_authority_and_prior_refs_as_data(
+        api_client, db_session, monkeypatch, model):
+    _, value, _ = await setup_handoff_v3(api_client, db_session, monkeypatch)
+    customer_id, human_id, system_id = (uuid4() for _ in range(3))
+    event_id, case_id = uuid4(), uuid4()
+    attempt_id, system_attempt_id = uuid4(), uuid4()
+    origin_turn_id = uuid4()
+    value.update(
+        authority_revision=2,
+        input_first_sequence=1,
+        input_last_sequence=1,
+        context_last_sequence=3,
+        messages=[
+            dict(id=str(customer_id), sequence=1, actor="CUSTOMER", direction="INBOUND",
+                 content_type="TEXT", text="Can you help me?"),
+            dict(id=str(human_id), sequence=2, actor="HUMAN", direction="OUTBOUND",
+                 content_type="TEXT", text="I’ll connect you with a person."),
+            dict(id=str(system_id), sequence=3, actor="SYSTEM", direction="OUTBOUND",
+                 content_type="TEXT", text="A person was requested."),
+        ],
+        selected_input_message_ids=[str(customer_id)],
+        communication_facts=[
+            dict(kind="AUTHORITY_EVENT", event_id=str(event_id), authority_revision=2,
+                 from_mode="AGENT", to_mode="HUMAN", case_id=str(case_id)),
+            dict(kind="DELIVERY_OBSERVATION", message_id=str(human_id),
+                 delivery_attempt_id=str(attempt_id), source_authority_revision=2,
+                 status="UNKNOWN"),
+            dict(kind="DELIVERY_OBSERVATION", message_id=str(system_id),
+                 delivery_attempt_id=str(system_attempt_id), source_authority_revision=2,
+                 status="DISPATCH_REQUESTED"),
+        ],
+        prior_operation_refs=[dict(
+            origin_turn_id=str(origin_turn_id),
+            operation_ref=dict(origin="AI_AGENT_SERVICE", operation_id="ai-op-uncertain-1",
+                               outcome="UNKNOWN"),
+        )],
+    )
+    validated = ManagedTurnV3Request.model_validate(value)
+    value = validated.model_dump(mode="json")
+    # setup_handoff_v3 already installed the exact grant and Handoff scope; the
+    # tuple is unchanged when only canonical transcript projection fields change.
+    model.chat.completions.queue(build_llm_response(content="I’ll check what happened."))
+
+    response = await execute_v3(api_client, value)
+
+    assert response.status_code == 200
+    assert response.json()["processing_outcome"] == "DRAFT_READY"
+    captured = model.chat.completions.calls[0]
+    system_prompt = next(message["content"] for message in captured["messages"]
+                         if message["role"] == "system")
+    assert '"kind":"AUTHORITY_EVENT"' in system_prompt
+    assert '"from_mode":"AGENT"' in system_prompt and '"to_mode":"HUMAN"' in system_prompt
+    assert '"status":"UNKNOWN"' in system_prompt
+    assert '"status":"DISPATCH_REQUESTED"' in system_prompt
+    assert '"outcome":"UNKNOWN"' in system_prompt
+    assert "только DELIVERED или READ подтверждает доставку" in system_prompt
+    assert "подсказки" in system_prompt and "не разрешают повтор" in system_prompt
+    assistant_history = [message["content"] for message in captured["messages"]
+                         if message["role"] == "assistant"]
+    assert any("actor=HUMAN" in content and "delivery_status=UNKNOWN" in content
+               and "delivery_confirmation=NOT_CONFIRMED" in content
+               for content in assistant_history)
+    assert any("actor=SYSTEM" in content and "delivery_status=DISPATCH_REQUESTED" in content
+               and "delivery_confirmation=NOT_CONFIRMED" in content
+               for message in captured["messages"] if message["role"] == "user"
+               for content in [message["content"]])
+
+
+def control_evidence_body(request):
+    digest = managed_v3_request_fingerprint(request)
+    dispatch_id = managed_v3_dispatch_id(request, digest)
+    return {
+        "contract_version": 3,
+        "owner_id": request.owner_id,
+        "integration_id": str(request.integration_id),
+        "channel": request.channel,
+        "agent_id": str(request.agent_id),
+        "conversation_id": str(request.conversation_id),
+        "turn_id": str(request.turn_id),
+        "input_revision": request.input_revision,
+        "authority_revision": request.authority_revision,
+        "input_first_sequence": request.input_first_sequence,
+        "input_last_sequence": request.input_last_sequence,
+        "context_last_sequence": request.context_last_sequence,
+        "request_fingerprint": digest,
+        "original_dispatch_id": str(dispatch_id),
+    }
+
+
+def model_handoff_call(call_id="handoff-call"):
+    call = build_tool_call(call_id, "platform_request_human_handoff", json.dumps({
+        "reason": "CUSTOMER_REQUEST", "note": "Please connect a person.",
+    }))
+    call.type = "function"
+    return call
+
+
+class ResponseLostTransport(httpx.AsyncBaseTransport):
+    def __init__(self, inner):
+        self.inner = inner
+
+    async def handle_async_request(self, request):
+        response = await self.inner.handle_async_request(request)
+        await response.aread()
+        raise httpx.ReadError("synthetic response lost after server completion", request=request)
+
+    async def aclose(self):
+        await self.inner.aclose()
+
+
+@pytest.mark.integration
+async def test_v3_lost_response_recovers_latched_control_and_exact_replay_skips_model(
+        api_client, db_session, monkeypatch, model):
+    _, value, request = await setup_handoff_v3(api_client, db_session, monkeypatch)
+    model.chat.completions.queue(build_llm_response(tool_calls=[model_handoff_call()]))
+    transport = ResponseLostTransport(httpx.ASGITransport(app=main.app))
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        with pytest.raises(httpx.ReadError, match="response lost"):
+            await execute_v3(client, value)
+
+    evidence = await api_client.post(
+        "/internal/v3/managed-turns/control-evidence",
+        json=control_evidence_body(request),
+        headers={"X-Service-Token": TOKEN},
+    )
+    assert evidence.status_code == 200
+    assert evidence.json()["evidence_kind"] == "CONTROL_REQUEST"
+    assert evidence.json()["execution_state"] == "SEALED"
+    assert evidence.json()["processing_outcome"] == "NO_RESPONSE"
+    assert evidence.json()["control_request"]["request_id"] == str(handoff_request_id(request))
+
+    replay = await execute_v3(api_client, value)
+    assert replay.status_code == 200
+    assert replay.json()["result_kind"] == "PLATFORM_CONTROL_REQUEST"
+    assert replay.json()["control_request"]["request_id"] == str(handoff_request_id(request))
+    assert len(model.chat.completions.calls) == 1
+
+
+@pytest.mark.integration
+async def test_v3_control_latch_survives_failed_finalization_evidence_and_exact_replay(
+        api_client, db_session, monkeypatch, model):
+    _, value, request = await setup_handoff_v3(api_client, db_session, monkeypatch)
+    model.chat.completions.queue(build_llm_response(tool_calls=[model_handoff_call()]))
+
+    async def fail_finalization(*_args, **_kwargs):
+        raise RuntimeError("synthetic finalization interruption")
+
+    monkeypatch.setattr(ManagedExecutionReceiptService, "seal", fail_finalization)
+    first = await execute_v3(api_client, value)
+    assert first.status_code == 503
+    assert len(model.chat.completions.calls) == 1
+
+    evidence = await api_client.post(
+        "/internal/v3/managed-turns/control-evidence",
+        json=control_evidence_body(request),
+        headers={"X-Service-Token": TOKEN},
+    )
+    assert evidence.status_code == 200
+    assert evidence.json()["evidence_kind"] == "CONTROL_REQUEST"
+    assert evidence.json()["execution_state"] == "RUNNING"
+    assert evidence.json()["processing_outcome"] == "UNKNOWN"
+    assert evidence.json()["control_request"]["request_id"] == str(handoff_request_id(request))
+
+    replay = await execute_v3(api_client, value)
+    assert replay.status_code == 200
+    assert replay.json()["result_kind"] == "PLATFORM_CONTROL_REQUEST"
+    assert replay.json()["control_request"]["request_id"] == str(handoff_request_id(request))
+    assert len(model.chat.completions.calls) == 1
+
+
+@pytest.mark.integration
+async def test_v3_cleanup_failure_after_latch_preserves_sealed_control(
+        api_client, db_session, monkeypatch, model):
+    _, value, request = await setup_handoff_v3(api_client, db_session, monkeypatch)
+    model.chat.completions.queue(build_llm_response(tool_calls=[model_handoff_call()]))
+
+    async def fail_cleanup():
+        raise RuntimeError("synthetic cleanup interruption")
+
+    monkeypatch.setattr(model, "close", fail_cleanup)
+    response = await execute_v3(api_client, value)
+    result = response.json()
+    assert response.status_code == 200
+    assert result["result_kind"] == "PLATFORM_CONTROL_REQUEST"
+    assert result["processing_outcome"] == "FAILED"
+    assert result["error_code"] == "TOOL_CLEANUP_FAILED"
+    assert result["draft_text"] is None
+    assert result["control_request"]["request_id"] == str(handoff_request_id(request))
+
+    evidence = await api_client.post(
+        "/internal/v3/managed-turns/control-evidence",
+        json=control_evidence_body(request),
+        headers={"X-Service-Token": TOKEN},
+    )
+    assert evidence.status_code == 200
+    assert evidence.json()["evidence_kind"] == "CONTROL_REQUEST"
+    assert evidence.json()["execution_state"] == "SEALED"
+    assert evidence.json()["processing_outcome"] == "FAILED"
+    assert evidence.json()["error_code"] == "TOOL_CLEANUP_FAILED"
 
 
 @pytest.mark.integration

@@ -21,6 +21,7 @@ from schemas.agent import (
 from schemas.prompt_config import PromptConfig
 from models.agent import AgentTemplate
 from services.agent_service import AgentService
+from services.handoff_lifecycle import HandoffLifecycleConflict, HandoffLifecycleUnavailable
 from services.bitrix_webhook_validator import (
     BitrixCredentialsValidationStatus,
     validate_bitrix_credentials,
@@ -110,7 +111,12 @@ async def update_agent(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Cannot activate agent without OpenRouter API key.",
             )
-    agent = await agent_service.update_agent(db, user_id, agent_id, payload)
+    try:
+        agent = await agent_service.update_agent(db, user_id, agent_id, payload)
+    except HandoffLifecycleConflict:
+        raise HTTPException(status_code=409, detail="Agent lifecycle change conflicts with pending state") from None
+    except HandoffLifecycleUnavailable:
+        raise HTTPException(status_code=503, detail="Handoff grant revocation is unavailable") from None
     if agent is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -126,7 +132,12 @@ async def delete_agent(
     user_id: UserIdHeader,
     user_role: UserRoleHeader = None,
 ) -> None:
-    result = await agent_service.delete_agent(db, agent_id, user_id, user_role)
+    try:
+        result = await agent_service.delete_agent(db, agent_id, user_id, user_role)
+    except HandoffLifecycleConflict:
+        raise HTTPException(status_code=409, detail="Agent lifecycle change conflicts with pending state") from None
+    except HandoffLifecycleUnavailable:
+        raise HTTPException(status_code=503, detail="Handoff grant revocation is unavailable") from None
     if result is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,

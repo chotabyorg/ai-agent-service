@@ -5,7 +5,9 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from api.internal.agents import router as internal_agents_router
+from api.internal.handoff import router as handoff_router
 from api.internal.managed_turns import router as managed_turns_router
+from api.internal.managed_turns_v3 import router as managed_turns_v3_router
 from api.v1.agents import router as agents_router
 from api.v1.chat import router as chat_router
 from api.v1.mcp_services import router as mcp_services_router
@@ -43,8 +45,10 @@ app = FastAPI(
     lifespan=lifespan,
 )
 app.add_middleware(ManagedTurnBoundary)
-from business_capabilities.registration import create_business_registry
-from db.database import AsyncSessionLocal
+# These imports intentionally stay adjacent to app construction: registration
+# binds the runtime registry after middleware is installed.
+from business_capabilities.registration import create_business_registry  # noqa: E402
+from db.database import AsyncSessionLocal  # noqa: E402
 app.state.business_registry = create_business_registry(settings, AsyncSessionLocal)
 app.include_router(business_tools_router, prefix=f"{settings.api_v1_prefix}/agents", tags=['business-tools'])
 
@@ -83,6 +87,8 @@ app.include_router(
     prefix="/internal/v1",
 )
 app.include_router(managed_turns_router, prefix="/internal/v1")
+app.include_router(handoff_router, prefix="/internal/v1")
+app.include_router(managed_turns_v3_router, prefix="/internal/v3")
 
 
 @app.get("/health", tags=["health"])

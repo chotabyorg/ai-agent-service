@@ -14,6 +14,7 @@ from schemas.agent import (
 )
 from services.agent_service import AgentService
 from services.encryption_service import EncryptionService, mask_api_key
+from services.handoff_lifecycle import HandoffLifecycleConflict, HandoffLifecycleUnavailable
 from services.openrouter_validator import KeyValidationResult, validate_openrouter_key
 
 router = APIRouter()
@@ -79,6 +80,18 @@ async def delete_openrouter_key(
     if agent is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agent not found")
 
+    # Revoke every retained Telegram grant before making an active agent
+    # ineligible for AI proof. A failed/unknown revoke leaves the key and
+    # active state untouched so a retry can replay its durable command.
+    try:
+        await agent_service.deactivate_agent(db, agent_id, user_id)
+    except HandoffLifecycleConflict:
+        raise HTTPException(status_code=409, detail="Agent lifecycle change conflicts with pending state") from None
+    except HandoffLifecycleUnavailable:
+        raise HTTPException(status_code=503, detail="Handoff grant revocation is unavailable") from None
+
+    agent = await agent_service.get_agent_by_id(db, agent_id, user_id=user_id)
+    if agent is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agent not found")
     agent.encrypted_openrouter_key = None
-    agent.is_active = False
     await db.commit()
