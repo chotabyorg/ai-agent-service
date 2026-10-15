@@ -1,5 +1,6 @@
 """Independent PostgreSQL connections with observed blocked transactions."""
 
+from tests.business_effect_helpers import open_business_runtime, prepare_effect_permit
 import asyncio
 from contextlib import asynccontextmanager
 
@@ -8,8 +9,7 @@ from sqlalchemy import func, select, text, update
 
 from models.agent import AgentTemplate
 from models.business import BusinessBinding, BusinessOperation, BusinessPlan, BusinessScope
-from schemas.business import BusinessSafetyError, ProvenSucceeded, SucceededReceipt
-from services.business_runtime import BusinessRuntime
+from schemas.business import BusinessSafetyError, SucceededReceipt
 from tests.test_business_runtime import actions, later, setup_business
 
 
@@ -56,7 +56,7 @@ async def held(factory, entity, predicate):
 @pytest.mark.asyncio
 async def test_reservation_and_exact_replay_have_actual_overlap(db_session):
     runtime, provider, registry, _ = await setup_business(db_session)
-    duplicate = await BusinessRuntime.open(runtime.request, runtime.grant, db_session, registry)
+    duplicate = await open_business_runtime(runtime.request, runtime.grant, db_session, registry)
     async with held(db_session, AgentTemplate, AgentTemplate.id == runtime.request.agent_id) as (blocker, pid):
         one = asyncio.create_task(runtime.freeze_plan(actions("12")))
         two = asyncio.create_task(duplicate.freeze_plan(actions("12")))
@@ -81,16 +81,20 @@ async def test_reservation_and_exact_replay_have_actual_overlap(db_session):
 @pytest.mark.parametrize("reverse", [False, True])
 async def test_same_operation_and_distinct_turn_dispatch_permission_overlap(db_session, reverse):
     runtime, _, registry, _ = await setup_business(db_session)
-    other = await BusinessRuntime.open(later(runtime.request), runtime.grant, db_session, registry)
+    other = await open_business_runtime(later(runtime.request), runtime.grant, db_session, registry)
     plan1, plan2 = await runtime.freeze_plan(actions("12")), await other.freeze_plan(actions("13"))
     contenders = [(runtime, plan1), (other, plan2)]
     if reverse:
         contenders.reverse()
     winner, winning_plan = contenders[0]
     loser, losing_plan = contenders[1]
+    winning_effect_request = await prepare_effect_permit(
+        winner, winning_plan, winning_plan.operations[0]
+    )
     async with held(db_session, BusinessScope, BusinessScope.id == plan1.scope.scope_id) as (blocker, pid):
         first = asyncio.create_task(winner.repository.claim_dispatch(winner.request, winner.grant,
-            winning_plan.id, winning_plan.operations[0].id, winner.registration, winner.facts_resolver(actions("12"))))
+            winning_plan.id, winning_plan.operations[0].id, winner.registration, winner.facts_resolver(actions("12")),
+            effect_request=winning_effect_request))
         await observe_blocked(db_session, pid)
         await blocker.rollback()
         allowed = await asyncio.wait_for(first, 5)
@@ -104,7 +108,8 @@ async def test_same_operation_and_distinct_turn_dispatch_permission_overlap(db_s
     assert blocked.token is None and blocked.reason == "BLOCKED_UNRESOLVED_EFFECT"
     assert blocked.plan.operations[0].status == "RESERVED" and blocked.plan.operations[0].attempt_count == 0
     duplicate = await winner.repository.claim_dispatch(winner.request, winner.grant, winning_plan.id,
-        winning_plan.operations[0].id, winner.registration, winner.facts_resolver(actions("12")))
+        winning_plan.operations[0].id, winner.registration, winner.facts_resolver(actions("12")),
+        effect_request=winning_effect_request)
     assert duplicate.token is None and duplicate.reason == "IN_FLIGHT"
 
 
@@ -112,8 +117,9 @@ async def test_same_operation_and_distinct_turn_dispatch_permission_overlap(db_s
 async def test_receipt_finalize_overlap_and_stale_token_cannot_overwrite(db_session):
     runtime, provider, _, _ = await setup_business(db_session)
     plan = await runtime.freeze_plan(actions("12"))
+    effect_request = await prepare_effect_permit(runtime, plan, plan.operations[0])
     decision = await runtime.repository.claim_dispatch(runtime.request, runtime.grant, plan.id, plan.operations[0].id,
-                                                       runtime.registration, runtime.facts_resolver(actions("12")))
+        runtime.registration, runtime.facts_resolver(actions("12")), effect_request=effect_request)
     receipt = await runtime.registration.adapter.execute(decision.token.dispatch, execution=None)
     async with held(db_session, BusinessScope, BusinessScope.id == plan.scope.scope_id) as (blocker, pid):
         finalizer = asyncio.create_task(runtime.repository.finalize(runtime.request, runtime.grant, decision.token, receipt))
@@ -154,8 +160,8 @@ async def test_confirmation_competitors_reload_after_actual_scope_wait(db_sessio
     origin, provider, registry, _ = await setup_business(db_session, confirmation=True)
     proposal = await origin.freeze_plan(actions("12"), propose=True)
     request = later(origin.request, "confirm " + str(proposal.id))
-    one = await BusinessRuntime.open(request, origin.grant, db_session, registry)
-    two = await BusinessRuntime.open(request, origin.grant, db_session, registry)
+    one = await open_business_runtime(request, origin.grant, db_session, registry)
+    two = await open_business_runtime(request, origin.grant, db_session, registry)
     facts = one.facts_resolver(actions("12"))
     async with held(db_session, AgentTemplate, AgentTemplate.id == request.agent_id) as (blocker, pid):
         confirmations = [asyncio.create_task(runtime.repository.confirm_plan(request, origin.grant,
@@ -176,9 +182,10 @@ async def test_confirmation_competitors_reload_after_actual_scope_wait(db_sessio
 
 @pytest.mark.asyncio
 async def test_generation_change_wins_post_lock_dispatch_read(db_session):
-    runtime, provider, _, binding = await setup_business(db_session)
+    runtime, provider, registry, binding = await setup_business(db_session)
     plan = await runtime.freeze_plan(actions("12"))
     facts = runtime.facts_resolver(actions("12"))
+    effect_request = await prepare_effect_permit(runtime, plan, plan.operations[0])
     async with db_session() as changer:
         await changer.execute(select(AgentTemplate).where(AgentTemplate.id == runtime.request.agent_id).with_for_update())
         await changer.execute(select(BusinessBinding).where(BusinessBinding.id == binding.id).with_for_update())
@@ -186,21 +193,45 @@ async def test_generation_change_wins_post_lock_dispatch_read(db_session):
                               .values(authorization_generation=2))
         pid = await changer.scalar(text("SELECT pg_backend_pid()"))
         dispatch = asyncio.create_task(runtime.repository.claim_dispatch(runtime.request, runtime.grant,
-            plan.id, plan.operations[0].id, runtime.registration, facts))
+            plan.id, plan.operations[0].id, runtime.registration, facts,
+            effect_request=effect_request))
         await observe_blocked(db_session, pid)
         await changer.commit()
         denied = await asyncio.wait_for(dispatch, 5)
     assert denied.token is None and denied.reason == "AUTHORITY_DENIED"
-    assert denied.plan.operations[0].status == "FAILED" and provider.posts == 0
+    retained = denied.plan.operations[0]
+    assert retained.status == "RESERVED"
+    assert retained.effect_request_turn_id == runtime.request.turn_id
+    assert retained.effect_permit_id is not None
+    assert provider.posts == 0
+
+    # Acquired authority is immutable evidence. The changed binding cannot
+    # dispatch it, and a later Turn closes it through the normal recovery path.
+    recovery = await open_business_runtime(later(runtime.request), runtime.grant, db_session, registry)
+    recovered = await recovery.repository.selected_plan(recovery.request, recovery.grant)
+    assert recovered.selection_kind == "RECOVERY"
+    assert recovered.operations[0].id == retained.id
+    assert recovered.operations[0].status == "FAILED"
+    async with db_session() as session:
+        retained_row = await session.get(BusinessOperation, retained.id)
+        assert retained_row.failure_code == "RECOVERY_NO_DISPATCH"
+        assert retained_row.receipt_evidence["kind"] == "NO_DISPATCH"
+    assert provider.posts == 0
 
 
 @pytest.mark.asyncio
 async def test_expiry_normalization_overlap_blocks_an_already_reserved_plan(db_session, monkeypatch):
     first, _, registry, _ = await setup_business(db_session)
-    second = await BusinessRuntime.open(later(first.request), first.grant, db_session, registry)
+    second = await open_business_runtime(later(first.request), first.grant, db_session, registry)
     plan1, plan2 = await first.freeze_plan(actions("12")), await second.freeze_plan(actions("13"))
+    effect_request = await prepare_effect_permit(first, plan1, plan1.operations[0])
+    with pytest.raises(BusinessSafetyError, match="BLOCKED_UNRESOLVED_EFFECT"):
+        await prepare_effect_permit(second, plan2, plan2.operations[0])
+    before = await second.repository.selected_plan(second.request, second.grant)
+    assert before.operations[0].effect_request_turn_id is None
+    assert before.operations[0].effect_permit_id is None
     permitted = await first.repository.claim_dispatch(first.request, first.grant, plan1.id, plan1.operations[0].id,
-                                                       first.registration, first.facts_resolver(actions("12")))
+        first.registration, first.facts_resolver(actions("12")), effect_request=effect_request)
     async with db_session() as session:
         await session.execute(update(BusinessOperation).where(BusinessOperation.id == permitted.token.operation_id)
                               .values(dispatch_lease_expires_at=func.clock_timestamp() - text("interval '1 second'")))
@@ -236,8 +267,10 @@ async def test_expiry_normalization_overlap_blocks_an_already_reserved_plan(db_s
 async def test_no_database_lock_spans_provider_and_an_independent_scope_progresses(db_session):
     runtime, provider, _, _ = await setup_business(db_session)
     plan = await runtime.freeze_plan(actions("12"))
+    effect_request = await prepare_effect_permit(runtime, plan, plan.operations[0])
     decision = await runtime.repository.claim_dispatch(runtime.request, runtime.grant, plan.id,
-        plan.operations[0].id, runtime.registration, runtime.facts_resolver(actions("12")))
+        plan.operations[0].id, runtime.registration, runtime.facts_resolver(actions("12")),
+        effect_request=effect_request)
     # Permission returned COMMIT. A distinct connection can acquire every row
     # before the fake external response is available; no network transaction.
     async with db_session() as observer:
@@ -256,8 +289,9 @@ async def test_no_database_lock_spans_provider_and_an_independent_scope_progress
 @pytest.mark.asyncio
 async def test_new_plan_freeze_races_dispatch_commit_without_current_state_gap(db_session, monkeypatch):
     first, _, registry, _ = await setup_business(db_session)
-    second = await BusinessRuntime.open(later(first.request), first.grant, db_session, registry)
+    second = await open_business_runtime(later(first.request), first.grant, db_session, registry)
     plan = await first.freeze_plan(actions("12"))
+    effect_request = await prepare_effect_permit(first, plan, plan.operations[0])
     locked, release, owner = asyncio.Event(), asyncio.Event(), {}
     real_lock = first.repository._lock_scope
     async def gate(session, scope_id):
@@ -270,7 +304,8 @@ async def test_new_plan_freeze_races_dispatch_commit_without_current_state_gap(d
         return scope
     monkeypatch.setattr(first.repository, "_lock_scope", gate)
     admission = asyncio.create_task(first.repository.claim_dispatch(first.request, first.grant, plan.id,
-        plan.operations[0].id, first.registration, first.facts_resolver(actions("12"))))
+        plan.operations[0].id, first.registration, first.facts_resolver(actions("12")),
+        effect_request=effect_request))
     await asyncio.wait_for(locked.wait(), 5)
     freezing = asyncio.create_task(second.freeze_plan(actions("13")))
     await observe_blocked(db_session, owner["pid"])
@@ -286,10 +321,16 @@ async def test_new_plan_freeze_races_dispatch_commit_without_current_state_gap(d
 @pytest.mark.parametrize("terminal", ["SUCCEEDED", "FAILED"])
 async def test_terminal_commit_releases_slot_before_waiting_candidate_admission(db_session, monkeypatch, terminal):
     first, _, registry, _ = await setup_business(db_session)
-    second = await BusinessRuntime.open(later(first.request), first.grant, db_session, registry)
+    second = await open_business_runtime(later(first.request), first.grant, db_session, registry)
     plan1, plan2 = await first.freeze_plan(actions("12")), await second.freeze_plan(actions("13"))
+    effect_request = await prepare_effect_permit(first, plan1, plan1.operations[0])
+    with pytest.raises(BusinessSafetyError, match="BLOCKED_UNRESOLVED_EFFECT"):
+        await prepare_effect_permit(second, plan2, plan2.operations[0])
+    before = await second.repository.selected_plan(second.request, second.grant)
+    assert before.operations[0].effect_request_turn_id is None
+    assert before.operations[0].effect_permit_id is None
     decision = await first.repository.claim_dispatch(first.request, first.grant, plan1.id, plan1.operations[0].id,
-        first.registration, first.facts_resolver(actions("12")))
+        first.registration, first.facts_resolver(actions("12")), effect_request=effect_request)
     from schemas.business import DefinitiveNoEffect
     receipt = (SucceededReceipt(binding=decision.token.command.receipt_binding(),receipt_id="resolved-1",object_id="object-1",evidence={"proof":"SUCCEEDED"})
                if terminal == "SUCCEEDED" else DefinitiveNoEffect(binding=decision.token.command.receipt_binding(),
@@ -305,8 +346,13 @@ async def test_terminal_commit_releases_slot_before_waiting_candidate_admission(
     monkeypatch.setattr(first.repository, "_lock_scope", gate)
     finishing = asyncio.create_task(first.repository.finalize(first.request, first.grant, decision.token, receipt))
     await asyncio.wait_for(locked.wait(), 5)
-    contender = asyncio.create_task(second.repository.claim_dispatch(second.request, second.grant, plan2.id,
-        plan2.operations[0].id, second.registration, second.facts_resolver(actions("13"))))
+    async def acquire_then_claim():
+        candidate_request = await prepare_effect_permit(second, plan2, plan2.operations[0])
+        return await second.repository.claim_dispatch(second.request, second.grant, plan2.id,
+            plan2.operations[0].id, second.registration, second.facts_resolver(actions("13")),
+            effect_request=candidate_request)
+
+    contender = asyncio.create_task(acquire_then_claim())
     await observe_blocked(db_session, owner["pid"])
     release.set()
     assert (await asyncio.wait_for(finishing,5)).operations[0].status == terminal
@@ -319,17 +365,27 @@ async def test_terminal_commit_releases_slot_before_waiting_candidate_admission(
 @pytest.mark.asyncio
 async def test_another_turn_can_win_between_ordered_actions_without_erasing_residual(db_session):
     first, _, registry, _ = await setup_business(db_session)
-    second = await BusinessRuntime.open(later(first.request), first.grant, db_session, registry)
+    second = await open_business_runtime(later(first.request), first.grant, db_session, registry)
     plan1, plan2 = await first.freeze_plan(actions("12","13")), await second.freeze_plan(actions("14"))
+    first_effect = await prepare_effect_permit(first, plan1, plan1.operations[0], actions=actions("12","13"))
+    with pytest.raises(BusinessSafetyError, match="BLOCKED_UNRESOLVED_EFFECT"):
+        await prepare_effect_permit(second, plan2, plan2.operations[0])
+    before = await second.repository.selected_plan(second.request, second.grant)
+    assert before.operations[0].effect_request_turn_id is None
+    assert before.operations[0].effect_permit_id is None
     first_permission = await first.repository.claim_dispatch(first.request,first.grant,plan1.id,plan1.operations[0].id,
-        first.registration,first.facts_resolver(actions("12","13")))
+        first.registration,first.facts_resolver(actions("12","13")),effect_request=first_effect)
     await first._send(first_permission.token)
+    second_effect = await prepare_effect_permit(second, plan2, plan2.operations[0])
     other_permission = await second.repository.claim_dispatch(second.request,second.grant,plan2.id,plan2.operations[0].id,
-        second.registration,second.facts_resolver(actions("14")))
+        second.registration,second.facts_resolver(actions("14")),effect_request=second_effect)
     blocked = await first.repository.claim_dispatch(first.request,first.grant,plan1.id,plan1.operations[1].id,
         first.registration,first.facts_resolver(actions("12","13")))
     assert blocked.reason == "BLOCKED_UNRESOLVED_EFFECT" and blocked.token is None
     assert [op.status for op in blocked.plan.operations] == ["SUCCEEDED","RESERVED"]
+    first_residual = await first.repository.selected_plan(first.request, first.grant)
+    assert first_residual.operations[1].effect_request_turn_id is None
+    assert first_residual.operations[1].effect_permit_id is None
     await second._send(other_permission.token)
     await first.execute_plan(actions("12","13"))
     assert {ref.outcome for ref in first.collector.snapshot()} == {"SUCCEEDED"}
@@ -338,21 +394,22 @@ async def test_another_turn_can_win_between_ordered_actions_without_erasing_resi
 @pytest.mark.asyncio
 async def test_native_original_unknown_is_the_only_exception_and_competing_tokens_are_fenced(db_session):
     first, provider, registry, _ = await setup_business(db_session,mode="NATIVE")
-    second = await BusinessRuntime.open(later(first.request),first.grant,db_session,registry)
+    second = await open_business_runtime(later(first.request),first.grant,db_session,registry)
     plan1, plan2 = await first.freeze_plan(actions("12")),await second.freeze_plan(actions("13"))
     provider.lose_next = True
     await first.execute_plan(actions("12"))
     facts = first.facts_resolver(actions("12"))
+    effect_request = await prepare_effect_permit(first, plan1, plan1.operations[0])
     async with held(db_session,BusinessScope,BusinessScope.id==plan1.scope.scope_id) as (blocker,pid):
         recovering = asyncio.create_task(first.repository.claim_dispatch(first.request,first.grant,plan1.id,
-            plan1.operations[0].id,first.registration,facts,native_replay=True))
+            plan1.operations[0].id,first.registration,facts,effect_request=effect_request,native_replay=True))
         await observe_blocked(db_session,pid)
         await blocker.rollback()
         admitted = await asyncio.wait_for(recovering,5)
     assert admitted.token.command.provider_idempotency_key == plan1.operations[0].command.provider_idempotency_key
     assert admitted.token.command.issued_at == plan1.operations[0].command.issued_at
     repeat = await first.repository.claim_dispatch(first.request,first.grant,plan1.id,plan1.operations[0].id,
-        first.registration,facts,native_replay=True)
+        first.registration,facts,effect_request=effect_request,native_replay=True)
     assert repeat.token is None and repeat.reason == "IN_FLIGHT"
     contender = await second.repository.claim_dispatch(second.request,second.grant,plan2.id,plan2.operations[0].id,
         second.registration,second.facts_resolver(actions("13")),native_replay=True)
@@ -364,16 +421,18 @@ async def test_native_original_unknown_is_the_only_exception_and_competing_token
 @pytest.mark.asyncio
 async def test_blind_unknown_restarts_keep_all_candidates_blocked(db_session):
     first,provider,registry,_ = await setup_business(db_session,mode="BLIND")
-    second = await BusinessRuntime.open(later(first.request),first.grant,db_session,registry)
+    second = await open_business_runtime(later(first.request),first.grant,db_session,registry)
     await first.freeze_plan(actions("12"))
     plan2 = await second.freeze_plan(actions("13"))
     provider.lose_next=True
     await first.execute_plan(actions("12"))
     for _ in range(3):
-        restarted = await BusinessRuntime.open(second.request,second.grant,db_session,registry)
-        result=await restarted.execute_plan(actions("13"))
-        assert result.halt_status=="UNKNOWN"
+        restarted = await open_business_runtime(second.request,second.grant,db_session,registry)
+        with pytest.raises(BusinessSafetyError, match="BLOCKED_UNRESOLVED_EFFECT"):
+            await restarted.execute_plan(actions("13"))
         current=await restarted.repository.selected_plan(second.request,second.grant)
         assert current.operations[0].id==plan2.operations[0].id and current.operations[0].state_version==0
+        assert current.operations[0].effect_request_turn_id is None
+        assert current.operations[0].effect_permit_id is None
         assert current.expires_at==plan2.expires_at
     assert provider.posts==1 and provider.lookups==0

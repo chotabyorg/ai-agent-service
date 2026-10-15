@@ -1,4 +1,5 @@
 """Natural model decisions retain the canonical Goal3 proposal/effect identity."""
+from tests.business_effect_helpers import open_business_runtime
 import asyncio
 from dataclasses import replace
 from uuid import uuid4
@@ -19,15 +20,16 @@ async def setup_semantic(factory, *, ttl=300):
     await original.repository.configure_binding(original.grant, adapter_id=registration.adapter_id,
         connection_id=binding.connection_id, catalog_revision=registration.catalog_revision,
         enabled_capabilities=["booking.create"], authorization_generation=2)
-    runtime = await BusinessRuntime.open(original.request, original.grant, factory, registry)
+    runtime = await open_business_runtime(original.request, original.grant, factory, registry)
     return runtime, provider, registry
 
 
 async def next_runtime(factory, original, registry, message):
-    return await BusinessRuntime.open(later(original.request, message), original.grant, factory, registry)
+    return await open_business_runtime(later(original.request, message), original.grant, factory, registry)
 
 
 async def decide(runtime, proposal, intent):
+    await runtime.prompt_context()
     return await runtime.call_tool("business_decide_proposal", {"proposal_id": str(proposal.id), "intent": intent})
 
 
@@ -47,7 +49,7 @@ async def test_model_semantic_acceptance_executes_original_frozen_operation(db_s
     assert result.halt_status is None and provider.posts == 1
     refs = confirmer.collector.snapshot()
     assert refs[0].operation_id == str(proposal.operations[0].id) and refs[0].outcome == "SUCCEEDED"
-    restarted = await BusinessRuntime.open(confirmer.request, confirmer.grant, db_session, registry)
+    restarted = await open_business_runtime(confirmer.request, confirmer.grant, db_session, registry)
     await decide(restarted, proposal, "CONFIRM")
     assert provider.posts == 1
     async with db_session() as session:
@@ -96,13 +98,13 @@ async def test_semantic_confirmation_server_side_denials(db_session, invalid):
     if invalid == "same_turn":
         customer = original
     elif invalid == "other_conversation":
-        customer = await BusinessRuntime.open(customer.request.model_copy(update={"conversation_id": uuid4()}),
+        customer = await open_business_runtime(customer.request.model_copy(update={"conversation_id": uuid4()}),
             original.grant, db_session, registry)
     elif invalid == "noncustomer":
         request = later(original.request, "+")
         messages = list(request.messages)
         messages[-1] = messages[-1].model_copy(update={"actor": "SYSTEM"})
-        customer = await BusinessRuntime.open(request.model_copy(update={"messages": messages}), original.grant, db_session, registry)
+        customer = await open_business_runtime(request.model_copy(update={"messages": messages}), original.grant, db_session, registry)
     elif invalid == "expired":
         await asyncio.sleep(1.1)
     elif invalid == "disabled":
@@ -125,6 +127,7 @@ async def test_tool_rejects_payload_override_and_internal_provider_selection(db_
     original, provider, registry = await setup_semantic(db_session)
     proposal = await original.freeze_plan(actions("18:00"), propose=True)
     customer = await next_runtime(db_session, original, registry, "+")
+    await customer.prompt_context()
     for key, value in (("arguments", {"slot": "19:00"}), ("connection_id", str(uuid4())), ("workspace_id", str(uuid4()))):
         result = await customer.call_tool("business_decide_proposal", {"proposal_id": str(proposal.id), "intent": "CONFIRM", key: value})
         assert result.halt_status == "FAILED"
@@ -139,6 +142,6 @@ async def test_unknown_original_blocks_another_semantic_proposal(db_session):
     provider.lose_next = True
     result = await decide(customer, proposal, "CONFIRM")
     assert result.halt_status == "UNKNOWN" and provider.posts == 1
-    retry = await BusinessRuntime.open(customer.request, customer.grant, db_session, registry)
+    retry = await open_business_runtime(customer.request, customer.grant, db_session, registry)
     assert (await decide(retry, proposal, "CONFIRM")).halt_status == "UNKNOWN"
     assert provider.posts == 1 and len(provider.objects) == 1

@@ -542,7 +542,7 @@ class LLMService:
                     if runtime:
                         runtime.check()
                         if runtime.business is not None:
-                            gate = await runtime.operation(runtime.business.guard_result(allow_incomplete=True))
+                            gate = await runtime.operation(runtime.business.execution_guard(allow_incomplete=True))
                             if gate is not None:
                                 if gate.halt_status:
                                     raise ManagedExecutionError(gate.error_code, processing_status=gate.halt_status)
@@ -647,7 +647,7 @@ class LLMService:
                 if (selected is not None and selected.branch != "TOOL_CALLS") or (
                         selected is None and not getattr(message, "tool_calls", None)):
                     if runtime and runtime.business is not None:
-                        gate = await runtime.operation(runtime.business.guard_result())
+                        gate = await runtime.operation(runtime.business.final_result_guard())
                         if gate is not None:
                             if gate.halt_status:
                                 raise ManagedExecutionError(gate.error_code, processing_status=gate.halt_status)
@@ -689,7 +689,7 @@ class LLMService:
                                 or not isinstance(getattr(invalid_call, "id", None), str) or not invalid_call.id
                                 or runtime.tool_dispatch_attempted or runtime.business is None):
                             raise ManagedExecutionError("TOOL_SETUP_FAILED")
-                        gate = await runtime.operation(runtime.business.guard_result(allow_incomplete=True))
+                        gate = await runtime.operation(runtime.business.execution_guard(allow_incomplete=True))
                         if gate is not None and gate.halt_status:
                             raise ManagedExecutionError(gate.error_code, processing_status=gate.halt_status)
                         if gate is not None or runtime.business.collector.snapshot():
@@ -745,6 +745,37 @@ class LLMService:
                             ensure_ascii=False, allow_nan=False)
                         messages.append({"role": "tool", "tool_call_id": tool_call.id,
                                          "name": func_name, "content": tool_result_text})
+                        if (func_name == "business_decide_proposal"
+                                and business_result.tool_payload.get("status") == "STALE_PROPOSAL_RETIRED"):
+                            # The old proposal is now a nonconfirmable tombstone.
+                            # Refresh every model-facing surface together so a
+                            # current-origin action can follow ordinary policy.
+                            refreshed_context = await runtime.operation(
+                                runtime.business.prompt_context())
+                            prompt_context = RuntimeCapabilityContext.model_validate(refreshed_context)
+                            openai_tools = runtime.business.openai_tools()
+                            tool_registry = {
+                                tool["function"]["name"]: None for tool in openai_tools
+                            }
+                            required_proposal_id = (
+                                str(prompt_context.pending.proposal_id)
+                                if prompt_context.pending is not None else None
+                            )
+                            if required_proposal_id is not None:
+                                raise ManagedExecutionError("INVALID_RESULT")
+                            tool_choice = None
+                            from services.managed_preparation import PREPARATION_TOOLS, PreparationSchema
+                            preparation_schemas = {
+                                tool["function"]["name"]: PreparationSchema(
+                                    tool["function"]["parameters"])
+                                for tool in openai_tools
+                                if tool["function"]["name"] in PREPARATION_TOOLS
+                            }
+                            messages[0]["content"] = self.prompt_composer.compose(
+                                agent, chat_context, runtime_context=prompt_context)
+                            self._check_managed_envelope(
+                                agent, messages, openai_tools, tool_choice=tool_choice,
+                                request=managed_request)
                         # Durable normalized replay/conflict owns business
                         # identity; the legacy raw-string loop guard does not.
                         continue

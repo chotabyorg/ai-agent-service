@@ -4,6 +4,7 @@ No production startup imports this module. Test worker routes invoke the actual
 runtime/repository with trusted synthetic grants; they never fake ledger/results.
 """
 
+from tests.business_effect_helpers import open_business_runtime
 import asyncio
 import contextvars
 import json
@@ -201,7 +202,6 @@ def worker_router(config, registrations, state):
     from schemas.business import BusinessAction, BusinessSafetyError
     from schemas.managed_turn import ManagedTurnRequest
     from services.business_repository import BusinessRepository
-    from services.business_runtime import BusinessRuntime
     from services.managed_runtime import ManagedRuntime
 
     router = APIRouter()
@@ -302,15 +302,17 @@ def worker_router(config, registrations, state):
                         plan = decision.plan
                     result["operation_refs"] = [r.model_dump(mode="json") for r in plan.references]
                 else:
-                    runtime = await BusinessRuntime.open(projection, grant, AsyncSessionLocal,
+                    runtime = await open_business_runtime(projection, grant, AsyncSessionLocal,
                         registrations, execution=execution)
                     if action == "reserve":
                         plan = await runtime.freeze_plan(value["actions"], propose=value.get("propose", False))
                         result = {"plan_id": str(plan.id)}
                     elif action == "execute":
+                        await runtime.prompt_context()
                         result = (await runtime.call_tool("business_execute_plan",
                             {"actions": value["actions"]})).model_dump(mode="json")
                     elif action == "confirm":
+                        await runtime.prompt_context()
                         result = (await runtime.call_tool("business_confirm",
                             {"proposal_id": value["plan_id"]})).model_dump(mode="json")
                     elif action == "confirm_only":

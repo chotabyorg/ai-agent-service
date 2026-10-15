@@ -1,6 +1,7 @@
 """Application configuration for ai-agent-service."""
 
 from functools import lru_cache
+from urllib.parse import urlsplit
 
 from pydantic import Field, PrivateAttr, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -69,6 +70,13 @@ class Settings(BaseSettings):
     chat_s2s_token: SecretStr = Field(default="")
     chat_s2s_auth_required: bool = Field(default=False)
 
+    # Optional, dedicated permission boundary for managed Business effects.
+    # An absent pair is read-only; partial or reused credentials fail startup.
+    business_conversation_url: str = ""
+    business_conversation_token: SecretStr = Field(default="", repr=False)
+    business_conversation_timeout_seconds: float = Field(default=3.0, ge=0.2, le=10.0,
+                                                          allow_inf_nan=False)
+
     # Optional and fail-closed. No production registration is created by this code.
     managed_ai_auth_principals: SecretStr = Field(default="", repr=False)
     managed_ai_execution_seconds: float = Field(default=90.0, ge=1, le=240, allow_inf_nan=False)
@@ -101,6 +109,32 @@ class Settings(BaseSettings):
         except ValueError:
             # RuntimeError avoids Pydantic's startup rendering of rejected env input.
             raise RuntimeError("Invalid managed AI authentication configuration") from None
+        return self
+
+    @model_validator(mode="after")
+    def validate_business_conversation_authority(self) -> "Settings":
+        from core.managed_security import valid_token
+
+        url = self.business_conversation_url
+        token = self.business_conversation_token.get_secret_value()
+        if bool(url) != bool(token):
+            raise RuntimeError("Invalid Business Conversation authority configuration")
+        if not url:
+            return self
+        try:
+            parsed = urlsplit(url)
+            _ = parsed.port  # Reject malformed and out-of-range explicit ports.
+            valid_url = (parsed.scheme in {"http", "https"} and bool(parsed.hostname)
+                         and parsed.username is None and parsed.password is None
+                         and parsed.path in {"", "/"} and not parsed.query and not parsed.fragment
+                         and "?" not in url and "#" not in url)
+        except ValueError:
+            valid_url = False
+        other_tokens = {self.internal_api_token, self.chat_s2s_token.get_secret_value()}
+        other_tokens.update(principal.token.get_secret_value() for principal in self.managed_principals)
+        if (not valid_url or url != url.strip() or not valid_token(token)
+                or token in other_tokens):
+            raise RuntimeError("Invalid Business Conversation authority configuration")
         return self
 
     @property

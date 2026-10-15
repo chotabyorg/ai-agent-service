@@ -59,6 +59,22 @@ unexpired consent. The decision supplies no replacement action arguments.
 CHANGE/REJECT cancel only reserved proposals; CHANGE may freeze a new proposal in
 the current Turn, requiring another later confirmation. UNRELATED grants no effect.
 
+If Conversation proves an `INTERVENING_SPLIT`, an unacquired old proposal remains
+visible only as nonconfirmable context, even after its normal TTL. The model must
+classify the complete current customer input as an independently specified CHANGE;
+a bare agreement cannot inherit the old proposal's facts. Only after the current
+Turn is independently eligible may the runtime commit an exact NO_DISPATCH
+retirement marker and refresh the model's current-turn tools. The new intent then
+uses ordinary policy: WRITE_SAFE may execute under its normal current-turn checks,
+while WRITE_CONFIRM creates a new current-origin proposal. Any acquired request,
+permit, dispatch or attempted operation remains attached to its original plan and
+cannot use this replacement path. REJECT, UNRELATED, stale CONFIRM and unavailable
+or incomplete authority observations do not unlock another action.
+The exact NO_DISPATCH tombstone remains the latest nonconfirmable context across
+TTL expiry and process restart until a newer proposal replaces it. A normal same-Turn
+WRITE_SAFE action and ordinary confirmation of a current-origin proposal keep their
+existing policy; the split barrier does not add a blanket confirmation step.
+
 ## Identity and projections
 
 Runtime claims always use the server-selected SELF_ASSERTED_CUSTOMER audience and
@@ -106,6 +122,34 @@ Migration chain ends `d5e6f7g8h9i0` (current-main managed safety) →
 `bv2_20261008_01` (connections). Historical AI #43's migration with the same old ID
 and different semantics was not copied. None of its parallel ledger/session/plan
 tables were introduced. Existing migrated data and the ledger remain authoritative.
+
+`g5_20261015_01` adds one immutable Conversation effect-request identity and
+optional permit UUID to each AI operation. The request tuple is all-null or
+all-present with three non-null SHA-256 hashes; the database permits a single
+assignment while the original operation is still RESERVED and rejects rebinding
+or combining acquisition with a dispatch/state transition. A partial unique
+scope index also treats a requested-but-not-yet-dispatched acquisition as an
+unresolved blocker. The migration downgrade refuses once any acquisition is
+retained.
+
+Every new managed AI business effect checks the current Conversation authority
+through `BUSINESS_CONVERSATION_URL` and its dedicated `BUSINESS_CONVERSATION_TOKEN`
+using `X-Service-Token`. Configuration must be supplied as a pair and cannot
+reuse the existing AI service tokens. With no pair configured, new writes fail
+closed while reads remain available. Only an exact bounded JSON
+`EXTERNAL_EFFECT_DENIED` response proves no dispatch; transport faults, conflicts,
+malformed bodies and oversized responses remain uncertain.
+
+After a committed effect request, later Conversation eligibility cannot revoke
+the operation's permit; a still-live original Turn may finish that operation. A
+later Turn is checked at the Conversation's current input floor and split
+boundary when a fresh permit is requested. If the AI process stops between
+acquisition and dispatch, a later Turn enters sticky RECOVERY for the original
+operation. Recovery can close only a still-RESERVED acquisition under its scope
+lock, then permit read/reconciliation and model context while forcing the final
+answer from retained evidence. It cannot reserve, confirm, cancel or dispatch
+another action. Customer-turn catch-up coalescing is not part of this phase;
+intermediate queued turns remain a follow-up boundary.
 
 ## Compatibility and verification
 

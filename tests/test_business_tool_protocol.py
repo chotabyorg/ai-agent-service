@@ -13,6 +13,10 @@ from services.business_runtime import BusinessRuntime
 
 def business_tools(adapter):
     runtime = BusinessRuntime()
+    runtime.effect_eligible = True  # SDK serialization projection after positive authority
+    runtime.recovery_mode = False
+    runtime._stale_split_plan_id = None
+    runtime._stale_split_change_committed = False
     runtime.binding = SimpleNamespace(enabled_capabilities=DEFAULTS)
     runtime.registration = SimpleNamespace(adapter_id=adapter, confirmation_mode='SEMANTIC_V1',
         capabilities=[SimpleNamespace(name=c.id) for c in CAPABILITIES])

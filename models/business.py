@@ -171,16 +171,27 @@ class BusinessOperation(CreatedColumns, Base):
     reconcile_nonce: Mapped[UUID | None] = mapped_column(PGUUID(as_uuid=True))
     reconcile_lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_reconciled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Immutable Conversation authority acquisition, separate from provider state.
+    effect_request_turn_id: Mapped[UUID | None] = mapped_column(PGUUID(as_uuid=True))
+    effect_request_fingerprint: Mapped[str | None] = mapped_column(String(64))
+    effect_managed_request_fingerprint: Mapped[str | None] = mapped_column(String(64))
+    effect_operation_fingerprint: Mapped[str | None] = mapped_column(String(64))
+    effect_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    effect_permit_id: Mapped[UUID | None] = mapped_column(PGUUID(as_uuid=True))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
     __table_args__ = (
         UniqueConstraint("scope_id", "origin_turn_id", "ordinal", name="uq_business_operations_identity"),
         UniqueConstraint("plan_id", "ordinal", name="uq_business_operations_plan_ordinal"),
         ForeignKeyConstraint(["plan_id", "scope_id", "origin_turn_id", "adapter_id", "connection_id", "provider_profile_revision"], ["business_plans.id", "business_plans.scope_id", "business_plans.origin_turn_id", "business_plans.adapter_id", "business_plans.connection_id", "business_plans.provider_profile_revision"], ondelete="RESTRICT"),
-        Index("uq_business_operations_unresolved_scope", "scope_id", unique=True, postgresql_where=text("status IN ('DISPATCHING','UNKNOWN')")),
+        ForeignKeyConstraint(["scope_id", "effect_request_turn_id"], ["business_turn_contexts.scope_id", "business_turn_contexts.turn_id"], name="fk_business_operations_effect_request_turn", ondelete="RESTRICT"),
+        UniqueConstraint("effect_permit_id", name="uq_business_operations_effect_permit"),
+        Index("uq_business_operations_unresolved_scope", "scope_id", unique=True, postgresql_where=text("status IN ('DISPATCHING','UNKNOWN') OR (status = 'RESERVED' AND effect_request_turn_id IS NOT NULL)")),
         Index("ix_business_operations_scope_status", "scope_id", "status"),
         Index("ix_business_operations_dispatch_expiry", "dispatch_lease_expires_at", "id", postgresql_where=text("status = 'DISPATCHING'")),
         CheckConstraint("ordinal BETWEEN 0 AND 31 AND schema_version > 0 AND state_version >= 0 AND dispatch_epoch >= 0 AND attempt_count >= 0 AND reconcile_epoch >= 0", name="bounds"),
         CheckConstraint("request_fingerprint ~ '^[a-f0-9]{64}$' AND provider_profile_revision ~ '^[a-f0-9]{64}$' AND (receipt_fingerprint IS NULL OR receipt_fingerprint ~ '^[a-f0-9]{64}$')", name="hashes"),
+        CheckConstraint("(effect_request_turn_id IS NULL AND effect_request_fingerprint IS NULL AND effect_managed_request_fingerprint IS NULL AND effect_operation_fingerprint IS NULL AND effect_requested_at IS NULL) OR (effect_request_turn_id IS NOT NULL AND effect_request_fingerprint IS NOT NULL AND effect_request_fingerprint ~ '^[a-f0-9]{64}$' AND effect_managed_request_fingerprint IS NOT NULL AND effect_managed_request_fingerprint ~ '^[a-f0-9]{64}$' AND effect_operation_fingerprint IS NOT NULL AND effect_operation_fingerprint ~ '^[a-f0-9]{64}$' AND effect_requested_at IS NOT NULL)", name="effect_request_shape"),
+        CheckConstraint("effect_permit_id IS NULL OR effect_request_turn_id IS NOT NULL", name="effect_permit_shape"),
         CheckConstraint("jsonb_typeof(request_payload) = 'object' AND octet_length(request_payload::text) <= 16384 AND (receipt_evidence IS NULL OR (jsonb_typeof(receipt_evidence) = 'object' AND octet_length(receipt_evidence::text) <= 16384))", name="payload"),
         CheckConstraint("native_replay_policy IN ('NONE','BOUNDED','DURABLE_TEST') AND ((native_replay_policy = 'NONE') = (provider_idempotency_key IS NULL)) AND ((native_replay_policy = 'BOUNDED') = (native_replay_until IS NOT NULL))", name="native_policy"),
         CheckConstraint("status IN ('RESERVED','DISPATCHING','SUCCEEDED','FAILED','UNKNOWN')", name="status"),

@@ -79,6 +79,9 @@ async def execute_managed_owned(request, grant, runtime, db_provider, session_fa
     def retained_view(gate):
         view = BusinessRuntime()
         view.last_gate, view.collector = gate, collector
+        view.repository = retained_repository
+        view.recovery_mode = bool(gate and gate.selection_kind == "RECOVERY")
+        view.recovery_plan_id = gate.plan.id if view.recovery_mode and gate.plan else None
         view.registration = registry.get(gate.plan.operations[0].command.adapter_id) if gate and gate.plan else None
         return view
 
@@ -130,7 +133,7 @@ async def execute_managed_owned(request, grant, runtime, db_provider, session_fa
                 request, grant, session_factory, registry, execution=runtime,
                 collector=collector))
             runtime.check()
-            entry = await runtime.operation(runtime.business.guard_result(allow_incomplete=True))
+            entry = await runtime.operation(runtime.business.execution_guard(allow_incomplete=True))
             if entry is None:
                 entry = runtime.business.completed_confirmation_replay()
             if entry is not None and entry.halt_status:
@@ -185,11 +188,11 @@ async def execute_managed_owned(request, grant, runtime, db_provider, session_fa
                     if runtime.business is not None:
                         await runtime.operation(runtime.business.collect_refs())
                         retained_gate = runtime.business.last_gate
-                        final_guard = await runtime.business.guard_result(reload=False)
+                        final_guard = await runtime.business.final_result_guard(reload=False)
                     else:
                         retained_gate = await runtime.operation(retained_repository.result_gate(request, grant))
                         collector.observe_committed(retained_gate.references)
-                        final_guard = await retained_view(retained_gate).guard_result(reload=False)
+                        final_guard = await retained_view(retained_gate).final_result_guard(reload=False)
                     apply_guard(final_guard)
                 except ManagedExecutionError as exc:
                     # Preserve the pre-effect work-timeout contract only after

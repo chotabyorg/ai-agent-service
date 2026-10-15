@@ -11,6 +11,13 @@ from schemas.business import fingerprint
 from services.business_runtime import BusinessRuntime
 
 
+def _schema_runtime():
+    runtime = BusinessRuntime()
+    runtime._stale_split_plan_id = None
+    runtime._stale_split_change_committed = False
+    return runtime
+
+
 @pytest.mark.parametrize('model,accepted_hash', [
     (s.CatalogSearch, 'b3dff5e5c9ca98011615fcd2b35352d844662437cb5c38445619180b3d7ba2b4'),
     (s.CustomerFind, '0983ee916a60c64186c10e6ea1b3a55113b846f349c85979b2eb2bb74b563dd7'),
@@ -29,7 +36,9 @@ def test_read_guidance_preserves_durable_schema(model, accepted_hash):
 
 
 def test_runtime_advertises_literal_search_and_opaque_cursor_guidance():
-    runtime = BusinessRuntime()
+    runtime = _schema_runtime()
+    runtime.effect_eligible = True  # inspect the full authorized tool projection
+    runtime.recovery_mode = False
     runtime.binding = SimpleNamespace(enabled_capabilities=DEFAULTS)
     runtime.registration = SimpleNamespace(adapter_id='chotacrm', confirmation_mode='SEMANTIC_V1',
         capabilities=[SimpleNamespace(name=c.id) for c in CAPABILITIES])
@@ -90,7 +99,9 @@ def test_requested_move_time_keeps_its_instant_without_silent_correction():
 
 
 def test_actual_runtime_advertises_time_guidance_for_reads_and_moves():
-    runtime = BusinessRuntime()
+    runtime = _schema_runtime()
+    runtime.effect_eligible = True  # inspect the full authorized tool projection
+    runtime.recovery_mode = False
     runtime.binding = SimpleNamespace(enabled_capabilities=DEFAULTS)
     runtime.registration = SimpleNamespace(adapter_id='chotacrm', confirmation_mode='SEMANTIC_V1',
         capabilities=[SimpleNamespace(name=c.id) for c in CAPABILITIES])

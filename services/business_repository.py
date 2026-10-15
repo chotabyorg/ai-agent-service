@@ -17,6 +17,9 @@ from core.managed_security import EXECUTION_NAMESPACE
 from models.agent import AgentTemplate
 from models.business import (BusinessBinding, BusinessOperation, BusinessPlan, BusinessScope,
                              BusinessTurnContext, BusinessTurnPlanLink, TENANT)
+from schemas.conversation_effects import (ExternalEffectPermitRequest,
+                                          frozen_command_fingerprint, managed_request_fingerprint,
+                                          sidecar_fingerprint)
 from schemas.business import (BusinessAction, BusinessSafetyError, BusinessScopeValue,
                               DefinitiveNoEffect, DispatchAttempt, ProviderDispatch, FrozenProviderCommand, MaterialFacts,
                               ProvenFailedNoEffect, ProvenSucceeded, SucceededReceipt,
@@ -50,6 +53,12 @@ class OperationSnapshot:
     object_id: str | None
     receipt_evidence: dict | None = None
     receipt_fingerprint: str | None = None
+    effect_request_turn_id: UUID | None = None
+    effect_request_fingerprint: str | None = None
+    effect_managed_request_fingerprint: str | None = None
+    effect_operation_fingerprint: str | None = None
+    effect_requested_at: datetime | None = None
+    effect_permit_id: UUID | None = None
 
 
 @dataclass(frozen=True)
@@ -64,6 +73,13 @@ class PlanSnapshot:
     catalog_revision: str
     confirmed_turn_id: UUID | None = None
     confirmation_input_ids: tuple[str, ...] = ()
+    selection_kind: str | None = None
+    binding_id: UUID | None = None
+    adapter_id: str | None = None
+    connection_id: UUID | None = None
+    authorization_generation: int | None = None
+    context_generation: int | None = None
+    provider_profile_revision: str | None = None
 
     @property
     def references(self):
@@ -98,6 +114,8 @@ class BusinessResultGate:
     plan: PlanSnapshot | None
     scope_unresolved: bool
     disposition: str
+    selection_kind: str | None = None
+    request_conflict: bool = False
 
     @property
     def references(self):
@@ -113,6 +131,14 @@ class AdmissionProbe:
 @dataclass(frozen=True)
 class DispatchDecision:
     token: DispatchToken | None
+    reason: str
+    plan: PlanSnapshot
+
+
+@dataclass(frozen=True)
+class EffectAcquisitionDecision:
+    request: ExternalEffectPermitRequest | None
+    permit_id: UUID | None
     reason: str
     plan: PlanSnapshot
 
@@ -360,7 +386,7 @@ class BusinessRepository:
                                      authorization_generation=plan.authorization_generation,
                                      context_generation=plan.context_generation)
 
-    async def _snapshot(self, session, scope, plan):
+    async def _snapshot(self, session, scope, plan, *, selection_kind=None):
         operations = (await session.scalars(select(BusinessOperation).where(
             BusinessOperation.plan_id == plan.id).order_by(BusinessOperation.ordinal)
             .execution_options(populate_existing=True))).all()
@@ -371,15 +397,23 @@ class BusinessRepository:
                             tuple(OperationSnapshot(op.id, op.ordinal, op.status, self._command(scope, plan, op),
                                                     op.state_version, op.dispatch_epoch, op.dispatch_nonce,
                                                     op.attempt_count, op.receipt_id, op.object_id,
-                                                    copy.deepcopy(op.receipt_evidence), op.receipt_fingerprint)
+                                                    copy.deepcopy(op.receipt_evidence), op.receipt_fingerprint,
+                                                    op.effect_request_turn_id, op.effect_request_fingerprint,
+                                                    op.effect_managed_request_fingerprint,
+                                                    op.effect_operation_fingerprint, op.effect_requested_at,
+                                                    op.effect_permit_id)
                                   for op in operations), plan.catalog_revision, plan.confirmed_turn_id,
-                            tuple(plan.confirmation_input_ids or ()))
+                            tuple(plan.confirmation_input_ids or ()), selection_kind,
+                            plan.binding_id, plan.adapter_id, plan.connection_id,
+                            plan.authorization_generation, plan.context_generation,
+                            plan.provider_profile_revision)
 
     @staticmethod
     async def _unresolved(session, scope_id):
         return (await session.scalars(select(BusinessOperation.id).where(
             BusinessOperation.scope_id == scope_id,
-            BusinessOperation.status.in_(("DISPATCHING", "UNKNOWN"))))).all()
+            (BusinessOperation.status.in_(("DISPATCHING", "UNKNOWN")) |
+             ((BusinessOperation.status == "RESERVED") & BusinessOperation.effect_request_turn_id.is_not(None)))))).all()
 
     @staticmethod
     async def _resolve_fresh(facts_resolver):
@@ -466,6 +500,8 @@ class BusinessRepository:
                 })
                 link = await session.get(BusinessTurnPlanLink, (scope.id, request.turn_id))
                 if link:
+                    if link.selection_kind == "RECOVERY":
+                        raise BusinessSafetyError("RECOVERY_READ_ONLY", processing_status="UNKNOWN")
                     plan = await session.scalar(select(BusinessPlan).where(BusinessPlan.id == link.plan_id)
                                                 .with_for_update(nowait=session.info.get("business_nowait", False)).execution_options(populate_existing=True))
                     if link.selection_kind != "OWN" or plan.origin_turn_id != request.turn_id or plan.plan_fingerprint != digest:
@@ -512,12 +548,155 @@ class BusinessRepository:
             # Exiting begin positively joins COMMIT before any snapshot escapes.
             return result
 
+    async def prepare_effect_acquisition(self, request, grant, plan_id, operation_id, registration,
+                                         facts_resolver):
+        """Commit the exact permit request before crossing the sidecar boundary."""
+        probe = await self._admission_probe(request, grant, plan_id)
+        facts = await self._resolve_fresh(facts_resolver)
+        try:
+            async with self._session(decisive=True) as session:
+                async with session.begin():
+                    binding, scope = await self._authority(session, request, grant)
+                    self._check_probe(binding, scope, probe)
+                    self._registration(binding, registration)
+                    context = await self._turn(session, scope, request)
+                    plan = await session.scalar(select(BusinessPlan).where(
+                        BusinessPlan.id == plan_id, BusinessPlan.scope_id == scope.id)
+                        .with_for_update(nowait=True).execution_options(populate_existing=True))
+                    link = await session.get(BusinessTurnPlanLink, (scope.id, request.turn_id))
+                    if plan is None or link is None or link.plan_id != plan_id:
+                        raise BusinessSafetyError("PLAN_DENIED")
+                    if link.selection_kind not in {"OWN", "CONFIRM"}:
+                        raise BusinessSafetyError("RECOVERY_READ_ONLY", processing_status="UNKNOWN")
+                    origin = await session.get(BusinessTurnContext, (scope.id, plan.origin_turn_id))
+                    if (origin is None or context.authority_revision != request.authority_revision
+                            or origin.authority_revision != request.authority_revision):
+                        raise BusinessSafetyError("STALE_CONFIRMATION")
+                    operations = (await session.scalars(select(BusinessOperation).where(
+                        BusinessOperation.plan_id == plan_id).order_by(BusinessOperation.ordinal)
+                        .with_for_update(nowait=True).execution_options(populate_existing=True))).all()
+                    operation = next((value for value in operations if value.id == operation_id), None)
+                    if operation is None:
+                        raise BusinessSafetyError("OPERATION_DENIED")
+                    if len(operations) != plan.action_count or [op.ordinal for op in operations] != list(range(plan.action_count)):
+                        raise BusinessSafetyError("INCOMPLETE_PLAN")
+                    if operation.status != "RESERVED":
+                        result = EffectAcquisitionDecision(None, operation.effect_permit_id, "NOT_RESERVED",
+                                                           await self._snapshot(session, scope, plan,
+                                                               selection_kind=link.selection_kind))
+                    elif any(op.status != "SUCCEEDED" for op in operations[:operation.ordinal]):
+                        raise BusinessSafetyError("BLOCKED_PREDECESSOR")
+                    else:
+                        unresolved = [identity for identity in await self._unresolved(session, scope.id)
+                                      if identity != operation.id]
+                        if unresolved:
+                            raise BusinessSafetyError("BLOCKED_UNRESOLVED_EFFECT", processing_status="UNKNOWN")
+                        now = await self._clock(session)
+                        frozen = await self._snapshot(session, scope, plan,
+                                                       selection_kind=link.selection_kind)
+                        current = (self._current(plan, binding, registration, facts, now)
+                                   and all(op.command.capability in binding.enabled_capabilities
+                                           for op in frozen.operations)
+                                   and (not plan.requires_confirmation
+                                        or (plan.proposal_state == "CONFIRMED"
+                                            and plan.confirmed_turn_id == request.turn_id)))
+                        if not current:
+                            # Never invalidate acquisition evidence or an attempted effect.
+                            raise BusinessSafetyError("AUTHORITY_DENIED")
+                        command = self._command(scope, plan, operation)
+                        effect_request = ExternalEffectPermitRequest(
+                            contract_version=1,
+                            conversation_id=request.conversation_id,
+                            turn_id=request.turn_id,
+                            origin_turn_id=plan.origin_turn_id,
+                            owner_id=request.owner_id,
+                            integration_id=request.integration_id,
+                            channel=request.channel,
+                            agent_id=request.agent_id,
+                            authority_revision=context.authority_revision,
+                            managed_request_fingerprint=managed_request_fingerprint(request),
+                            operation_namespace="main-chota.ai-business.v1",
+                            operation_id=operation.id,
+                            operation_fingerprint=frozen_command_fingerprint(command),
+                        )
+                        request_digest = sidecar_fingerprint(effect_request)
+                        retained = (operation.effect_request_turn_id, operation.effect_request_fingerprint,
+                                    operation.effect_managed_request_fingerprint,
+                                    operation.effect_operation_fingerprint)
+                        proposed = (request.turn_id, request_digest,
+                                    effect_request.managed_request_fingerprint,
+                                    effect_request.operation_fingerprint)
+                        if operation.effect_request_turn_id is None:
+                            operation.effect_request_turn_id = request.turn_id
+                            operation.effect_request_fingerprint = request_digest
+                            operation.effect_managed_request_fingerprint = effect_request.managed_request_fingerprint
+                            operation.effect_operation_fingerprint = effect_request.operation_fingerprint
+                            operation.effect_requested_at = now
+                            operation.updated_at = now
+                        elif retained != proposed:
+                            raise BusinessSafetyError("EFFECT_REQUEST_CONFLICT", processing_status="UNKNOWN")
+                        await session.flush()
+                        result = EffectAcquisitionDecision(
+                            effect_request, operation.effect_permit_id,
+                            "GRANTED" if operation.effect_permit_id else "REQUESTED",
+                            await self._snapshot(session, scope, plan, selection_kind=link.selection_kind))
+                return result
+        except DBAPIError as error:
+            if not self._contention(error):
+                raise
+            raise BusinessSafetyError("ADMISSION_CONTENDED", processing_status="UNKNOWN") from None
+
+    async def bind_effect_permit(self, request, grant, plan_id, operation_id,
+                                 effect_request: ExternalEffectPermitRequest, permit_id: UUID):
+        """Bind one immutable positive sidecar result while the operation is still RESERVED."""
+        async with self._session() as session:
+            async with session.begin():
+                scope, plan, operation = await self._retained(session, request, grant, plan_id, operation_id)
+                expected = sidecar_fingerprint(effect_request)
+                if (operation.effect_request_turn_id != request.turn_id
+                        or operation.effect_request_fingerprint != expected
+                        or operation.effect_managed_request_fingerprint != effect_request.managed_request_fingerprint
+                        or operation.effect_operation_fingerprint != effect_request.operation_fingerprint):
+                    raise BusinessSafetyError("EFFECT_REQUEST_CONFLICT", processing_status="UNKNOWN")
+                if operation.effect_permit_id is not None and operation.effect_permit_id != permit_id:
+                    raise BusinessSafetyError("EFFECT_PERMIT_CONFLICT", processing_status="UNKNOWN")
+                if operation.status == "RESERVED" and operation.effect_permit_id is None:
+                    operation.effect_permit_id = permit_id
+                    operation.updated_at = await self._clock(session)
+                    await session.flush()
+                snapshot = await self._snapshot(session, scope, plan)
+            return snapshot
+
+    async def deny_effect_acquisition(self, request, grant, plan_id, operation_id, reason):
+        """Persist exact sidecar denial as a definitive original-operation NO_DISPATCH."""
+        if not isinstance(reason, str) or not reason.startswith("EXTERNAL_EFFECT_"):
+            raise BusinessSafetyError("EFFECT_DENIAL_INVALID")
+        async with self._session() as session:
+            async with session.begin():
+                scope, plan, operation = await self._retained(session, request, grant, plan_id, operation_id)
+                now = await self._clock(session)
+                if operation.effect_request_turn_id != request.turn_id:
+                    raise BusinessSafetyError("EFFECT_REQUEST_CONFLICT", processing_status="UNKNOWN")
+                if operation.status == "RESERVED":
+                    operation.status = "FAILED"
+                    operation.state_version += 1
+                    operation.failure_code = reason
+                    operation.receipt_id = "no-dispatch:" + str(operation.id)
+                    operation.receipt_evidence = {"kind": "NO_DISPATCH", "reason_code": reason}
+                    operation.receipt_fingerprint = fingerprint("chota.business.receipt.v1", operation.receipt_evidence)
+                    operation.terminal_at = now
+                    operation.updated_at = now
+                    plan.proposal_state = "INVALIDATED"
+                    await session.flush()
+                result = await self._snapshot(session, scope, plan)
+            return result
+
     async def result_gate(self, request, grant):
         async with self._session() as session:
             async with session.begin():
                 scope = await self._scope_query(session, request, grant)
                 if scope is None:
-                    result = BusinessResultGate(False, None, False, "NO_PLAN")
+                    result = BusinessResultGate(False, None, False, "NO_PLAN", None, False)
                 else:
                     scope = await self._lock_scope(session, scope.id)
                     context = await session.get(BusinessTurnContext, (scope.id, request.turn_id))
@@ -535,13 +714,14 @@ class BusinessRepository:
                         await session.scalars(select(BusinessOperation).where(BusinessOperation.plan_id == plan.id)
                             .order_by(BusinessOperation.ordinal).with_for_update()
                             .execution_options(populate_existing=True))
-                        snapshot = await self._snapshot(session, scope, plan)
+                        snapshot = await self._snapshot(session, scope, plan,
+                                                        selection_kind=link.selection_kind)
                     unresolved = bool(await self._unresolved(session, scope.id))
                     now = await self._clock(session)
-                    if unresolved:
-                        disposition = "UNKNOWN"
-                    elif request_conflict:
+                    if request_conflict:
                         disposition = "UNAVAILABLE"
+                    elif unresolved:
+                        disposition = "UNKNOWN"
                     elif snapshot is None:
                         disposition = "NO_PLAN"
                     elif any(op.status == "FAILED" for op in snapshot.operations):
@@ -553,7 +733,8 @@ class BusinessRepository:
                         disposition = "AWAITING_CONFIRMATION"
                     else:
                         disposition = "INCOMPLETE"
-                    result = BusinessResultGate(True, snapshot, unresolved, disposition)
+                    result = BusinessResultGate(True, snapshot, unresolved, disposition,
+                                                link.selection_kind if link else None, request_conflict)
             return result
 
     async def selected_plan(self, request, grant):
@@ -565,7 +746,7 @@ class BusinessRepository:
             if link is None:
                 return None
             plan = await session.get(BusinessPlan, link.plan_id)
-            return await self._snapshot(session, scope, plan)
+            return await self._snapshot(session, scope, plan, selection_kind=link.selection_kind)
 
     async def lookup_plan(self, request, grant, plan_id):
         async with self._session() as session:
@@ -591,12 +772,201 @@ class BusinessRepository:
     def _semantic_inputs(request, origin):
         selected = request.selected_messages
         if (origin is None or request.turn_id == origin.turn_id
+                or origin.authority_revision != request.authority_revision
                 or request.input_first_sequence <= origin.input_last_sequence
                 or not selected or any(m.actor != "CUSTOMER" or m.direction != "INBOUND"
                     or m.content_type != "TEXT" or str(m.id) in origin.selected_input_message_ids
                     for m in selected)):
             raise BusinessSafetyError("CONFIRMATION_REQUIRED")
         return selected
+
+    @staticmethod
+    def _unacquired_reservations(operations, action_count):
+        """Return true only for the untouched RESERVED rows of a fresh proposal."""
+        if (len(operations) != action_count
+                or [operation.ordinal for operation in operations] != list(range(action_count))):
+            return False
+        return all(
+            operation.status == "RESERVED"
+            and operation.state_version == 0
+            and operation.dispatch_epoch == 0
+            and operation.dispatch_nonce is None
+            and operation.dispatch_started_at is None
+            and operation.dispatch_lease_expires_at is None
+            and operation.attempt_count == 0
+            and operation.receipt_id is None
+            and operation.object_id is None
+            and operation.receipt_fingerprint is None
+            and operation.receipt_evidence is None
+            and operation.terminal_at is None
+            and operation.failure_code is None
+            and operation.reconcile_state == "NONE"
+            and operation.reconcile_epoch == 0
+            and operation.reconcile_nonce is None
+            and operation.reconcile_lease_expires_at is None
+            and operation.last_reconciled_at is None
+            and operation.effect_request_turn_id is None
+            and operation.effect_request_fingerprint is None
+            and operation.effect_managed_request_fingerprint is None
+            and operation.effect_operation_fingerprint is None
+            and operation.effect_requested_at is None
+            and operation.effect_permit_id is None
+            for operation in operations
+        )
+
+    @staticmethod
+    def _stale_split_tombstone(plan, operations):
+        """Validate the exact retained retirement marker, never arbitrary failures."""
+        if (plan.proposal_state != "INVALIDATED" or not plan.requires_confirmation
+                or plan.confirmed_turn_id is not None or plan.confirmation_input_ids is not None
+                or plan.confirmation_policy is not None or plan.confirmed_at is not None
+                or len(operations) != plan.action_count
+                or [operation.ordinal for operation in operations] != list(range(plan.action_count))):
+            return False
+        return all(
+            operation.status == "FAILED"
+            and operation.state_version == 1
+            and operation.dispatch_epoch == 0
+            and operation.dispatch_nonce is None
+            and operation.dispatch_started_at is None
+            and operation.dispatch_lease_expires_at is None
+            and operation.attempt_count == 0
+            and operation.receipt_id == "no-dispatch:" + str(operation.id)
+            and operation.object_id is None
+            and operation.failure_code == "STALE_INTERVENING_SPLIT"
+            and operation.receipt_evidence == {
+                "kind": "NO_DISPATCH", "reason_code": "STALE_INTERVENING_SPLIT"}
+            and operation.receipt_fingerprint == fingerprint(
+                "chota.business.receipt.v1",
+                {"kind": "NO_DISPATCH", "reason_code": "STALE_INTERVENING_SPLIT"},
+            )
+            and operation.terminal_at is not None
+            and operation.reconcile_state == "NONE"
+            and operation.reconcile_epoch == 0
+            and operation.reconcile_nonce is None
+            and operation.reconcile_lease_expires_at is None
+            and operation.last_reconciled_at is None
+            and operation.effect_request_turn_id is None
+            and operation.effect_request_fingerprint is None
+            and operation.effect_managed_request_fingerprint is None
+            and operation.effect_operation_fingerprint is None
+            and operation.effect_requested_at is None
+            and operation.effect_permit_id is None
+            for operation in operations
+        )
+
+    @staticmethod
+    def _stale_split_plan_is_current(plan, binding, registration):
+        return (
+            plan.binding_id == binding.id
+            and plan.adapter_id == binding.adapter_id == registration.adapter_id
+            and plan.connection_id == binding.connection_id
+            and plan.authorization_generation == binding.authorization_generation
+            and plan.context_generation == binding.context_generation
+            and plan.catalog_revision == binding.catalog_revision
+            and registration.accepts_catalog(plan.catalog_revision)
+            and registration.profile.profile_revision == plan.provider_profile_revision
+        )
+
+    async def stale_split_proposal_context(self, request, grant, registration):
+        """Select only the latest semantic proposal or this branch's exact tombstone.
+
+        Expiry is intentionally ignored so an expired stale proposal remains a
+        semantic barrier. This projection never links the old plan to the current
+        Turn and is never used as executable authority.
+        """
+        if getattr(registration, "confirmation_mode", "REFERENCE_V1") != "SEMANTIC_V1":
+            return None
+        async with self._session() as session:
+            async with session.begin():
+                binding, scope = await self._authority(session, request, grant)
+                self._registration(binding, registration)
+                await self._turn(session, scope, request)
+                if (await session.get(BusinessTurnPlanLink, (scope.id, request.turn_id))
+                        is not None or await self._unresolved(session, scope.id)):
+                    return None
+                plan = await self._latest_plan(session, scope.id)
+                if (plan is None or not plan.requires_confirmation
+                        or not self._stale_split_plan_is_current(plan, binding, registration)):
+                    return None
+                origin = await session.get(BusinessTurnContext, (scope.id, plan.origin_turn_id))
+                if origin is None or origin.authority_revision != request.authority_revision:
+                    return None
+                try:
+                    self._semantic_inputs(request, origin)
+                except BusinessSafetyError:
+                    return None
+                operations = (await session.scalars(select(BusinessOperation).where(
+                    BusinessOperation.plan_id == plan.id).order_by(BusinessOperation.ordinal)
+                    .execution_options(populate_existing=True))).all()
+                if plan.proposal_state == "PREPARED":
+                    if not self._unacquired_reservations(operations, plan.action_count):
+                        return None
+                elif not self._stale_split_tombstone(plan, operations):
+                    return None
+                snapshot = await self._snapshot(session, scope, plan)
+                if any(operation.command.capability not in binding.enabled_capabilities
+                       for operation in snapshot.operations):
+                    return None
+                return snapshot
+
+    async def retire_stale_split_proposal(self, request, grant, plan_id, registration):
+        """Atomically retire one latest, unacquired split-stale proposal.
+
+        No network call occurs under these locks. A same-request replay may
+        positively observe this exact tombstone, but it does not persist a
+        reusable replacement authorization.
+        """
+        if getattr(registration, "confirmation_mode", "REFERENCE_V1") != "SEMANTIC_V1":
+            raise BusinessSafetyError("PLAN_DENIED")
+        async with self._session(decisive=True) as session:
+            async with session.begin():
+                binding, scope = await self._authority(session, request, grant)
+                self._registration(binding, registration)
+                await self._turn(session, scope, request)
+                if await session.get(BusinessTurnPlanLink, (scope.id, request.turn_id)) is not None:
+                    raise BusinessSafetyError("PLAN_CONFLICT")
+                if await self._unresolved(session, scope.id):
+                    raise BusinessSafetyError("BLOCKED_UNRESOLVED_EFFECT", processing_status="UNKNOWN")
+                latest = await self._latest_plan(session, scope.id)
+                if latest is None or latest.id != plan_id:
+                    raise BusinessSafetyError("STALE_CONFIRMATION")
+                plan = await session.scalar(select(BusinessPlan).where(
+                    BusinessPlan.id == plan_id, BusinessPlan.scope_id == scope.id)
+                    .with_for_update(nowait=session.info.get("business_nowait", False))
+                    .execution_options(populate_existing=True))
+                if (plan is None or not plan.requires_confirmation
+                        or not self._stale_split_plan_is_current(plan, binding, registration)):
+                    raise BusinessSafetyError("STALE_CONFIRMATION")
+                origin = await session.get(BusinessTurnContext, (scope.id, plan.origin_turn_id))
+                if origin is None or origin.authority_revision != request.authority_revision:
+                    raise BusinessSafetyError("STALE_CONFIRMATION")
+                self._semantic_inputs(request, origin)
+                operations = (await session.scalars(select(BusinessOperation).where(
+                    BusinessOperation.plan_id == plan.id).order_by(BusinessOperation.ordinal)
+                    .with_for_update(nowait=session.info.get("business_nowait", False))
+                    .execution_options(populate_existing=True))).all()
+                if self._stale_split_tombstone(plan, operations):
+                    result = await self._snapshot(session, scope, plan)
+                else:
+                    if (plan.proposal_state != "PREPARED"
+                            or not self._unacquired_reservations(operations, plan.action_count)):
+                        raise BusinessSafetyError("PLAN_DENIED")
+                    now = await self._clock(session)
+                    plan.proposal_state = "INVALIDATED"
+                    for operation in operations:
+                        evidence = {"kind": "NO_DISPATCH", "reason_code": "STALE_INTERVENING_SPLIT"}
+                        operation.status = "FAILED"
+                        operation.state_version += 1
+                        operation.failure_code = "STALE_INTERVENING_SPLIT"
+                        operation.receipt_id = "no-dispatch:" + str(operation.id)
+                        operation.receipt_evidence = evidence
+                        operation.receipt_fingerprint = fingerprint("chota.business.receipt.v1", evidence)
+                        operation.terminal_at = now
+                        operation.updated_at = now
+                    await session.flush()
+                    result = await self._snapshot(session, scope, plan)
+            return result
 
     async def pending_proposal(self, request, grant, registration):
         """Read pending public context without selecting its refs for this Turn."""
@@ -616,6 +986,8 @@ class BusinessRepository:
                         or await self._unresolved(session, scope.id)):
                     return None
                 origin = await session.get(BusinessTurnContext, (scope.id, plan.origin_turn_id))
+                if origin is None or origin.authority_revision != request.authority_revision:
+                    return None
                 try:
                     self._semantic_inputs(request, origin)
                 except BusinessSafetyError:
@@ -639,7 +1011,12 @@ class BusinessRepository:
                 if plan is None:
                     raise BusinessSafetyError("PLAN_DENIED")
                 origin = await session.get(BusinessTurnContext, (scope.id, plan.origin_turn_id))
+                if origin is None or origin.authority_revision != request.authority_revision:
+                    raise BusinessSafetyError("STALE_CONFIRMATION")
                 self._semantic_inputs(request, origin)
+                link = await session.get(BusinessTurnPlanLink, (scope.id, request.turn_id))
+                if link is not None and link.selection_kind == "RECOVERY":
+                    raise BusinessSafetyError("RECOVERY_READ_ONLY", processing_status="UNKNOWN")
                 latest = await self._latest_plan(session, scope.id)
                 if latest is None or latest.id != plan.id:
                     raise BusinessSafetyError("STALE_CONFIRMATION")
@@ -674,6 +1051,121 @@ class BusinessRepository:
                                                      plan_id=plan_id, selection_kind="RECOVERY"))
                 result = await self._snapshot(session, scope, plan)
             return result
+
+    async def select_unresolved_recovery(self, request, grant):
+        """Durably make later Turns read-only observers of the original blocker."""
+        async with self._session() as session:
+            async with session.begin():
+                scope = await self._scope_query(session, request, grant)
+                if scope is None:
+                    return None
+                scope = await self._lock_scope(session, scope.id)
+                await self._turn(session, scope, request)
+                link = await session.get(BusinessTurnPlanLink, (scope.id, request.turn_id))
+                unresolved_id = await session.scalar(select(BusinessOperation.id).where(
+                    BusinessOperation.scope_id == scope.id,
+                    (BusinessOperation.status.in_(("DISPATCHING", "UNKNOWN")) |
+                     ((BusinessOperation.status == "RESERVED") &
+                      BusinessOperation.effect_request_turn_id.is_not(None))))
+                    .order_by(BusinessOperation.created_at, BusinessOperation.ordinal).limit(1))
+                if unresolved_id is None:
+                    return await self._snapshot(session, scope,
+                        await session.get(BusinessPlan, link.plan_id), selection_kind=link.selection_kind) if link else None
+                operation = await session.scalar(select(BusinessOperation).where(
+                    BusinessOperation.id == unresolved_id)
+                    .with_for_update(nowait=session.info.get("business_nowait", False))
+                    .execution_options(populate_existing=True))
+                plan = await session.scalar(select(BusinessPlan).where(
+                    BusinessPlan.id == operation.plan_id, BusinessPlan.scope_id == scope.id)
+                    .with_for_update(nowait=session.info.get("business_nowait", False))
+                    .execution_options(populate_existing=True))
+                if plan is None:
+                    raise BusinessSafetyError("INCOMPLETE_PLAN")
+                if link is None:
+                    link = BusinessTurnPlanLink(scope_id=scope.id, turn_id=request.turn_id,
+                        plan_id=plan.id, selection_kind="RECOVERY", created_at=await self._clock(session))
+                    session.add(link)
+                elif link.selection_kind == "RECOVERY" and link.plan_id != plan.id:
+                    raise BusinessSafetyError("RECOVERY_CONFLICT", processing_status="UNKNOWN")
+                await session.flush()
+                result = await self._snapshot(session, scope, plan, selection_kind=link.selection_kind)
+            return result
+
+    async def close_recovery_acquisition(self, request, grant):
+        """Fence a not-yet-dispatched REQUESTED/GRANTED operation on its scope lock."""
+        async with self._session() as session:
+            async with session.begin():
+                scope = await self._scope_query(session, request, grant)
+                if scope is None:
+                    return None
+                scope = await self._lock_scope(session, scope.id)
+                await self._turn(session, scope, request)
+                link = await session.get(BusinessTurnPlanLink, (scope.id, request.turn_id))
+                if link is None or link.selection_kind != "RECOVERY":
+                    return None
+                plan = await session.scalar(select(BusinessPlan).where(
+                    BusinessPlan.id == link.plan_id, BusinessPlan.scope_id == scope.id)
+                    .with_for_update(nowait=session.info.get("business_nowait", False))
+                    .execution_options(populate_existing=True))
+                if plan is None:
+                    raise BusinessSafetyError("INCOMPLETE_PLAN")
+                operation = await session.scalar(select(BusinessOperation).where(
+                    BusinessOperation.plan_id == plan.id,
+                    BusinessOperation.status == "RESERVED",
+                    BusinessOperation.effect_request_turn_id.is_not(None))
+                    .order_by(BusinessOperation.ordinal).limit(1)
+                    .with_for_update(nowait=session.info.get("business_nowait", False))
+                    .execution_options(populate_existing=True))
+                if operation is not None and operation.status == "RESERVED":
+                    now = await self._clock(session)
+                    operation.status = "FAILED"
+                    operation.state_version += 1
+                    operation.failure_code = "RECOVERY_NO_DISPATCH"
+                    operation.receipt_id = "no-dispatch:" + str(operation.id)
+                    operation.receipt_evidence = {"kind": "NO_DISPATCH", "reason_code": "RECOVERY_NO_DISPATCH"}
+                    operation.receipt_fingerprint = fingerprint("chota.business.receipt.v1", operation.receipt_evidence)
+                    operation.terminal_at = now
+                    operation.reconcile_state = "RESOLVED"
+                    operation.updated_at = now
+                    await session.flush()
+                result = await self._snapshot(session, scope, plan, selection_kind=link.selection_kind)
+            return result
+
+    async def invalidate_stale_proposal(self, request, grant):
+        """Close only an unacquired stale proposal; acquisition evidence is sticky."""
+        async with self._session() as session:
+            async with session.begin():
+                scope = await self._scope_query(session, request, grant)
+                if scope is None:
+                    return False
+                scope = await self._lock_scope(session, scope.id)
+                await self._turn(session, scope, request)
+                link = await session.get(BusinessTurnPlanLink, (scope.id, request.turn_id))
+                candidates = []
+                if link is not None:
+                    candidates = [link.plan_id]
+                else:
+                    latest = await self._latest_plan(session, scope.id)
+                    if latest is not None:
+                        candidates = [latest.id]
+                for plan_id in candidates:
+                    plan = await session.scalar(select(BusinessPlan).where(
+                        BusinessPlan.id == plan_id, BusinessPlan.scope_id == scope.id)
+                        .with_for_update(nowait=session.info.get("business_nowait", False))
+                        .execution_options(populate_existing=True))
+                    if plan is None or plan.proposal_state != "PREPARED":
+                        continue
+                    origin = await session.get(BusinessTurnContext, (scope.id, plan.origin_turn_id))
+                    if origin is not None and origin.authority_revision != request.authority_revision:
+                        operations = (await session.scalars(select(BusinessOperation).where(
+                            BusinessOperation.plan_id == plan.id).with_for_update(
+                                nowait=session.info.get("business_nowait", False))
+                                .execution_options(populate_existing=True))).all()
+                        if all(op.status == "RESERVED" and op.effect_request_turn_id is None for op in operations):
+                            await self._invalidate(session, plan, await self._clock(session), "STALE_AUTHORITY_OR_CONTEXT")
+                            await session.flush()
+                            return True
+                return False
 
     async def _retained(self, session, request, grant, plan_id, operation_id=None):
         scope = await self._scope_query(session, request, grant)
@@ -711,10 +1203,16 @@ class BusinessRepository:
 
     async def _invalidate(self, session, plan, now, code):
         # An invalid plan loses permission, never its original effect evidence.
+        operations = (await session.scalars(select(BusinessOperation).where(
+            BusinessOperation.plan_id == plan.id).order_by(BusinessOperation.ordinal)
+            .with_for_update(nowait=session.info.get("business_nowait", False))
+            .execution_options(populate_existing=True))).all()
+        if any(op.status == "RESERVED" and op.effect_request_turn_id is not None for op in operations):
+            return
         plan.proposal_state = "INVALIDATED"
-        for op in (await session.scalars(select(BusinessOperation).where(
-                BusinessOperation.plan_id == plan.id, BusinessOperation.status == "RESERVED")
-                .order_by(BusinessOperation.ordinal).with_for_update(nowait=session.info.get("business_nowait", False)))).all():
+        for op in operations:
+            if op.status != "RESERVED":
+                continue
             op.status = "FAILED"
             op.failure_code = code
             op.receipt_id = "no-dispatch:" + str(op.id)
@@ -724,7 +1222,8 @@ class BusinessRepository:
             op.state_version += 1
             op.updated_at = now
 
-    async def claim_dispatch(self, request, grant, plan_id, operation_id, registration, facts_resolver, *, native_replay=False):
+    async def claim_dispatch(self, request, grant, plan_id, operation_id, registration, facts_resolver, *,
+                             effect_request: ExternalEffectPermitRequest | None = None, native_replay=False):
         if not callable(facts_resolver):
             raise BusinessSafetyError("FACTS_RESOLVER_REQUIRED")
         try:
@@ -743,7 +1242,7 @@ class BusinessRepository:
         facts = await self._resolve_fresh(facts_resolver)
         try:
             return await self._claim_dispatch(request, grant, plan_id, operation_id, registration, facts,
-                                               native_replay=native_replay, probe=probe)
+                                               effect_request=effect_request, native_replay=native_replay, probe=probe)
         except DBAPIError as error:
             if not self._contention(error):
                 raise
@@ -753,7 +1252,8 @@ class BusinessRepository:
                 raise BusinessSafetyError("PLAN_DENIED")
             return DispatchDecision(None, "ADMISSION_CONTENDED", snapshot)
 
-    async def _claim_dispatch(self, request, grant, plan_id, operation_id, registration, facts, *, native_replay=False, probe):
+    async def _claim_dispatch(self, request, grant, plan_id, operation_id, registration, facts, *,
+                              effect_request: ExternalEffectPermitRequest, native_replay=False, probe):
         async with self._session(decisive=True) as session:
             async with session.begin():
                 try:
@@ -774,6 +1274,8 @@ class BusinessRepository:
                     link = await session.get(BusinessTurnPlanLink, (scope.id, request.turn_id))
                     if plan is None or link is None or link.plan_id != plan_id:
                         raise BusinessSafetyError("PLAN_DENIED")
+                    if link.selection_kind not in {"OWN", "CONFIRM"}:
+                        raise BusinessSafetyError("RECOVERY_READ_ONLY", processing_status="UNKNOWN")
                     context = await session.get(BusinessTurnContext, (scope.id, request.turn_id))
                     if context is None or context.request_fingerprint != request_fingerprint(request):
                         raise BusinessSafetyError("TURN_CONFLICT")
@@ -805,8 +1307,7 @@ class BusinessRepository:
                         reason = "BLOCKED_PREDECESSOR"
                     else:
                         unresolved = await self._unresolved(session, scope.id)
-                        if native_replay:
-                            unresolved = [identity for identity in unresolved if identity != operation.id]
+                        unresolved = [identity for identity in unresolved if identity != operation.id]
                         if unresolved:
                             reason = "BLOCKED_UNRESOLVED_EFFECT"
                         elif plan.requires_confirmation and plan.proposal_state == "PREPARED":
@@ -827,28 +1328,71 @@ class BusinessRepository:
                         elif not native_replay and operation.status != "RESERVED":
                             reason = "UNKNOWN"
                         else:
-                            operation.status = "DISPATCHING"
-                            operation.state_version += 1
-                            operation.dispatch_epoch += 1
-                            operation.attempt_count += 1
-                            operation.dispatch_nonce = uuid4()
-                            operation.dispatch_started_at = now
-                            operation.dispatch_lease_expires_at = now + timedelta(seconds=registration.profile.dispatch_timeout_seconds + 7)
-                            operation.reconcile_state = "NONE"
-                            operation.reconcile_nonce = None
-                            operation.reconcile_lease_expires_at = None
-                            operation.updated_at = now
-                            await session.flush()
-                            token = DispatchToken(operation.id, scope.id, plan.id, operation.state_version,
-                                                  operation.dispatch_epoch, operation.dispatch_nonce,
-                                                  self._command(scope, plan, operation), native_replay,
-                                                  operation.native_replay_until if operation.native_replay_policy == "BOUNDED"
-                                                  and registration.execution_contract.bounded_acceptance == "PROVIDER_ACCEPT_BEFORE_V1" else None,
-                                                  registration.execution_contract.revision)
-                            reason = "PERMITTED"
+                            if effect_request is None and operation.effect_permit_id is not None:
+                                effect_request = await self._retained_effect_request(
+                                    session, request, scope, plan, operation)
+                            if (effect_request is None or operation.effect_permit_id is None
+                                    or operation.effect_request_turn_id != request.turn_id
+                                    or operation.effect_request_fingerprint != sidecar_fingerprint(effect_request)
+                                    or operation.effect_managed_request_fingerprint != effect_request.managed_request_fingerprint
+                                    or operation.effect_operation_fingerprint != effect_request.operation_fingerprint
+                                    or effect_request.turn_id != request.turn_id
+                                    or effect_request.origin_turn_id != plan.origin_turn_id
+                                    or effect_request.operation_id != operation.id
+                                    or effect_request.operation_fingerprint != frozen_command_fingerprint(
+                                        self._command(scope, plan, operation))):
+                                reason = "EFFECT_PERMIT_REQUIRED"
+                            else:
+                                operation.status = "DISPATCHING"
+                                operation.state_version += 1
+                                operation.dispatch_epoch += 1
+                                operation.attempt_count += 1
+                                operation.dispatch_nonce = uuid4()
+                                operation.dispatch_started_at = now
+                                operation.dispatch_lease_expires_at = now + timedelta(seconds=registration.profile.dispatch_timeout_seconds + 7)
+                                operation.reconcile_state = "NONE"
+                                operation.reconcile_nonce = None
+                                operation.reconcile_lease_expires_at = None
+                                operation.updated_at = now
+                                await session.flush()
+                                token = DispatchToken(operation.id, scope.id, plan.id, operation.state_version,
+                                                      operation.dispatch_epoch, operation.dispatch_nonce,
+                                                      self._command(scope, plan, operation), native_replay,
+                                                      operation.native_replay_until if operation.native_replay_policy == "BOUNDED"
+                                                      and registration.execution_contract.bounded_acceptance == "PROVIDER_ACCEPT_BEFORE_V1" else None,
+                                                      registration.execution_contract.revision)
+                                reason = "PERMITTED"
                     await session.flush()
                     result = DispatchDecision(token, reason, await self._snapshot(session, scope, plan))
             return result
+
+    @staticmethod
+    async def _retained_effect_request(session, request, scope, plan, operation):
+        """Rebuild only the exact already-permitted request for same-Turn replay."""
+        if (operation.effect_permit_id is None
+                or operation.effect_request_turn_id != request.turn_id
+                or operation.effect_request_fingerprint is None
+                or operation.effect_managed_request_fingerprint is None
+                or operation.effect_operation_fingerprint is None):
+            return None
+        context = await session.get(BusinessTurnContext, (scope.id, operation.effect_request_turn_id))
+        if context is None:
+            raise BusinessSafetyError("EFFECT_REQUEST_CONFLICT", processing_status="UNKNOWN")
+        return ExternalEffectPermitRequest(
+            contract_version=1,
+            conversation_id=request.conversation_id,
+            turn_id=operation.effect_request_turn_id,
+            origin_turn_id=plan.origin_turn_id,
+            owner_id=request.owner_id,
+            integration_id=request.integration_id,
+            channel=request.channel,
+            agent_id=request.agent_id,
+            authority_revision=context.authority_revision,
+            managed_request_fingerprint=operation.effect_managed_request_fingerprint,
+            operation_namespace="main-chota.ai-business.v1",
+            operation_id=operation.id,
+            operation_fingerprint=operation.effect_operation_fingerprint,
+        )
 
     async def confirm_plan(self, request, grant, plan_id, registration, facts_resolver, *, semantic=False):
         if semantic and getattr(registration, "confirmation_mode", "REFERENCE_V1") != "SEMANTIC_V1":
@@ -873,7 +1417,20 @@ class BusinessRepository:
                     .with_for_update(nowait=session.info.get("business_nowait", False)).execution_options(populate_existing=True))
                 if plan is None:
                     raise BusinessSafetyError("PLAN_DENIED")
+                # A retired/cancelled proposal is never made selectable again.
+                # In particular, retirement may win the plan lock before this
+                # confirmation attempt; reject before creating a TurnPlanLink.
+                if plan.proposal_state not in {"PREPARED", "CONFIRMED"}:
+                    raise BusinessSafetyError("STALE_CONFIRMATION")
+                origin = await session.get(BusinessTurnContext, (scope.id, plan.origin_turn_id))
+                current_turn = await session.get(BusinessTurnContext, (scope.id, request.turn_id))
+                if (origin is None or current_turn is None
+                        or origin.authority_revision != request.authority_revision
+                        or current_turn.authority_revision != request.authority_revision):
+                    raise BusinessSafetyError("STALE_CONFIRMATION")
                 link = await session.get(BusinessTurnPlanLink, (scope.id, request.turn_id))
+                if link is not None and link.selection_kind == "RECOVERY":
+                    raise BusinessSafetyError("RECOVERY_READ_ONLY", processing_status="UNKNOWN")
                 if link and (link.plan_id != plan_id or link.selection_kind not in {"CONFIRM", "OWN"}):
                     raise BusinessSafetyError("PLAN_CONFLICT")
                 operations = (await session.scalars(select(BusinessOperation).where(
@@ -892,6 +1449,9 @@ class BusinessRepository:
                 elif plan.proposal_state == "CONFIRMED":
                     if plan.confirmed_turn_id != request.turn_id:
                         raise BusinessSafetyError("CONFIRMATION_REPLAY_DENIED")
+                    confirmed = await session.get(BusinessTurnContext, (scope.id, plan.confirmed_turn_id))
+                    if confirmed is None or confirmed.authority_revision != request.authority_revision:
+                        raise BusinessSafetyError("STALE_CONFIRMATION")
                 else:
                     origin = await session.get(BusinessTurnContext, (scope.id, plan.origin_turn_id))
                     selected = request.selected_messages

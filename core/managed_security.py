@@ -13,7 +13,7 @@ from schemas.managed_turn import Channel, ManagedValue, validate_owner
 from core.managed_completion_diagnostics import _trusted_completion_record
 
 EXECUTION_NAMESPACE = "main-chota.conversation.v1"
-MANAGED_SECRET_ENV_KEYS = frozenset({"managed_ai_auth_principals"})
+MANAGED_SECRET_ENV_KEYS = frozenset({"managed_ai_auth_principals", "business_conversation_token"})
 managed_logging: ContextVar[bool] = ContextVar("managed_logging", default=False)
 
 

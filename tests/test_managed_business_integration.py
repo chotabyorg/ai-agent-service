@@ -1,5 +1,6 @@
 """Managed policy and genuine PostgreSQL evidence through the shared core."""
 
+from tests.business_effect_helpers import claim_dispatch_with_test_permit, open_business_runtime
 import asyncio
 import json
 from uuid import UUID, uuid4
@@ -229,14 +230,15 @@ async def test_blocked_reserved_candidate_is_unknown_without_attempt_or_consent_
     request = ManagedTurnRequest.model_validate(value)
     grant = get_settings().managed_principals[0].grants[0]
     registry = main.app.state.business_registry
-    first = await BusinessRuntime.open(request, grant, db_session, registry)
+    first = await open_business_runtime(request, grant, db_session, registry)
     later = {**value, "turn_id": str(uuid4())}
-    second = await BusinessRuntime.open(ManagedTurnRequest.model_validate(later), grant, db_session, registry)
+    second = await open_business_runtime(ManagedTurnRequest.model_validate(later), grant, db_session, registry)
     actions = json.loads(plan_arguments())["actions"]
     plan1 = await first.freeze_plan(actions)
     plan2 = await second.freeze_plan(actions)
-    decision = await first.repository.claim_dispatch(request, grant, plan1.id, plan1.operations[0].id,
-                                                     first.registration, first.facts_resolver(actions))
+    decision = await claim_dispatch_with_test_permit(
+        first, plan1, plan1.operations[0], actions=actions
+    )
     assert decision.token is not None
     async with db_session() as db:
         op = await db.get(BusinessOperation, plan2.operations[0].id)
