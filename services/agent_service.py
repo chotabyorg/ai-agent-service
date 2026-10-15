@@ -19,6 +19,10 @@ from services.handoff_lifecycle import (
 )
 
 
+class AgentActivationUnavailable(Exception):
+    """The agent cannot be activated without a current OpenRouter key."""
+
+
 class AgentService:
     """CRUD operations for agent templates and their credentials."""
 
@@ -82,7 +86,7 @@ class AgentService:
         agent = await session.scalar(select(AgentTemplate).where(
             AgentTemplate.id == agent_id,
             AgentTemplate.user_id == user_id,
-        ).with_for_update())
+        ).with_for_update().execution_options(populate_existing=True))
         if agent is None:
             return None
 
@@ -92,6 +96,8 @@ class AgentService:
         if (agent.handoff_lifecycle_state != "STABLE"
                 and not (has_active_update and requested_active is False)):
             raise HandoffLifecycleConflict
+        if has_active_update and requested_active is True and not agent.encrypted_openrouter_key:
+            raise AgentActivationUnavailable
         if has_active_update and requested_active is False:
             agent = await transition_agent_lifecycle(
                 session, agent_id, action="DEACTIVATE", owner_id=user_id)
@@ -115,6 +121,19 @@ class AgentService:
                                owner_id: UUID, *, runtime=None) -> AgentTemplate | None:
         result = await transition_agent_lifecycle(
             session, agent_id, action="DEACTIVATE", owner_id=owner_id, runtime=runtime)
+        return result if isinstance(result, AgentTemplate) else None
+
+    async def remove_openrouter_key(
+        self, session: AsyncSession, agent_id: UUID, owner_id: UUID,
+    ) -> AgentTemplate | None:
+        """Revoke enrolled grants, then clear the key with deactivation in one commit."""
+        result = await transition_agent_lifecycle(
+            session,
+            agent_id,
+            action="DEACTIVATE",
+            owner_id=owner_id,
+            clear_openrouter_key=True,
+        )
         return result if isinstance(result, AgentTemplate) else None
 
     async def update_prompt_config(
@@ -185,7 +204,7 @@ class AgentService:
         """Delete agent. Returns None if not found, False if forbidden, True on success."""
         agent = await session.scalar(select(AgentTemplate).where(
             AgentTemplate.id == agent_id,
-        ).with_for_update())
+        ).with_for_update().execution_options(populate_existing=True))
         if agent is None:
             return None
         if agent.user_id != user_id and user_role != "admin":

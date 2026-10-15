@@ -238,14 +238,17 @@ async def transition_agent_lifecycle(
     *,
     action: str,
     owner_id: UUID | None = None,
+    clear_openrouter_key: bool = False,
     runtime=None,
 ):
     """Revoke first, then atomically deactivate/delete; pending retries replay IDs."""
     if action not in {"DEACTIVATE", "DELETE"}:
         raise ValueError("Unsupported lifecycle action")
+    if clear_openrouter_key and action != "DEACTIVATE":
+        raise ValueError("OpenRouter key removal requires deactivation")
     agent = await session.scalar(select(AgentTemplate).where(
         AgentTemplate.id == agent_id,
-    ).with_for_update())
+    ).with_for_update().execution_options(populate_existing=True))
     if agent is None or (owner_id is not None and agent.user_id != owner_id):
         return None
     target_state = "PENDING_DEACTIVATE" if action == "DEACTIVATE" else "PENDING_DELETE"
@@ -259,12 +262,17 @@ async def transition_agent_lifecycle(
         scopes = _validated_scope_snapshot(agent.handoff_lifecycle_scope_snapshot, agent.id)
     else:
         if action == "DEACTIVATE" and not agent.is_active:
+            if clear_openrouter_key and agent.encrypted_openrouter_key is not None:
+                agent.encrypted_openrouter_key = None
+                await session.commit()
             return agent
         configured = _configured_scope_snapshot(agent.id)
         scopes = _merge_scope_snapshots(agent.handoff_lifecycle_scope_snapshot, configured, agent.id)
         if not scopes:
             if action == "DEACTIVATE":
                 agent.is_active = False
+                if clear_openrouter_key:
+                    agent.encrypted_openrouter_key = None
                 if agent.handoff_lifecycle_generation >= MAX_GENERATION:
                     raise HandoffLifecycleConflict
                 agent.handoff_lifecycle_generation += 1
@@ -298,6 +306,9 @@ async def transition_agent_lifecycle(
         return True
     if (agent is not None and action == "DEACTIVATE"
             and agent.handoff_lifecycle_state == "STABLE" and not agent.is_active):
+        if clear_openrouter_key and agent.encrypted_openrouter_key is not None:
+            agent.encrypted_openrouter_key = None
+            await session.commit()
         return agent
     if (agent is None or agent.handoff_lifecycle_state != target_state
             or agent.handoff_lifecycle_source_generation != source_generation
@@ -306,6 +317,8 @@ async def transition_agent_lifecycle(
         raise HandoffLifecycleConflict
     if action == "DEACTIVATE":
         agent.is_active = False
+        if clear_openrouter_key:
+            agent.encrypted_openrouter_key = None
         agent.handoff_lifecycle_state = "STABLE"
         agent.handoff_lifecycle_source_generation = None
         await session.commit()
@@ -319,7 +332,7 @@ async def activate_agent(session: AsyncSession, agent_id: UUID, owner_id: UUID) 
     """Advance lifecycle before a newly active agent can prove/enroll again."""
     agent = await session.scalar(select(AgentTemplate).where(
         AgentTemplate.id == agent_id, AgentTemplate.user_id == owner_id,
-    ).with_for_update())
+    ).with_for_update().execution_options(populate_existing=True))
     if agent is None:
         return None
     if agent.handoff_lifecycle_state != "STABLE":

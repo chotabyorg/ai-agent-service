@@ -20,7 +20,7 @@ from schemas.agent import (
 )
 from schemas.prompt_config import PromptConfig
 from models.agent import AgentTemplate
-from services.agent_service import AgentService
+from services.agent_service import AgentActivationUnavailable, AgentService
 from services.handoff_lifecycle import HandoffLifecycleConflict, HandoffLifecycleUnavailable
 from services.bitrix_webhook_validator import (
     BitrixCredentialsValidationStatus,
@@ -113,6 +113,11 @@ async def update_agent(
             )
     try:
         agent = await agent_service.update_agent(db, user_id, agent_id, payload)
+    except AgentActivationUnavailable:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cannot activate agent without OpenRouter API key.",
+        ) from None
     except HandoffLifecycleConflict:
         raise HTTPException(status_code=409, detail="Agent lifecycle change conflicts with pending state") from None
     except HandoffLifecycleUnavailable:

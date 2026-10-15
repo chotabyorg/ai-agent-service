@@ -15,6 +15,7 @@ from schemas.handoff import AgentProofRequest, AgentRevokeAcknowledgement, Agent
 from schemas.agent import AgentUpdate
 from services import handoff_lifecycle
 from services.agent_service import AgentService
+from services.agent_service import AgentActivationUnavailable
 from services.handoff_lifecycle import HandoffLifecycleConflict, HandoffLifecycleUnavailable
 
 
@@ -196,6 +197,7 @@ async def test_reactivation_cannot_rebind_proven_scope_to_replacement_account(
             model_name="example/model",
             temperature=0.5,
             is_active=True,
+            encrypted_openrouter_key="encrypted-test-key",
             handoff_lifecycle_generation=1,
         ))
         await session.commit()
@@ -379,7 +381,7 @@ async def test_openrouter_key_delete_keeps_active_agent_when_revoke_is_unavailab
     async def unavailable(*_args, **_kwargs):
         raise HandoffLifecycleUnavailable
 
-    monkeypatch.setattr(key_module.agent_service, "deactivate_agent", unavailable)
+    monkeypatch.setattr(key_module.agent_service, "remove_openrouter_key", unavailable)
     response = await api_client.delete(
         f"/v1/agents/{agent_id}/openrouter-key", headers={"x-user-id": str(owner_id)}
     )
@@ -388,3 +390,302 @@ async def test_openrouter_key_delete_keeps_active_agent_when_revoke_is_unavailab
         unchanged = await session.get(AgentTemplate, agent_id)
         assert unchanged.is_active is True
         assert unchanged.encrypted_openrouter_key == "encrypted-test-key"
+
+
+@pytest.mark.integration
+async def test_key_delete_fences_activation_and_proof_until_revoke_finishes(
+        api_client, db_session, monkeypatch):
+    account_id = uuid4()
+    scope = HandoffScope(owner_id="opaque-delete-first-owner", integration_id=uuid4(),
+                         channel="TELEGRAM", agent_id=uuid4())
+    configure_handoff(monkeypatch, scope, account_id)
+    async with db_session() as session:
+        session.add(AgentTemplate(
+            id=scope.agent_id, user_id=account_id, name="delete first",
+            system_prompt="hello", llm_provider="openrouter", model_name="example/model",
+            temperature=0.5, is_active=True, encrypted_openrouter_key="encrypted-key",
+            handoff_lifecycle_generation=1,
+        ))
+        await session.commit()
+
+    proof_body = AgentProofRequest(
+        contract_version=1, owner_id=scope.owner_id, integration_id=scope.integration_id,
+        channel=scope.channel, agent_id=scope.agent_id,
+    ).model_dump(mode="json")
+    proof = await api_client.post(
+        "/internal/v1/handoff/agent-proof", json=proof_body,
+        headers={"X-Service-Token": LIFECYCLE_TOKEN},
+    )
+    assert proof.status_code == 200
+
+    revoke_started = asyncio.Event()
+    allow_revoke = asyncio.Event()
+    revokes = []
+
+    async def paused_revoke(scopes, source_generation, target_generation, runtime=None):
+        revokes.append((scopes, source_generation, target_generation))
+        revoke_started.set()
+        await allow_revoke.wait()
+
+    monkeypatch.setattr(handoff_lifecycle, "_revoke_all", paused_revoke)
+    delete_task = asyncio.create_task(api_client.delete(
+        f"/v1/agents/{scope.agent_id}/openrouter-key",
+        headers={"x-user-id": str(account_id)},
+    ))
+    await asyncio.wait_for(revoke_started.wait(), timeout=2)
+    try:
+        async with db_session() as session:
+            pending = await session.get(AgentTemplate, scope.agent_id)
+            assert pending.is_active is True
+            assert pending.encrypted_openrouter_key == "encrypted-key"
+            assert pending.handoff_lifecycle_state == "PENDING_DEACTIVATE"
+            assert pending.handoff_lifecycle_generation == 2
+
+        async with db_session() as session:
+            with pytest.raises(HandoffLifecycleConflict):
+                await AgentService().update_agent(
+                    session, account_id, scope.agent_id, AgentUpdate(is_active=True))
+
+        pending_proof = await api_client.post(
+            "/internal/v1/handoff/agent-proof", json=proof_body,
+            headers={"X-Service-Token": LIFECYCLE_TOKEN},
+        )
+        assert pending_proof.status_code == 409
+    finally:
+        allow_revoke.set()
+
+    deleted = await asyncio.wait_for(delete_task, timeout=3)
+    assert deleted.status_code == 204
+    assert [(source, target) for _, source, target in revokes] == [(1, 2)]
+    async with db_session() as session:
+        agent = await session.get(AgentTemplate, scope.agent_id)
+        assert agent.is_active is False
+        assert agent.encrypted_openrouter_key is None
+        assert agent.handoff_lifecycle_state == "STABLE"
+        assert agent.handoff_lifecycle_generation == 2
+    after_delete_proof = await api_client.post(
+        "/internal/v1/handoff/agent-proof", json=proof_body,
+        headers={"X-Service-Token": LIFECYCLE_TOKEN},
+    )
+    assert after_delete_proof.status_code == 409
+
+
+@pytest.mark.integration
+async def test_activation_lock_wins_then_key_delete_revokes_new_generation(
+        api_client, db_session, monkeypatch):
+    from services import agent_service as agent_service_module
+
+    account_id = uuid4()
+    scope = HandoffScope(owner_id="opaque-activate-first-owner", integration_id=uuid4(),
+                         channel="TELEGRAM", agent_id=uuid4())
+    configure_handoff(monkeypatch, scope, account_id)
+    async with db_session() as session:
+        session.add(AgentTemplate(
+            id=scope.agent_id, user_id=account_id, name="activate first",
+            system_prompt="hello", llm_provider="openrouter", model_name="example/model",
+            temperature=0.5, is_active=True, encrypted_openrouter_key="encrypted-key",
+            handoff_lifecycle_generation=1,
+        ))
+        await session.commit()
+    proof_body = AgentProofRequest(
+        contract_version=1, owner_id=scope.owner_id, integration_id=scope.integration_id,
+        channel=scope.channel, agent_id=scope.agent_id,
+    ).model_dump(mode="json")
+    proof = await api_client.post(
+        "/internal/v1/handoff/agent-proof", json=proof_body,
+        headers={"X-Service-Token": LIFECYCLE_TOKEN},
+    )
+    assert proof.status_code == 200
+
+    revokes = []
+
+    async def record_revoke(scopes, source_generation, target_generation, runtime=None):
+        revokes.append((scopes, source_generation, target_generation))
+
+    monkeypatch.setattr(handoff_lifecycle, "_revoke_all", record_revoke)
+    async with db_session() as session:
+        deactivated = await AgentService().deactivate_agent(session, scope.agent_id, account_id)
+        assert deactivated is not None and not deactivated.is_active
+        assert deactivated.handoff_lifecycle_generation == 2
+
+    activation_locked = asyncio.Event()
+    release_activation = asyncio.Event()
+    actual_activate = agent_service_module.activate_agent
+
+    async def hold_activation_lock(session, agent_id, owner_id):
+        agent = await actual_activate(session, agent_id, owner_id)
+        assert agent is not None and agent.is_active
+        assert agent.handoff_lifecycle_generation == 3
+        activation_locked.set()
+        await release_activation.wait()
+        return agent
+
+    monkeypatch.setattr(agent_service_module, "activate_agent", hold_activation_lock)
+
+    async def activate():
+        async with db_session() as session:
+            return await AgentService().update_agent(
+                session, account_id, scope.agent_id, AgentUpdate(is_active=True))
+
+    activation_task = asyncio.create_task(activate())
+    await asyncio.wait_for(activation_locked.wait(), timeout=2)
+    delete_task = asyncio.create_task(api_client.delete(
+        f"/v1/agents/{scope.agent_id}/openrouter-key",
+        headers={"x-user-id": str(account_id)},
+    ))
+    release_activation.set()
+    activated = await asyncio.wait_for(activation_task, timeout=3)
+    assert activated is not None
+    deleted = await asyncio.wait_for(delete_task, timeout=3)
+    assert deleted.status_code == 204
+    assert [(source, target) for _, source, target in revokes] == [(1, 2), (3, 4)]
+    async with db_session() as session:
+        agent = await session.get(AgentTemplate, scope.agent_id)
+        assert agent.is_active is False
+        assert agent.encrypted_openrouter_key is None
+        assert agent.handoff_lifecycle_state == "STABLE"
+        assert agent.handoff_lifecycle_generation == 4
+    after_delete_proof = await api_client.post(
+        "/internal/v1/handoff/agent-proof", json=proof_body,
+        headers={"X-Service-Token": LIFECYCLE_TOKEN},
+    )
+    assert after_delete_proof.status_code == 409
+
+
+@pytest.mark.integration
+async def test_key_delete_retry_does_not_succeed_after_plain_deactivate_then_reactivate(
+        api_client, db_session, monkeypatch):
+    account_id = uuid4()
+    scope = HandoffScope(owner_id="opaque-overlap-owner", integration_id=uuid4(),
+                         channel="TELEGRAM", agent_id=uuid4())
+    configure_handoff(monkeypatch, scope, account_id)
+    async with db_session() as session:
+        session.add(AgentTemplate(
+            id=scope.agent_id, user_id=account_id, name="overlapping lifecycle",
+            system_prompt="hello", llm_provider="openrouter", model_name="example/model",
+            temperature=0.5, is_active=True, encrypted_openrouter_key="encrypted-key",
+            handoff_lifecycle_generation=1,
+        ))
+        await session.commit()
+    proof_body = AgentProofRequest(
+        contract_version=1, owner_id=scope.owner_id, integration_id=scope.integration_id,
+        channel=scope.channel, agent_id=scope.agent_id,
+    ).model_dump(mode="json")
+    proof = await api_client.post(
+        "/internal/v1/handoff/agent-proof", json=proof_body,
+        headers={"X-Service-Token": LIFECYCLE_TOKEN},
+    )
+    assert proof.status_code == 200
+
+    key_revoke_started = asyncio.Event()
+    plain_revoke_started = asyncio.Event()
+    release_key_revoke = asyncio.Event()
+    release_plain_revoke = asyncio.Event()
+    revokes = []
+
+    async def overlapping_revoke(scopes, source_generation, target_generation, runtime=None):
+        revokes.append((source_generation, target_generation))
+        if len(revokes) == 1:
+            key_revoke_started.set()
+            await release_key_revoke.wait()
+        elif len(revokes) == 2:
+            plain_revoke_started.set()
+            await release_plain_revoke.wait()
+
+    monkeypatch.setattr(handoff_lifecycle, "_revoke_all", overlapping_revoke)
+    key_delete_task = asyncio.create_task(api_client.delete(
+        f"/v1/agents/{scope.agent_id}/openrouter-key",
+        headers={"x-user-id": str(account_id)},
+    ))
+    await asyncio.wait_for(key_revoke_started.wait(), timeout=2)
+
+    async def plain_deactivate():
+        async with db_session() as session:
+            return await AgentService().deactivate_agent(session, scope.agent_id, account_id)
+
+    plain_deactivate_task = asyncio.create_task(plain_deactivate())
+    await asyncio.wait_for(plain_revoke_started.wait(), timeout=2)
+    release_plain_revoke.set()
+    plain_result = await asyncio.wait_for(plain_deactivate_task, timeout=3)
+    assert plain_result is not None and not plain_result.is_active
+    assert plain_result.handoff_lifecycle_generation == 2
+    assert plain_result.encrypted_openrouter_key == "encrypted-key"
+
+    # The plain retry may finish the shared pending revoke, but the key-delete
+    # request must not claim success if activation wins before its own final lock.
+    async with db_session() as session:
+        activated = await AgentService().update_agent(
+            session, account_id, scope.agent_id, AgentUpdate(is_active=True))
+        assert activated is not None and activated.is_active
+        assert activated.handoff_lifecycle_generation == 3
+    current_proof = await api_client.post(
+        "/internal/v1/handoff/agent-proof", json=proof_body,
+        headers={"X-Service-Token": LIFECYCLE_TOKEN},
+    )
+    assert current_proof.status_code == 200
+    assert current_proof.json()["agent_lifecycle_generation"] == 3
+
+    release_key_revoke.set()
+    key_delete = await asyncio.wait_for(key_delete_task, timeout=3)
+    assert key_delete.status_code == 409
+    assert revokes == [(1, 2), (1, 2)]
+    async with db_session() as session:
+        still_active = await session.get(AgentTemplate, scope.agent_id)
+        assert still_active.is_active is True
+        assert still_active.encrypted_openrouter_key == "encrypted-key"
+        assert still_active.handoff_lifecycle_state == "STABLE"
+        assert still_active.handoff_lifecycle_generation == 3
+
+    # A retry starts a new transition for the now-current generation and only
+    # reports success after that generation is revoked and the key is cleared.
+    async def successful_revoke(*_args, **_kwargs):
+        revokes.append((3, 4))
+
+    monkeypatch.setattr(handoff_lifecycle, "_revoke_all", successful_revoke)
+    retry = await api_client.delete(
+        f"/v1/agents/{scope.agent_id}/openrouter-key",
+        headers={"x-user-id": str(account_id)},
+    )
+    assert retry.status_code == 204
+    assert revokes[-1] == (3, 4)
+    final_proof = await api_client.post(
+        "/internal/v1/handoff/agent-proof", json=proof_body,
+        headers={"X-Service-Token": LIFECYCLE_TOKEN},
+    )
+    assert final_proof.status_code == 409
+    async with db_session() as session:
+        removed = await session.get(AgentTemplate, scope.agent_id)
+        assert removed.is_active is False
+        assert removed.encrypted_openrouter_key is None
+        assert removed.handoff_lifecycle_generation == 4
+
+
+@pytest.mark.integration
+async def test_activation_refreshes_agent_preloaded_before_key_removal(
+        db_session):
+    account_id = uuid4()
+    agent_id = uuid4()
+    async with db_session() as session:
+        session.add(AgentTemplate(
+            id=agent_id, user_id=account_id, name="stale activation",
+            system_prompt="hello", llm_provider="openrouter", model_name="example/model",
+            temperature=0.5, is_active=False, encrypted_openrouter_key="encrypted-key",
+            handoff_lifecycle_generation=0,
+        ))
+        await session.commit()
+
+    async with db_session() as stale_session:
+        stale_agent = await stale_session.get(AgentTemplate, agent_id)
+        assert stale_agent.encrypted_openrouter_key == "encrypted-key"
+        async with db_session() as removal_session:
+            removed = await AgentService().remove_openrouter_key(
+                removal_session, agent_id, account_id)
+            assert removed is not None
+            assert removed.is_active is False
+            assert removed.encrypted_openrouter_key is None
+        with pytest.raises(AgentActivationUnavailable):
+            await AgentService().update_agent(
+                stale_session, account_id, agent_id, AgentUpdate(is_active=True))
+        assert stale_agent.encrypted_openrouter_key is None
+        assert stale_agent.is_active is False
+        assert stale_agent.handoff_lifecycle_generation == 0

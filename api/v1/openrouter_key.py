@@ -76,22 +76,14 @@ async def delete_openrouter_key(
     db: DbSession,
     user_id: UserIdHeader,
 ) -> None:
-    agent = await agent_service.get_agent_by_id(db, agent_id, user_id=user_id)
-    if agent is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agent not found")
-
-    # Revoke every retained Telegram grant before making an active agent
-    # ineligible for AI proof. A failed/unknown revoke leaves the key and
-    # active state untouched so a retry can replay its durable command.
+    # The lifecycle transition keeps the agent pending while Conversation
+    # revokes retained grants. It clears the key in the same final commit that
+    # marks the agent inactive, so activation cannot win between those writes.
     try:
-        await agent_service.deactivate_agent(db, agent_id, user_id)
+        agent = await agent_service.remove_openrouter_key(db, agent_id, user_id)
     except HandoffLifecycleConflict:
         raise HTTPException(status_code=409, detail="Agent lifecycle change conflicts with pending state") from None
     except HandoffLifecycleUnavailable:
         raise HTTPException(status_code=503, detail="Handoff grant revocation is unavailable") from None
-
-    agent = await agent_service.get_agent_by_id(db, agent_id, user_id=user_id)
     if agent is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agent not found")
-    agent.encrypted_openrouter_key = None
-    await db.commit()
