@@ -71,6 +71,15 @@ def _restore_env(previous: dict[str, str | None]) -> None:
 
 @pytest.fixture(scope="session")
 def postgres_url() -> Iterator[str]:
+    native_url = os.environ.get("TEST_DATABASE_URL")
+    if native_url:
+        parsed = make_url(native_url)
+        if (os.environ.get("TEST_DATABASE_DISPOSABLE") != "yes"
+                or parsed.host not in {"127.0.0.1", "localhost"}
+                or not (parsed.database or "").startswith("test_ai_")):
+            raise RuntimeError("Native tests require an explicitly disposable local test_ai_ database")
+        yield native_url
+        return
     testcontainers = pytest.importorskip("testcontainers.postgres")
     previous_ryuk = os.environ.get("TESTCONTAINERS_RYUK_DISABLED")
     os.environ["TESTCONTAINERS_RYUK_DISABLED"] = "true"

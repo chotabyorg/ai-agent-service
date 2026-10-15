@@ -6,6 +6,7 @@ from pydantic import Field, PrivateAttr, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from config.llm_models import get_default_model_id
+from core.voice_latency import VoiceLatencyProfile
 
 
 class Settings(BaseSettings):
@@ -74,11 +75,13 @@ class Settings(BaseSettings):
     managed_ai_context_bytes: int = Field(default=131072, ge=1024, le=1048576)
     # Explicit model IDs only; no default override, pattern matching or routing change.
     managed_openrouter_disable_reasoning_models: list[str] = Field(default_factory=list, max_length=16)
+    # Empty by default; only authenticated managed VOICE requests can match.
+    managed_voice_latency_profiles: list[VoiceLatencyProfile] = Field(default_factory=list, max_length=64)
     _managed_principals: tuple = PrivateAttr(default=())
 
     @model_validator(mode="after")
     def validate_managed_reasoning_transport(self) -> "Settings":
-        if self.managed_openrouter_disable_reasoning_models:
+        if self.managed_openrouter_disable_reasoning_models or self.managed_voice_latency_profiles:
             if (self.privacy_filter_enabled
                     or self.llm_base_url.rstrip('/') != 'https://openrouter.ai/api/v1'):
                 # Do not silently drop an unsupported proxy/provider parameter or
