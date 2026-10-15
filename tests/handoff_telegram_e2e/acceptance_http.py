@@ -154,6 +154,24 @@ async def _wait_delivery(handoff, message_id: str):
     )
 
 
+async def _wait_agent_delivery(handoff, turn_id: str):
+    return await _wait_for(
+        lambda: _rows(
+            handoff.engines["conversation"],
+            "SELECT d.id,d.source_turn_id,d.source_message_id,d.outbound_ordinal,d.case_id,"
+            "d.grant_generation,d.status,d.writer_state,d.authority_revision,"
+            "d.provider_message_id,d.error_code,c.control_mode,c.authority_revision "
+            "AS current_authority_revision FROM delivery_attempts d "
+            "JOIN conversations c ON c.id=d.conversation_id "
+            "WHERE d.source_turn_id=:turn_id",
+            {"turn_id": turn_id},
+        ),
+        lambda value: bool(value) and value[0]["status"] in {
+            "PROVIDER_ACCEPTED", "UNKNOWN", "FAILED", "SUPERSEDED",
+        } and value[0]["writer_state"] in {"ENDED", "RETIRED"},
+    )
+
+
 async def _managed_v3_evidence(handoff, request_body: dict) -> dict:
     from schemas.managed_turn_v3 import ManagedTurnV3Request
     from services.managed_execution_receipts import (
@@ -212,17 +230,30 @@ async def test_telegram_handoff_real_http_and_database_lifecycle(handoff):
     assert first_turn[0]["input_first_sequence"] == first_turn[0]["input_last_sequence"] == 1
     assert first_turn[0]["status"] == "COMPLETED"
     origin_turn_id = str(first_turn[0]["id"])
-    initial_work = await handoff.client.post(
-        handoff.url("cs") + "/internal/v2/telegram/delivery/work",
-        json={"contract_version": 2, "owner_id": handoff.grant["owner_id"],
-              "integration_id": handoff.ids["integration"], "agent_id": handoff.ids["agent"],
-              "bot_id": BOT_ID},
-        headers={"X-Service-Token": handoff.tokens["telegram_gateway"]},
-    )
-    assert initial_work.status_code == 200
-    initial_items = initial_work.json()["items"]
-    assert any(item["source_id"] == origin_turn_id and item["work_kind"] == "SEND_CANDIDATE"
-               for item in initial_items), f"v2 work returned {len(initial_items)} items"
+    initial_delivery = await _wait_agent_delivery(handoff, origin_turn_id)
+    assert len(initial_delivery) == 1
+    initial_intent = initial_delivery[0]
+    assert str(initial_intent["source_turn_id"]) == origin_turn_id
+    assert initial_intent["source_message_id"] is None
+    assert initial_intent["outbound_ordinal"] == 1
+    assert initial_intent["case_id"] is None
+    assert initial_intent["grant_generation"] == 1
+    assert initial_intent["status"] == "PROVIDER_ACCEPTED"
+    assert initial_intent["writer_state"] == "ENDED"
+    assert initial_intent["authority_revision"] == initial_intent["current_authority_revision"] == 0
+    assert initial_intent["control_mode"] == "AGENT"
+    assert initial_intent["provider_message_id"]
+    assert initial_intent["error_code"] is None
+    first_agent_attempts = [
+        item for item in handoff.telegram_peer.snapshot()["send_attempts"]
+        if item["text"] == first_turn[0]["draft_text"]
+    ]
+    first_agent_accepted = [
+        item for item in handoff.telegram_peer.snapshot()["accepted_messages"]
+        if item["text"] == first_turn[0]["draft_text"]
+    ]
+    assert len(first_agent_attempts) == len(first_agent_accepted) == 1
+    assert initial_intent["provider_message_id"] == str(first_agent_accepted[0]["message_id"])
 
     operations = await handoff.operations(origin_turn_id)
     assert len(operations) == 1 and operations[0]["status"] == "RESERVED"

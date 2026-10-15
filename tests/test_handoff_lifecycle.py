@@ -7,15 +7,15 @@ from uuid import uuid4
 
 import httpx
 import pytest
-from sqlalchemy import select
 
 from core.config import get_settings
 from core.managed_security import parse_principals
 from models.agent import AgentTemplate
 from schemas.handoff import AgentProofRequest, AgentRevokeAcknowledgement, AgentRevokeRequest, HandoffScope
+from schemas.agent import AgentUpdate
 from services import handoff_lifecycle
 from services.agent_service import AgentService
-from services.handoff_lifecycle import HandoffLifecycleUnavailable
+from services.handoff_lifecycle import HandoffLifecycleConflict, HandoffLifecycleUnavailable
 
 
 LIFECYCLE_TOKEN = "handoff-lifecycle-test-token-0123456789"
@@ -175,6 +175,110 @@ async def test_proof_records_scope_and_config_removal_cannot_skip_revoke(
     assert command["source_agent_lifecycle_generation"] == 1
     assert command["target_agent_lifecycle_generation"] == 2
     assert command["lifecycle_source"] == "AI_AGENT"
+
+
+@pytest.mark.integration
+async def test_reactivation_cannot_rebind_proven_scope_to_replacement_account(
+        api_client, db_session, monkeypatch):
+    original_account_id = uuid4()
+    replacement_account_id = uuid4()
+    scope = HandoffScope(owner_id="opaque-rebind-owner", integration_id=uuid4(),
+                         channel="TELEGRAM", agent_id=uuid4())
+    configure_handoff(monkeypatch, scope, original_account_id)
+    FakeConversationClient.calls = []
+    async with db_session() as session:
+        session.add(AgentTemplate(
+            id=scope.agent_id,
+            user_id=original_account_id,
+            name="rebind guard",
+            system_prompt="private conversation context",
+            llm_provider="openrouter",
+            model_name="example/model",
+            temperature=0.5,
+            is_active=True,
+            handoff_lifecycle_generation=1,
+        ))
+        await session.commit()
+
+    request = AgentProofRequest(
+        contract_version=1,
+        owner_id=scope.owner_id,
+        integration_id=scope.integration_id,
+        channel=scope.channel,
+        agent_id=scope.agent_id,
+    )
+    proof = await api_client.post(
+        "/internal/v1/handoff/agent-proof",
+        json=request.model_dump(mode="json"),
+        headers={"X-Service-Token": LIFECYCLE_TOKEN},
+    )
+    assert proof.status_code == 200
+    assert proof.json()["agent_owner_id"] == str(original_account_id)
+
+    monkeypatch.setattr(handoff_lifecycle.httpx, "AsyncClient", FakeConversationClient)
+    FakeConversationClient.replies = [(200, False)]
+    async with db_session() as session:
+        deactivated = await AgentService().deactivate_agent(
+            session, scope.agent_id, original_account_id)
+        assert deactivated is not None and not deactivated.is_active
+        assert deactivated.handoff_lifecycle_generation == 2
+        assert deactivated.handoff_lifecycle_state == "STABLE"
+
+    async with db_session() as session:
+        reactivated = await AgentService().update_agent(
+            session,
+            original_account_id,
+            scope.agent_id,
+            AgentUpdate(is_active=True),
+        )
+        assert reactivated is not None and reactivated.is_active
+        assert reactivated.handoff_lifecycle_generation == 3
+        assert reactivated.handoff_lifecycle_scope_snapshot == [{
+            "owner_id": scope.owner_id,
+            "integration_id": str(scope.integration_id),
+            "channel": "TELEGRAM",
+            "agent_id": str(scope.agent_id),
+            "agent_owner_id": str(original_account_id),
+        }]
+
+    # The same opaque owner/integration/agent tuple is now misconfigured to a
+    # different account. The proof boundary must not disclose the old binding.
+    configure_handoff(monkeypatch, scope, replacement_account_id)
+    replacement_proof = await api_client.post(
+        "/internal/v1/handoff/agent-proof",
+        json=request.model_dump(mode="json"),
+        headers={"X-Service-Token": LIFECYCLE_TOKEN},
+    )
+    assert replacement_proof.status_code == 404
+    assert replacement_proof.json() == {
+        "detail": {"code": "AGENT_NOT_FOUND", "message": "Agent not found."}
+    }
+    assert "private conversation context" not in replacement_proof.text
+    assert str(original_account_id) not in replacement_proof.text
+    assert str(replacement_account_id) not in replacement_proof.text
+
+    # A later deactivation cannot overwrite the retained account identity or
+    # send Conversation a revoke for the replacement account.
+    async with db_session() as session:
+        with pytest.raises(HandoffLifecycleConflict):
+            await AgentService().deactivate_agent(
+                session, scope.agent_id, original_account_id)
+    assert len(FakeConversationClient.calls) == 1
+    assert FakeConversationClient.calls[0]["agent_owner_id"] == str(original_account_id)
+    async with db_session() as session:
+        unchanged = await session.get(AgentTemplate, scope.agent_id)
+        assert unchanged is not None
+        assert unchanged.user_id == original_account_id
+        assert unchanged.is_active is True
+        assert unchanged.handoff_lifecycle_state == "STABLE"
+        assert unchanged.handoff_lifecycle_generation == 3
+        assert unchanged.handoff_lifecycle_scope_snapshot == [{
+            "owner_id": scope.owner_id,
+            "integration_id": str(scope.integration_id),
+            "channel": "TELEGRAM",
+            "agent_id": str(scope.agent_id),
+            "agent_owner_id": str(original_account_id),
+        }]
 
 
 @pytest.mark.integration
