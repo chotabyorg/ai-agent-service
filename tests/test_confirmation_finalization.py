@@ -1,4 +1,5 @@
 """Canonical confirmation finishes from its receipt before model continuation."""
+from tests.business_effect_helpers import FakeConversationEffectPort, open_business_runtime
 import json
 from dataclasses import replace
 
@@ -15,6 +16,17 @@ from services.managed_turn_service import execute_managed_owned
 from tests.fakes import ScriptedLLMClient, build_llm_response, build_tool_call
 from tests.test_business_runtime import later
 from tests.test_chotacrm_adapter import crm_settings, setup
+
+
+@pytest.fixture(autouse=True)
+def install_explicit_test_effect_authority(monkeypatch):
+    original_open = BusinessRuntime.open.__func__
+
+    async def open_with_test_authority(cls, *args, **kwargs):
+        kwargs.setdefault('effect_port', FakeConversationEffectPort())
+        return await original_open(cls, *args, **kwargs)
+
+    monkeypatch.setattr(BusinessRuntime, 'open', classmethod(open_with_test_authority))
 
 
 def decision(proposal_id, intent, step):
@@ -52,7 +64,8 @@ async def setup_booking(factory, settings, capability):
 
     registry = BusinessRegistry((replace(registry['chotacrm'], adapter=ChotaCRMAdapter(
         settings, factory, transport=httpx.MockTransport(handle))),))
-    runtime = await BusinessRuntime.open(original.request, original.grant, factory, registry)
+    runtime = await open_business_runtime(original.request, original.grant, factory, registry)
+    await runtime.prompt_context()
     operation_args = dict(booking_ref='booking_test', expected_revision='1')
     if capability == 'booking.reschedule':
         operation_args.update(resource_ref=args['resource_ref'], start_at=args['start_at'])
@@ -102,7 +115,8 @@ async def test_first_confirmation_requires_fresh_coherent_receipt_gate(
 
     original, registry, provider, args = await setup(db_session, crm_settings)
     proposal = await original.call_tool('booking_create', args)
-    customer = await BusinessRuntime.open(later(original.request, '+'), original.grant, db_session, registry)
+    customer = await open_business_runtime(later(original.request, '+'), original.grant, db_session, registry)
+    await customer.prompt_context()
     old_gate = customer.last_gate
     get_gate = customer.repository.result_gate
     observed = []

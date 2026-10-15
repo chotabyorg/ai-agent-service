@@ -1,5 +1,6 @@
 """Exact bounded authenticated read-only evidence surface, with real ledger rows."""
 
+from tests.business_effect_helpers import open_business_runtime
 import copy
 import json
 from uuid import uuid4
@@ -87,7 +88,7 @@ async def test_existing_turn_without_plan_has_empty_evidence_missing_turn_is_saf
     _, value = await setup(api_client, db_session, monkeypatch)
     await install_business(monkeypatch, value, db_session)
     request = ManagedTurnRequest.model_validate(value)
-    await BusinessRuntime.open(request, get_settings().managed_principals[0].grants[0], db_session,
+    await open_business_runtime(request, get_settings().managed_principals[0].grants[0], db_session,
                                main.app.state.business_registry)
     response = await evidence(api_client, value)
     assert response.status_code == 200 and response.json()["operation_refs"] == []

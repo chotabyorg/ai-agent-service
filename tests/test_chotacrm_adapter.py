@@ -1,4 +1,5 @@
 """Real ledger/typed adapter with bounded HTTP fixtures; full-stack lives separately."""
+from tests.business_effect_helpers import open_business_runtime
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
@@ -87,7 +88,9 @@ async def setup(factory, settings):
     request = make_request(agent)
     grant = ManagedGrant(owner_id=request.owner_id, integration_id=request.integration_id,
         channel=request.channel, agent_id=agent, agent_owner_id=owner)
-    return await BusinessRuntime.open(request, grant, factory, registry), registry, records, args
+    runtime = await open_business_runtime(request, grant, factory, registry)
+    await runtime.prompt_context()
+    return runtime, registry, records, args
 
 
 @pytest.mark.asyncio
@@ -122,7 +125,8 @@ async def test_reads_do_not_consume_plan_then_natural_booking_uses_frozen_aggreg
     plan = await runtime.repository.selected_plan(runtime.request, runtime.grant)
     assert plan.proposal_state == 'PREPARED'
     assert len(plan.operations) == 1 and plan.operations[0].status == 'RESERVED'
-    later_runtime = await BusinessRuntime.open(later(runtime.request, '+'), runtime.grant, db_session, registry)
+    later_runtime = await open_business_runtime(later(runtime.request, '+'), runtime.grant, db_session, registry)
+    await later_runtime.prompt_context()
     result = await later_runtime.call_tool('business_decide_proposal',
         dict(proposal_id=proposed.tool_payload['proposal_id'], intent='CONFIRM'))
     assert result.halt_status is None and provider['posts'] == 1
@@ -133,7 +137,8 @@ async def test_reads_do_not_consume_plan_then_natural_booking_uses_frozen_aggreg
 async def test_lost_response_remains_unknown_until_lookup_without_redispatch(db_session, crm_settings):
     runtime, registry, provider, args = await setup(db_session, crm_settings)
     proposal = await runtime.call_tool('booking_create', args)
-    runtime = await BusinessRuntime.open(later(runtime.request, 'ага'), runtime.grant, db_session, registry)
+    runtime = await open_business_runtime(later(runtime.request, 'ага'), runtime.grant, db_session, registry)
+    await runtime.prompt_context()
     provider['lost'] = True
     result = await runtime.call_tool('business_decide_proposal', dict(proposal_id=proposal.tool_payload['proposal_id'], intent='CONFIRM'))
     assert result.halt_status == 'UNKNOWN' and provider['posts'] == 1
@@ -160,7 +165,8 @@ async def test_disabled_deal_and_model_authority_injection_denied(db_session, cr
 async def test_durable_negative_receipt_terminates_only_original_operation(db_session, crm_settings, lost):
     runtime, registry, provider, args = await setup(db_session, crm_settings)
     proposal = await runtime.call_tool('booking_create', args)
-    runtime = await BusinessRuntime.open(later(runtime.request, '👍'), runtime.grant, db_session, registry)
+    runtime = await open_business_runtime(later(runtime.request, '👍'), runtime.grant, db_session, registry)
+    await runtime.prompt_context()
     provider.update(reject=True, lost=lost)
     result = await runtime.call_tool('business_decide_proposal', dict(proposal_id=proposal.tool_payload['proposal_id'], intent='CONFIRM'))
     plan = await runtime.repository.selected_plan(runtime.request, runtime.grant)
@@ -183,7 +189,8 @@ async def test_reconfigured_connection_cannot_confirm_old_proposal(db_session, c
         row.generation += 1
         row.enabled_capabilities = ['catalog.search']
         await db.commit()
-    runtime = await BusinessRuntime.open(later(runtime.request, '+'), runtime.grant, db_session, registry)
+    runtime = await open_business_runtime(later(runtime.request, '+'), runtime.grant, db_session, registry)
+    await runtime.prompt_context()
     result = await runtime.call_tool('business_decide_proposal', dict(proposal_id=proposal.tool_payload['proposal_id'], intent='CONFIRM'))
     assert result.halt_status == 'FAILED' and provider['posts'] == 0
 

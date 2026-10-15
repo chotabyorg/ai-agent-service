@@ -1,4 +1,5 @@
 """A retained confirmed booking must not become a fresh model booking search."""
+from tests.business_effect_helpers import open_business_runtime
 import copy
 from dataclasses import replace
 from uuid import uuid4
@@ -17,7 +18,8 @@ from tests.test_chotacrm_adapter import crm_settings, setup
 async def confirmed(factory, settings):
     original, registry, provider, args = await setup(factory, settings)
     proposal = await original.call_tool('booking_create', args)
-    customer = await BusinessRuntime.open(later(original.request, '+'), original.grant, factory, registry)
+    customer = await open_business_runtime(later(original.request, '+'), original.grant, factory, registry)
+    await customer.prompt_context()
     assert customer.completed_confirmation_replay() is None
     result = await customer.call_tool('business_decide_proposal', {
         'proposal_id': proposal.tool_payload['proposal_id'], 'intent': 'CONFIRM'})
@@ -60,7 +62,7 @@ async def test_exact_confirmation_replay_returns_retained_receipt_without_model_
 async def test_replay_never_claims_success_from_invalid_retained_receipt(
         db_session, crm_settings, corruption):
     customer, registry, provider = await confirmed(db_session, crm_settings)
-    replay = await BusinessRuntime.open(customer.request, customer.grant, db_session, registry)
+    replay = await open_business_runtime(customer.request, customer.grant, db_session, registry)
     operation = replay.last_gate.plan.operations[0]
     evidence = copy.deepcopy(operation.receipt_evidence)
     digest = operation.receipt_fingerprint
@@ -91,7 +93,7 @@ async def test_replay_never_claims_success_from_invalid_retained_receipt(
 async def test_replay_gate_does_not_apply_to_other_turn_request_conflict_or_unresolved_scope(
         db_session, crm_settings):
     customer, registry, _ = await confirmed(db_session, crm_settings)
-    replay = await BusinessRuntime.open(customer.request, customer.grant, db_session, registry)
+    replay = await open_business_runtime(customer.request, customer.grant, db_session, registry)
     gate = replay.last_gate
     assert replay.completed_confirmation_replay().safe_draft
     replay.last_gate = replace(gate, scope_unresolved=True)

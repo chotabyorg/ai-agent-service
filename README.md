@@ -4,6 +4,10 @@ Business V2 source adds a gated real ChotaCRM registry on the current managed
 foundation. See [current business capabilities](docs/business-capabilities-current.md)
 and [Prompt Runtime V2](docs/prompt-runtime-v2.md). Legacy channels remain unchanged;
 enabling owner CRM settings does not migrate a channel or deploy the feature.
+For semantic confirmation, an `INTERVENING_SPLIT` keeps an unacquired stale proposal
+as a nonconfirmable barrier across TTL expiry and restart. Only an independently
+specified, currently eligible CHANGE can retire it; replacement actions then follow
+the existing WRITE_SAFE or WRITE_CONFIRM policy without a blanket extra confirmation.
 
 ![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white)
 ![FastAPI](https://img.shields.io/badge/FastAPI-REST-009688?logo=fastapi&logoColor=white)
@@ -511,6 +515,27 @@ are observational only. Finite completion diagnostics include only canonical
 Turn UUID, step, closed categories and optional integer token counts, never
 model content, reasoning, tool arguments or credentials. These diagnostics do
 not establish the cause of earlier failures or prove a successful business action.
+
+Managed Business writes also require the separately configured Conversation
+effect authority. Set `BUSINESS_CONVERSATION_URL` and
+`BUSINESS_CONVERSATION_TOKEN` together; the service authenticates those private
+calls with `X-Service-Token`, independently of the managed-turn caller token.
+Leaving both empty keeps the managed path read-only. A stored operation request
+and positive permit are committed before provider dispatch, and later customer
+input, a Conversation epoch change, or a relevant split blocks a new permit. A
+still-live original Turn may finish an operation after its permit is committed.
+If the process stops after acquisition, a later Turn enters sticky read-only
+recovery for that original operation: it may close a still-RESERVED operation
+as NO_DISPATCH, reconciles the original operation where possible, retains
+original refs, and never authorizes a new provider command. A missing or
+ambiguous sidecar response never becomes a definitive business rejection.
+
+For SEMANTIC_V1, an old proposal denied specifically as `INTERVENING_SPLIT` is
+kept as nonconfirmable context beyond its ordinary TTL. A bare agreement cannot
+reuse its facts; only a complete independently specified current intent classified
+as CHANGE can retire a still-unacquired proposal with durable NO_DISPATCH evidence.
+The replacement then follows normal policy, and any operation with acquisition or
+dispatch history remains on its original recovery path.
 
 Business admission closes its wait-capable read-only authority probe before a
 fresh external facts read, then obtains a separate complete NOWAIT decision and

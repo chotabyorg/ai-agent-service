@@ -1,5 +1,6 @@
 """Database scope/immutability/attempt-slot authority, not SQLite simulation."""
 
+from tests.business_effect_helpers import claim_dispatch_with_test_permit, open_business_runtime
 from uuid import uuid4
 
 import pytest
@@ -15,10 +16,9 @@ from tests.test_business_runtime import actions, later, setup_business
 @pytest.mark.asyncio
 async def test_database_attempt_slot_rejects_second_plan_and_rolls_back(db_session):
     first, provider, registry, _ = await setup_business(db_session)
-    second = await BusinessRuntime.open(later(first.request), first.grant, db_session, registry)
+    second = await open_business_runtime(later(first.request), first.grant, db_session, registry)
     plan1, plan2 = await first.freeze_plan(actions("12")), await second.freeze_plan(actions("13"))
-    await first.repository.claim_dispatch(first.request, first.grant, plan1.id, plan1.operations[0].id,
-                                         first.registration, first.facts_resolver(actions("12")))
+    await claim_dispatch_with_test_permit(first, plan1, plan1.operations[0], actions=actions("12"))
     async with db_session() as outsider:
         with pytest.raises(IntegrityError):
             await outsider.execute(update(BusinessOperation).where(BusinessOperation.id == plan2.operations[0].id).values(
@@ -45,6 +45,106 @@ async def test_database_rejects_changed_immutable_operation_intent(db_session, c
             await outsider.commit()
         await outsider.rollback()
     assert provider.posts == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("missing_hash", [
+    "effect_request_fingerprint",
+    "effect_managed_request_fingerprint",
+    "effect_operation_fingerprint",
+])
+async def test_effect_request_shape_rejects_each_missing_hash(db_session, missing_hash):
+    runtime, _, _, _ = await setup_business(db_session)
+    plan = await runtime.freeze_plan([{"capability": "booking.create", "arguments": {"slot": "12"}}])
+    values = {
+        "effect_request_turn_id": runtime.request.turn_id,
+        "effect_request_fingerprint": "a" * 64,
+        "effect_managed_request_fingerprint": "b" * 64,
+        "effect_operation_fingerprint": "c" * 64,
+        "effect_requested_at": func.clock_timestamp(),
+    }
+    values[missing_hash] = None
+    async with db_session() as outsider:
+        with pytest.raises(IntegrityError, match="effect_re"):
+            await outsider.execute(update(BusinessOperation).where(
+                BusinessOperation.id == plan.operations[0].id).values(**values))
+            await outsider.commit()
+        await outsider.rollback()
+
+
+@pytest.mark.asyncio
+async def test_effect_request_and_permit_are_one_time_guarded_assignments(db_session):
+    runtime, _, _, _ = await setup_business(db_session)
+    plan = await runtime.freeze_plan([{"capability": "booking.create", "arguments": {"slot": "12"}}])
+    operation_id = plan.operations[0].id
+    request_values = {
+        "effect_request_turn_id": runtime.request.turn_id,
+        "effect_request_fingerprint": "a" * 64,
+        "effect_managed_request_fingerprint": "b" * 64,
+        "effect_operation_fingerprint": "c" * 64,
+        "effect_requested_at": func.clock_timestamp(),
+    }
+    async with db_session() as db:
+        await db.execute(update(BusinessOperation).where(BusinessOperation.id == operation_id)
+                         .values(**request_values))
+        await db.commit()
+    permit_id = uuid4()
+    async with db_session() as db:
+        await db.execute(update(BusinessOperation).where(BusinessOperation.id == operation_id)
+                         .values(effect_permit_id=permit_id))
+        await db.commit()
+    for values in (
+        {"effect_request_fingerprint": "d" * 64},
+        {"effect_permit_id": uuid4()},
+    ):
+        async with db_session() as db:
+            with pytest.raises(IntegrityError):
+                await db.execute(update(BusinessOperation).where(
+                    BusinessOperation.id == operation_id).values(**values))
+                await db.commit()
+            await db.rollback()
+
+
+@pytest.mark.asyncio
+async def test_effect_request_assignment_cannot_share_a_dispatch_transition(db_session):
+    runtime, _, _, _ = await setup_business(db_session)
+    plan = await runtime.freeze_plan([{"capability": "booking.create", "arguments": {"slot": "12"}}])
+    now = func.clock_timestamp()
+    with pytest.raises(IntegrityError):
+        async with db_session() as db:
+            await db.execute(update(BusinessOperation).where(
+                BusinessOperation.id == plan.operations[0].id).values(
+                    effect_request_turn_id=runtime.request.turn_id,
+                    effect_request_fingerprint="a" * 64,
+                    effect_managed_request_fingerprint="b" * 64,
+                    effect_operation_fingerprint="c" * 64,
+                    effect_requested_at=now,
+                    status="DISPATCHING", state_version=1, dispatch_epoch=1,
+                    dispatch_nonce=uuid4(), dispatch_started_at=now,
+                    dispatch_lease_expires_at=func.clock_timestamp() + text("interval '8 seconds'"),
+                    attempt_count=1,
+                ))
+            await db.commit()
+
+
+@pytest.mark.asyncio
+async def test_effect_permit_assignment_cannot_share_a_dispatch_transition(db_session):
+    runtime, _, _, _ = await setup_business(db_session)
+    plan = await runtime.freeze_plan([{"capability": "booking.create", "arguments": {"slot": "12"}}])
+    from tests.business_effect_helpers import prepare_effect_permit
+
+    await prepare_effect_permit(runtime, plan, plan.operations[0])
+    now = func.clock_timestamp()
+    with pytest.raises(IntegrityError):
+        async with db_session() as db:
+            await db.execute(update(BusinessOperation).where(
+                BusinessOperation.id == plan.operations[0].id).values(
+                    effect_permit_id=uuid4(), status="DISPATCHING", state_version=1,
+                    dispatch_epoch=1, dispatch_nonce=uuid4(), dispatch_started_at=now,
+                    dispatch_lease_expires_at=func.clock_timestamp() + text("interval '8 seconds'"),
+                    attempt_count=1,
+                ))
+            await db.commit()
 
 
 @pytest.mark.asyncio

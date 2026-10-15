@@ -1,4 +1,5 @@
 """Test-only HTTP process bootstrap; application/provider code stays real."""
+from tests.business_effect_helpers import open_business_runtime
 import asyncio
 import importlib.util
 import importlib.metadata
@@ -170,7 +171,7 @@ if SERVICE == 'recover':
         request = next(json.loads(line) for line in (STATE / 'projections.jsonl').read_text().splitlines()
                        if json.loads(line)['turn_id'] == sys.argv[2])
         settings = get_settings()
-        runtime = await BusinessRuntime.open(ManagedTurnRequest.model_validate(request),
+        runtime = await open_business_runtime(ManagedTurnRequest.model_validate(request),
             settings.managed_principals[0].grants[0], AsyncSessionLocal,
             create_business_registry(settings, AsyncSessionLocal))
         plan = await runtime.repository.selected_plan(runtime.request, runtime.grant)

@@ -21,7 +21,7 @@ from services.llm_service import LLMService
 from tests.fakes import ScriptedLLMClient, build_llm_response
 from tests.test_business_migrations import _restore_env, _set_postgres_env
 
-REVISION = "luna_20261012_01"
+REVISION = "g5_20261015_01"
 PREVIOUS = "bv2_20261008_01"
 
 

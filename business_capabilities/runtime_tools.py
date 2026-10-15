@@ -1,7 +1,6 @@
 """Canonical tool surface, separate from durable business admission mechanics."""
 from datetime import datetime
 from zoneinfo import ZoneInfo
-from sqlalchemy import select
 from models.business import BusinessOperation
 from schemas.business import BusinessAction, BusinessSafetyError, BusinessToolResult
 from business_capabilities.registry import CAPABILITIES, WIRE_REGISTRY, Risk, tool_schema
@@ -38,13 +37,20 @@ def completed_booking_reply(operation, receipt):
 
 def canonical_tools(runtime, controls):
     available = [c for c in CAPABILITIES if c.id in runtime.binding.enabled_capabilities]
+    readable = [c for c in available if c.risk == Risk.READ]
+    selected = readable if runtime.recovery_mode or not runtime.effect_eligible else available
     result = []
-    for capability in available:
+    for capability in selected:
         tool = capability.tool()
         tool['function']['description'] = capability.risk.value + ': ' + capability.description
         if capability.id == 'booking.create':
             tool['function']['description'] += ' For a new customer pass their name and exact phone/email in customer; this atomically records the customer and optional inquiry with the booking after confirmation. Do not create a separate customer first in this Turn.'
         result.append(tool)
+    if runtime.recovery_mode:
+        result.append(runtime._status_tool())
+        return result
+    if not runtime.effect_eligible:
+        return result
     # Model never chooses a provider or arbitrary plan. The one supported bundle
     # combines at most one booking and one order under the same agreement.
     propose = next(t for t in controls if t['function']['name'] == 'business_propose')
@@ -94,7 +100,7 @@ async def call_capability(runtime, name, arguments):
             if runtime.collector.snapshot():
                 raise BusinessSafetyError('FACTS_UNAVAILABLE', processing_status='UNKNOWN') from None
             return BusinessToolResult(tool_payload=failure(error.code))
-    gate = await runtime.guard_result(allow_incomplete=True)
+    gate = await runtime.execution_guard(allow_incomplete=True)
     if gate is not None:
         return gate
     # Recheck current owner configuration under the existing short admission lock
@@ -108,7 +114,7 @@ async def call_capability(runtime, name, arguments):
         result = await runtime._adapter_call('read', runtime.scope, action)
     except BusinessRuntimeError as error:
         result = failure(error.code)
-    gate = await runtime.guard_result(allow_incomplete=True)
+    gate = await runtime.execution_guard(allow_incomplete=True)
     return gate or BusinessToolResult(tool_payload=result)
 
 

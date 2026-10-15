@@ -21,11 +21,13 @@ from models.agent import AgentTemplate
 from models.session import ConversationSession
 from schemas.managed_turn import ManagedTurnRequest
 from services.history_service import HistoryService
+from services.business_runtime import BusinessRuntime
 from services.managed_runtime import privacy_id
 from services.session_service import SessionService
 from tests.fakes import ScriptedLLMClient, build_llm_response, build_tool_call, build_tool_result
 from tests.test_chat_flow import FakeKnowledgeBaseClient, create_agent, store_credentials
 from tests.test_managed_business_fakes import install_business, plan_arguments
+from tests.business_effect_helpers import FakeConversationEffectPort
 
 TOKEN = "test_managed_token_" + "x" * 32
 SENTINEL = "managed-secret-sentinel"
@@ -79,6 +81,13 @@ async def setup(api_client, db_session, monkeypatch, **overrides):
     agent = await create_agent(api_client, db_session_factory=db_session)
     value = payload(agent["id"], **overrides)
     configure(monkeypatch, value, agent["user_id"])
+    original_open = BusinessRuntime.open.__func__
+
+    async def open_with_explicit_test_authority(cls, *args, **kwargs):
+        kwargs.setdefault("effect_port", FakeConversationEffectPort())
+        return await original_open(cls, *args, **kwargs)
+
+    monkeypatch.setattr(BusinessRuntime, "open", classmethod(open_with_explicit_test_authority))
     return agent, value
 
 

@@ -1,5 +1,6 @@
 """Absolute bounded windows through the managed wire/model and frozen Business seams."""
 
+from tests.business_effect_helpers import open_business_runtime
 import copy
 import json
 from uuid import UUID, uuid4
@@ -224,7 +225,7 @@ async def test_v2_natural_confirmation_uses_frozen_origin_outside_window_and_ret
     request = bounded_later(original.request, text)
     assert original.request.input_last_sequence < request.window_first_sequence
     assert not set(original.request.selected_input_message_ids) & {m.id for m in request.messages}
-    customer = await BusinessRuntime.open(request, original.grant, db_session, registry)
+    customer = await open_business_runtime(request, original.grant, db_session, registry)
     assert (await customer.prompt_context())["pending"]["proposal_id"] == str(proposal.id)
     result = await decide(customer, proposal, "CONFIRM")
     assert result.halt_status is None and provider.posts == 1
@@ -238,7 +239,7 @@ async def test_v2_natural_confirmation_uses_frozen_origin_outside_window_and_ret
         operation = await session.get(BusinessOperation, proposal.operations[0].id)
         frozen = (operation.request_payload, operation.request_fingerprint, operation.provider_idempotency_key,
                   operation.receipt_evidence, operation.receipt_id, operation.receipt_fingerprint)
-    restarted = await BusinessRuntime.open(ManagedTurnRequest.model_validate_json(request.model_dump_json()),
+    restarted = await open_business_runtime(ManagedTurnRequest.model_validate_json(request.model_dump_json()),
         original.grant, db_session, registry)
     await decide(restarted, proposal, "CONFIRM")
     assert restarted.collector.snapshot() == refs and provider.posts == 1
@@ -258,7 +259,7 @@ async def test_v2_explicit_confirmation_uses_shared_selection(db_session):
     original, provider, registry, _ = await setup_business(db_session, confirmation=True)
     proposal = await original.freeze_plan(actions("18:00"), propose=True)
     request = bounded_later(original.request, "confirm " + str(proposal.id))
-    customer = await BusinessRuntime.open(request, original.grant, db_session, registry)
+    customer = await open_business_runtime(request, original.grant, db_session, registry)
     assert (await customer.confirm(proposal.id)).halt_status is None
     assert provider.posts == 1
     assert customer.collector.snapshot()[0].operation_id == str(proposal.operations[0].id)
@@ -269,12 +270,12 @@ async def test_v2_change_still_freezes_replacement_and_requires_later_customer_t
     original, provider, registry = await setup_semantic(db_session)
     proposal = await original.freeze_plan(actions("18:00"), propose=True)
     request = bounded_later(original.request, "да, только лучше в 19")
-    changer = await BusinessRuntime.open(request, original.grant, db_session, registry)
+    changer = await open_business_runtime(request, original.grant, db_session, registry)
     assert (await decide(changer, proposal, "CHANGE")).tool_payload["status"] == "CANCELLED"
     replacement = await changer.freeze_plan(actions("19:00"), propose=True)
     assert replacement.id != proposal.id and provider.posts == 0
     assert (await decide(changer, replacement, "CONFIRM")).halt_status == "FAILED"
-    confirmer = await BusinessRuntime.open(bounded_later(request, "+"), original.grant, db_session, registry)
+    confirmer = await open_business_runtime(bounded_later(request, "+"), original.grant, db_session, registry)
     await decide(confirmer, replacement, "CONFIRM")
     assert provider.posts == 1 and replacement.operations[0].command.arguments["slot"] == "19:00"
 
@@ -284,7 +285,7 @@ async def test_v2_change_still_freezes_replacement_and_requires_later_customer_t
 async def test_v2_reject_and_unrelated_leave_effect_policy_unchanged(db_session, intent, text, state):
     original, provider, registry = await setup_semantic(db_session)
     proposal = await original.freeze_plan(actions("18:00"), propose=True)
-    customer = await BusinessRuntime.open(bounded_later(original.request, text), original.grant, db_session, registry)
+    customer = await open_business_runtime(bounded_later(original.request, text), original.grant, db_session, registry)
     assert (await decide(customer, proposal, intent)).halt_status is None
     assert provider.posts == 0 and not customer.collector.snapshot()
     assert (await decide(customer, proposal, "CONFIRM")).halt_status == "FAILED"
@@ -297,17 +298,20 @@ async def test_v2_unknown_remains_unknown_after_exact_restart_and_blocks_later_e
     original, provider, registry = await setup_semantic(db_session)
     proposal = await original.freeze_plan(actions("18:00"), propose=True)
     request = bounded_later(original.request, "+")
-    customer = await BusinessRuntime.open(request, original.grant, db_session, registry)
+    customer = await open_business_runtime(request, original.grant, db_session, registry)
     provider.lose_next = True
     assert (await decide(customer, proposal, "CONFIRM")).halt_status == "UNKNOWN"
     refs = customer.collector.snapshot()
     assert refs[0].outcome == "UNKNOWN" and provider.posts == 1
-    restarted = await BusinessRuntime.open(request, original.grant, db_session, registry)
+    restarted = await open_business_runtime(request, original.grant, db_session, registry)
     assert (await decide(restarted, proposal, "CONFIRM")).halt_status == "UNKNOWN"
     assert restarted.collector.snapshot() == refs and provider.posts == 1
-    later = await BusinessRuntime.open(bounded_later(request, "Еще запись"), original.grant, db_session, registry)
-    with pytest.raises(BusinessSafetyError, match="BLOCKED_UNRESOLVED_EFFECT"):
+    later = await open_business_runtime(bounded_later(request, "Еще запись"), original.grant, db_session, registry)
+    assert later.recovery_mode
+    with pytest.raises(BusinessSafetyError, match="RECOVERY_READ_ONLY"):
         await later.freeze_plan(actions("19:00"), propose=True)
+    retained = await later.repository.selected_plan(later.request, later.grant)
+    assert retained.operations[0].status == "UNKNOWN"
     assert provider.posts == 1
 
 
@@ -315,21 +319,21 @@ async def test_v2_unknown_remains_unknown_after_exact_restart_and_blocks_later_e
 async def test_retained_turn_rejects_changed_window_identity_and_wire_version(db_session):
     original, _, registry = await setup_semantic(db_session)
     request = bounded_later(original.request, "+")
-    await BusinessRuntime.open(request, original.grant, db_session, registry)
+    await open_business_runtime(request, original.grant, db_session, registry)
     restarted = ManagedTurnRequest.model_validate_json(request.model_dump_json())
     assert request_fingerprint(request) == request_fingerprint(restarted)
-    await BusinessRuntime.open(restarted, original.grant, db_session, registry)
+    await open_business_runtime(restarted, original.grant, db_session, registry)
     changed_window = request.model_dump(mode="json")
     changed_window["messages"].pop(0)
     changed_identity = copy.deepcopy(request.model_dump(mode="json"))
     changed_identity["messages"][0]["id"] = str(uuid4())
     for changed in (changed_window, changed_identity):
         with pytest.raises(BusinessSafetyError, match="TURN_CONFLICT"):
-            await BusinessRuntime.open(ManagedTurnRequest.model_validate(changed), original.grant, db_session, registry)
+            await open_business_runtime(ManagedTurnRequest.model_validate(changed), original.grant, db_session, registry)
     changed_version = original.request.model_dump(mode="json")
     changed_version["contract_version"] = 2
     with pytest.raises(BusinessSafetyError, match="TURN_CONFLICT"):
-        await BusinessRuntime.open(ManagedTurnRequest.model_validate(changed_version), original.grant, db_session, registry)
+        await open_business_runtime(ManagedTurnRequest.model_validate(changed_version), original.grant, db_session, registry)
 
 
 @pytest.mark.asyncio
@@ -340,7 +344,7 @@ async def test_v2_selected_customer_id_overlap_still_rejects_confirmation(db_ses
     original_id = str(original.request.selected_input_message_ids[0])
     value["messages"][-1]["id"] = original_id
     value["selected_input_message_ids"] = [original_id]
-    customer = await BusinessRuntime.open(ManagedTurnRequest.model_validate(value), original.grant, db_session, registry)
+    customer = await open_business_runtime(ManagedTurnRequest.model_validate(value), original.grant, db_session, registry)
     assert (await customer.prompt_context())["pending"] is None
     assert (await decide(customer, proposal, "CONFIRM")).halt_status == "FAILED"
     assert provider.posts == 0

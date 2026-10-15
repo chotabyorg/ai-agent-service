@@ -50,7 +50,9 @@ class BusinessConnectionService:
     async def _settled(self, db, row):
         if row and await db.scalar(select(BusinessOperation.id).where(
                 BusinessOperation.connection_id == row.id,
-                BusinessOperation.status.in_(['DISPATCHING', 'UNKNOWN'])).limit(1)):
+                or_(BusinessOperation.status.in_(['DISPATCHING', 'UNKNOWN']),
+                    (BusinessOperation.status == 'RESERVED') &
+                    BusinessOperation.effect_request_turn_id.is_not(None))).limit(1)):
             raise BusinessRuntimeError('UNKNOWN_WRITE_RESULT')
 
     async def _disable_bindings(self, db, row):

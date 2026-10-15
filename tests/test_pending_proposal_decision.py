@@ -1,4 +1,5 @@
 """Pending semantic replies must reach runtime before ordinary assistant prose."""
+from tests.business_effect_helpers import open_business_runtime
 import json
 from datetime import datetime
 from types import SimpleNamespace
@@ -34,7 +35,7 @@ async def pending(factory, settings, monkeypatch, text='нет'):
     proposed = await original.call_tool('booking_create', args)
     request = later(original.request, text)
     runtime = ManagedRuntime(20, request=request)
-    runtime.business = await BusinessRuntime.open(request, original.grant, factory, registry, execution=runtime)
+    runtime.business = await open_business_runtime(request, original.grant, factory, registry, execution=runtime)
     monkeypatch.setattr(get_settings(), 'knowledge_base_enabled', False)
     return original, runtime, provider, proposed.tool_payload['proposal_id']
 

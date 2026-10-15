@@ -68,7 +68,8 @@ class PromptComposer:
             "Следуй их схемам; не придумывай механизм подтверждения, если runtime его не предоставил."
         )
         if context is not None and context.pending is not None:
-            body += (
+            if context.pending.confirmable:
+                body += (
                 "\nЕсли передан business_decide_proposal, оцени всю выбранную реплику клиента: "
                 "согласие с неизменными фактами — CONFIRM; изменение фактов — CHANGE; отказ — REJECT; "
                 "посторонняя реплика — UNRELATED. Передавай только proposal_id сохранённого предложения и intent. "
@@ -76,6 +77,16 @@ class PromptComposer:
                 "Сначала обработай CHANGE для старого предложения, затем предложи новое.\n"
                 "Свежая проекция runtime:\n" + escape(context.model_dump_json(), quote=False)
             )
+            else:
+                body += (
+                    "\nСохранённое предложение устарело и не может быть подтверждено. "
+                    "Не трактуй краткое согласие как новое намерение и не наследуй его параметры. "
+                    "Для CHANGE требуется самостоятельно заданное в текущей реплике полное новое намерение; "
+                    "при отсутствии или неоднозначности сначала попроси уточнение. "
+                    "REJECT и UNRELATED не разрешают новое действие. Передавай только сохранённый proposal_id "
+                    "и intent.\nСвежая проекция runtime:\n"
+                    + escape(context.model_dump_json(), quote=False)
+                )
         return "<runtime_capability_context>\n" + body + "\n</runtime_capability_context>"
 
     @staticmethod

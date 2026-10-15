@@ -1,5 +1,6 @@
 """Behavioral business safety on disposable PostgreSQL; fake providers only."""
 
+from tests.business_effect_helpers import claim_dispatch_with_test_permit, open_business_runtime
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from uuid import uuid4
@@ -141,7 +142,7 @@ async def setup_business(factory, *, mode="LOOKUP", confirmation=False, retentio
     binding = await repository.configure_binding(grant, adapter_id=registration.adapter_id, connection_id=uuid4(),
                                                  catalog_revision=registration.catalog_revision,
                                                  enabled_capabilities=["booking.create"])
-    runtime = await BusinessRuntime.open(request, grant, factory, registry)
+    runtime = await open_business_runtime(request, grant, factory, registry)
     return runtime, provider, registry, binding
 
 
@@ -151,12 +152,12 @@ async def test_same_turn_normalized_replay_conflict_and_later_intent(db_session)
     result = await runtime.execute_plan(actions("Cafe\u0301 12:00"))
     assert result.halt_status is None and provider.posts == 1
     plan = await runtime.repository.selected_plan(runtime.request, runtime.grant)
-    restarted = await BusinessRuntime.open(runtime.request, runtime.grant, db_session, registry)
+    restarted = await open_business_runtime(runtime.request, runtime.grant, db_session, registry)
     await restarted.execute_plan(actions("Café 12:00"))
     assert restarted.collector.snapshot() == runtime.collector.snapshot() and provider.posts == 1
     with pytest.raises(BusinessSafetyError, match="PLAN_CONFLICT"):
         await restarted.execute_plan(actions("13:00"))
-    second = await BusinessRuntime.open(later(runtime.request), runtime.grant, db_session, registry)
+    second = await open_business_runtime(later(runtime.request), runtime.grant, db_session, registry)
     await second.execute_plan(actions("Café 12:00"))
     second_plan = await second.repository.selected_plan(second.request, second.grant)
     assert second_plan.operations[0].id != plan.operations[0].id and provider.posts == 2
@@ -171,7 +172,7 @@ async def test_response_loss_has_honest_recovery_profile(db_session, mode):
     assert result.halt_status == "UNKNOWN"
     operation_id = runtime.collector.snapshot()[0].operation_id
     assert runtime.collector.snapshot()[0].outcome == "UNKNOWN"
-    restarted = await BusinessRuntime.open(runtime.request, runtime.grant, db_session, registry)
+    restarted = await open_business_runtime(runtime.request, runtime.grant, db_session, registry)
     await restarted.execute_plan(actions("12:00"))
     assert provider.posts == 1 and len(provider.objects) == 1
     if mode == "NATIVE":
@@ -187,13 +188,96 @@ async def test_response_loss_has_honest_recovery_profile(db_session, mode):
 
 
 @pytest.mark.asyncio
+async def test_abandoned_acquisition_recovery_is_sticky_read_only_and_honest(db_session):
+    runtime, provider, registry, _ = await setup_business(db_session)
+    plan = await runtime.freeze_plan(actions("12:00", "13:00"))
+    first = plan.operations[0]
+    acquisition = await runtime.repository.prepare_effect_acquisition(
+        runtime.request, runtime.grant, plan.id, first.id, runtime.registration,
+        runtime.facts_resolver(actions("12:00", "13:00")),
+    )
+    assert acquisition.request is not None and acquisition.permit_id is None
+    # Model a crash after the positive remote permit but before local binding
+    # and dispatch. Recovery may close this exact RESERVED attempt as NO_DISPATCH.
+    await runtime.effect_port.permit(acquisition.request)
+    assert provider.posts == 0
+
+    recovery_request = later(runtime.request, "Check the previous request")
+    recovery = await open_business_runtime(recovery_request, runtime.grant, db_session, registry)
+    assert recovery.recovery_mode and recovery.recovery_plan_id == plan.id
+    retained = await recovery.repository.selected_plan(recovery.request, recovery.grant)
+    assert [operation.id for operation in retained.operations] == [operation.id for operation in plan.operations]
+    assert [operation.status for operation in retained.operations] == ["FAILED", "RESERVED"]
+    refs_by_operation = {reference.operation_id: reference.outcome for reference in recovery.collector.snapshot()}
+    assert refs_by_operation == {str(plan.operations[0].id): "FAILED", str(plan.operations[1].id): None}
+
+    # Recovery permits normal generation/read-only observation. Its final
+    # result replaces generic prose with a truthful no-effect account.
+    assert await recovery.execution_guard() is None
+    guarded = await recovery.final_result_guard()
+    assert guarded.safe_draft is not None
+    assert "не выполнялись" in guarded.safe_draft
+    assert "Часть плана выполнена" not in guarded.safe_draft
+    assert guarded.tool_payload["operations"] == ["FAILED", "RESERVED"]
+
+    with pytest.raises(BusinessSafetyError, match="RECOVERY_READ_ONLY"):
+        await recovery.freeze_plan(actions("14:00"))
+    with pytest.raises(BusinessSafetyError, match="RECOVERY_READ_ONLY"):
+        await recovery.repository.confirm_plan(
+            recovery.request, recovery.grant, plan.id, recovery.registration,
+            recovery.facts_resolver(actions("12:00", "13:00")),
+        )
+    with pytest.raises(BusinessSafetyError, match="RECOVERY_READ_ONLY"):
+        await recovery.repository.cancel_proposal(
+            recovery.request, recovery.grant, plan.id, recovery.registration,
+        )
+    with pytest.raises(BusinessSafetyError, match="RECOVERY_READ_ONLY"):
+        await recovery.repository.prepare_effect_acquisition(
+            recovery.request, recovery.grant, plan.id, retained.operations[1].id,
+            recovery.registration, recovery.facts_resolver(actions("12:00", "13:00")),
+        )
+    with pytest.raises(BusinessSafetyError, match="RECOVERY_READ_ONLY"):
+        await recovery.repository.claim_dispatch(
+            recovery.request, recovery.grant, plan.id, retained.operations[1].id,
+            recovery.registration, recovery.facts_resolver(actions("12:00", "13:00")),
+        )
+
+    reopened = await open_business_runtime(recovery_request, runtime.grant, db_session, registry)
+    assert reopened.recovery_mode and reopened.recovery_plan_id == plan.id
+    assert await reopened.execution_guard() is None
+    reopened_guard = await reopened.final_result_guard()
+    assert reopened_guard.safe_draft == guarded.safe_draft
+    assert provider.posts == 0
+
+
+@pytest.mark.asyncio
+async def test_definitive_sidecar_denial_is_retained_no_dispatch(db_session):
+    from tests.business_effect_helpers import FakeConversationEffectPort
+    from schemas.conversation_effects import EffectReason
+
+    runtime, provider, _, _ = await setup_business(db_session)
+    runtime.effect_port = FakeConversationEffectPort(permit_denial=EffectReason.INPUT_SUPERSEDED)
+    result = await runtime.execute_plan(actions("12:00"))
+    plan = await runtime.repository.selected_plan(runtime.request, runtime.grant)
+    operation = plan.operations[0]
+    assert result.safe_draft == "Операция не выполнялась: разрешение на действие не получено."
+    assert operation.status == "FAILED"
+    assert operation.receipt_evidence["reason_code"] == "EXTERNAL_EFFECT_INPUT_SUPERSEDED"
+    assert operation.effect_request_turn_id == runtime.request.turn_id
+    assert operation.effect_request_fingerprint and operation.effect_permit_id is None
+    assert operation.receipt_evidence == {"kind": "NO_DISPATCH", "reason_code": "EXTERNAL_EFFECT_INPUT_SUPERSEDED"}
+    assert runtime.collector.snapshot()[0].outcome == "FAILED"
+    assert provider.posts == 0
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("outcome", ["FAILED", "UNKNOWN"])
 async def test_only_authoritative_negative_evidence_resolves_unknown(db_session, outcome):
     runtime, provider, _, _ = await setup_business(db_session)
     plan = await runtime.freeze_plan(actions("12:00"))
     facts = runtime.facts_resolver(actions("12:00"))
-    decision = await runtime.repository.claim_dispatch(runtime.request, runtime.grant, plan.id,
-                                                       plan.operations[0].id, runtime.registration, facts)
+    decision = await claim_dispatch_with_test_permit(runtime, plan, plan.operations[0],
+                                                     facts_resolver=facts, actions=actions("12:00"))
     # B2: permission committed, send never observed. That private test fact is
     # not durable runtime proof; only provider authoritative lookup can resolve.
     await runtime.repository.mark_unknown(runtime.request, runtime.grant, decision.token, lookup_available=True)
@@ -230,11 +314,11 @@ async def test_confirmation_is_later_selected_canonical_reference_and_replay_saf
     result = await runtime.execute_plan(actions("12:00"))
     proposal_id = result.tool_payload["proposal_id"]
     assert result.safe_draft and provider.posts == 0 and runtime.collector.snapshot()[0].outcome is None
-    wrong = await BusinessRuntime.open(later(runtime.request, "yes"), runtime.grant, db_session, registry)
+    wrong = await open_business_runtime(later(runtime.request, "yes"), runtime.grant, db_session, registry)
     with pytest.raises(BusinessSafetyError, match="CONFIRMATION_REQUIRED"):
         await wrong.confirm(proposal_id)
     confirming_request = later(runtime.request, " confirm " + proposal_id + " ")
-    confirming = await BusinessRuntime.open(confirming_request, runtime.grant, db_session, registry)
+    confirming = await open_business_runtime(confirming_request, runtime.grant, db_session, registry)
     await confirming.confirm(proposal_id)
     await confirming.confirm(proposal_id)
     assert provider.posts == 1 and confirming.collector.snapshot()[0].outcome == "SUCCEEDED"
@@ -253,7 +337,7 @@ async def test_stale_confirmation_never_dispatches(db_session, change):
             connection_id=binding.connection_id, catalog_revision=runtime.registration.catalog_revision,
             enabled_capabilities=[] if change == "disabled" else ["booking.create"],
             authorization_generation=2, context_generation=2 if change == "context" else 1)
-    confirming = await BusinessRuntime.open(later(runtime.request, "confirm " + result.tool_payload["proposal_id"]),
+    confirming = await open_business_runtime(later(runtime.request, "confirm " + result.tool_payload["proposal_id"]),
                                             runtime.grant, db_session, registry)
     outcome = await confirming.confirm(result.tool_payload["proposal_id"])
     assert outcome.halt_status == "FAILED"
@@ -299,12 +383,12 @@ async def test_plan_bound_and_immutable_order(db_session, case):
 @pytest.mark.asyncio
 async def test_scope_guard_preserves_reserved_candidate_until_terminal_resolution(db_session):
     first, provider, registry, _ = await setup_business(db_session)
-    second = await BusinessRuntime.open(later(first.request), first.grant, db_session, registry)
+    second = await open_business_runtime(later(first.request), first.grant, db_session, registry)
     plan1 = await first.freeze_plan(actions("12"))
     plan2 = await second.freeze_plan(actions("13"))
     facts = first.facts_resolver(actions("12"))
-    decision1 = await first.repository.claim_dispatch(first.request, first.grant, plan1.id,
-                                                       plan1.operations[0].id, first.registration, facts)
+    await claim_dispatch_with_test_permit(first, plan1, plan1.operations[0],
+                                          facts_resolver=facts, actions=actions("12"))
     for stored_state in ("live", "expired", "unknown"):
         if stored_state == "expired":
             async with db_session() as session:
@@ -334,8 +418,8 @@ async def test_strict_plan_predecessors_and_mixed_effect_refs(db_session):
     blocked = await runtime.repository.claim_dispatch(runtime.request, runtime.grant, plan.id,
                                                        plan.operations[1].id, runtime.registration, facts)
     assert blocked.reason == "BLOCKED_PREDECESSOR" and blocked.token is None
-    first = await runtime.repository.claim_dispatch(runtime.request, runtime.grant, plan.id,
-                                                     plan.operations[0].id, runtime.registration, facts)
+    first = await claim_dispatch_with_test_permit(runtime, plan, plan.operations[0],
+                                                   facts_resolver=facts, actions=actions("12", "13", "14"))
     await runtime._send(first.token)
     provider.lose_next = True
     outcome = await runtime.execute_plan(actions("12", "13", "14"))
@@ -374,7 +458,7 @@ async def test_unacknowledged_commit_never_authorizes_duplicate_or_fabricates_su
     assert provider.posts == (1 if boundary == "RECEIPT" else 0)
     if boundary == "RECEIPT":
         assert runtime.collector.snapshot()[0].outcome == "UNKNOWN"
-    restarted = await BusinessRuntime.open(runtime.request, runtime.grant, db_session, registry)
+    restarted = await open_business_runtime(runtime.request, runtime.grant, db_session, registry)
     plan = await restarted.repository.selected_plan(runtime.request, runtime.grant)
     assert plan.operations[0].status == {"RESERVATION": "RESERVED", "PERMISSION": "DISPATCHING", "RECEIPT": "SUCCEEDED"}[boundary]
     await restarted.execute_plan(actions("12"))
@@ -385,8 +469,8 @@ async def test_unacknowledged_commit_never_authorizes_duplicate_or_fabricates_su
 async def test_stale_original_receipt_after_normalization_requires_authoritative_lookup(db_session):
     runtime, provider, _, _ = await setup_business(db_session)
     plan = await runtime.freeze_plan(actions("12"))
-    decision = await runtime.repository.claim_dispatch(runtime.request, runtime.grant, plan.id, plan.operations[0].id,
-        runtime.registration, runtime.facts_resolver(actions("12")))
+    decision = await claim_dispatch_with_test_permit(runtime, plan, plan.operations[0],
+        actions=actions("12"), facts_resolver=runtime.facts_resolver(actions("12")))
     original_receipt = await runtime.registration.adapter.execute(decision.token.dispatch, execution=None)
     await runtime.repository.mark_unknown(runtime.request, runtime.grant, decision.token, lookup_available=True)
     stale = await runtime.repository.finalize(runtime.request, runtime.grant, decision.token, original_receipt)
@@ -401,7 +485,7 @@ async def test_confirmation_exact_token_rejects_ambiguous_prose_and_unicode_whit
     origin, provider, registry, _ = await setup_business(db_session, confirmation=True)
     proposal = await origin.freeze_plan(actions("12"), propose=True)
     request = later(origin.request, text_template.format(id=proposal.id))
-    confirmer = await BusinessRuntime.open(request, origin.grant, db_session, registry)
+    confirmer = await open_business_runtime(request, origin.grant, db_session, registry)
     with pytest.raises(BusinessSafetyError, match="CONFIRMATION_REQUIRED"):
         await confirmer.confirm(proposal.id)
     assert provider.posts == 0

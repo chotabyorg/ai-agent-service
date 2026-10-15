@@ -24,6 +24,12 @@ def test_advertised_choice_preserves_accepted_durable_schema_identity():
 
 def tools():
     runtime = BusinessRuntime()
+    runtime.effect_eligible = True  # schema projection after a positive authority check
+    runtime.recovery_mode = False
+    # This lightweight schema fixture does not call BusinessRuntime.open().
+    # Model the explicitly inert initial state required by openai_tools().
+    runtime._stale_split_plan_id = None
+    runtime._stale_split_change_committed = False
     runtime.binding = SimpleNamespace(enabled_capabilities=DEFAULTS)
     runtime.registration = SimpleNamespace(adapter_id="chotacrm", confirmation_mode="SEMANTIC_V1",
         capabilities=[SimpleNamespace(name=c.id) for c in CAPABILITIES])
