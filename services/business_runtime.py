@@ -140,7 +140,7 @@ class BusinessRuntime:
             return self._halt(True)
         if self.recovery_mode:
             return self._recovery_result(gate) or self._halt(True)
-        return await self._normal_guard(gate, allow_incomplete=allow_incomplete)
+        return await self._normal_guard(gate, allow_incomplete=allow_incomplete, final_answer=True)
 
     final_result_guard = guard_result
 
@@ -153,7 +153,7 @@ class BusinessRuntime:
                    and op.effect_request_fingerprint and op.effect_managed_request_fingerprint == current_digest
                    for op in gate.plan.operations)
 
-    async def _normal_guard(self, gate, *, allow_incomplete=False):
+    async def _normal_guard(self, gate, *, allow_incomplete=False, final_answer=False):
         if gate.scope_unresolved or gate.disposition == "UNKNOWN":
             return self._halt(True)
         if gate.disposition == "NO_PLAN" and self.collector.snapshot():
@@ -172,6 +172,19 @@ class BusinessRuntime:
                     self.effect_origin_turn_id = gate.plan.origin_turn_id
                     self.effect_eligible = await self._effect_eligibility(gate.plan.origin_turn_id)
                 if not self.effect_eligible and not continuation:
+                    if final_answer:
+                        # Ordinary model/READ work can continue without current
+                        # effect authority, but its prose cannot resolve or
+                        # describe this retained pending action as completed.
+                        # Keep the durable PREPARED plan untouched and avoid
+                        # repeating its old confirmation instruction.
+                        return BusinessToolResult(
+                            tool_payload={"status": "AWAITING_CONFIRMATION",
+                                          "proposal_id": str(gate.plan.id),
+                                          "confirmable": False},
+                            safe_draft="Сохранённое предложение сейчас нельзя подтвердить. "
+                                       "Действие по нему не выполнялось.",
+                        )
                     return None
                 return self._proposal(gate.plan)
             except Exception:
