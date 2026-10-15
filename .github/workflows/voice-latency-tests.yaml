@@ -1,0 +1,37 @@
+name: Voice latency native tests
+on:
+  pull_request:
+    paths:
+      - core/**
+      - services/**
+      - schemas/**
+      - tests/**
+      - requirements.txt
+      - .github/workflows/voice-latency-tests.yaml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  native-tests:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      TEST_DATABASE_URL: postgresql+asyncpg://voice_ci:disposable_runner_only@127.0.0.1:5432/test_ai_voice_ci
+      TEST_DATABASE_DISPOSABLE: 'yes'
+      PYTHONUTF8: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Start native disposable PostgreSQL
+        run: |
+          sudo systemctl start postgresql
+          sudo -u postgres psql -v ON_ERROR_STOP=1 -c "CREATE ROLE voice_ci LOGIN CREATEDB PASSWORD 'disposable_runner_only';"
+          sudo -u postgres createdb -O voice_ci test_ai_voice_ci
+      - name: Install Python dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Run service regressions without containers
+        run: python -m pytest -q --ignore=tests/goal3_business_cross_service
