@@ -17,10 +17,15 @@ jobs:
   native-tests:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
     env:
       TEST_DATABASE_URL: postgresql+asyncpg://voice_ci:disposable_runner_only@127.0.0.1:5432/test_ai_voice_ci
       TEST_DATABASE_DISPOSABLE: 'yes'
       PYTHONUTF8: '1'
+      TEST_SHARD: ${{ matrix.shard }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -34,4 +39,15 @@ jobs:
       - name: Install Python dependencies
         run: python -m pip install -r requirements.txt
       - name: Run service regressions without containers
-        run: python -m pytest -q --ignore=tests/goal3_business_cross_service
+        run: |
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          import subprocess
+          import sys
+          files = sorted(str(p) for p in Path('tests').rglob('test_*.py')
+                         if 'goal3_business_cross_service' not in p.parts)
+          selected = files[int(os.environ['TEST_SHARD'])::4]
+          assert selected
+          raise SystemExit(subprocess.call([sys.executable, '-m', 'pytest', '-q', *selected]))
+          PY
