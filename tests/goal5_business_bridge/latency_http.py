@@ -147,4 +147,3 @@ async def test_synthetic_write_stage_latency_trace(bridge):
             json.dump(trace, handle, ensure_ascii=False, indent=2)
             handle.write("\n")
         path.chmod(0o600)
-
