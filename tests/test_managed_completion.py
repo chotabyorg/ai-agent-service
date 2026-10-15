@@ -241,12 +241,12 @@ async def test_fresh_durable_proposal_wins_and_replay_needs_no_model(
 async def test_authoritative_final_guard_precedes_empty_rejection(
         api_client, db_session, monkeypatch, model, guard_kind):
     _, value = await setup(api_client, db_session, monkeypatch)
-    original = BusinessRuntime.guard_result
+    original = BusinessRuntime.final_result_guard
     async def guard(self, *, allow_incomplete=False, reload=True):
         if not allow_incomplete and model.chat.completions.calls:
             return self._failed_business_draft() if guard_kind == "failure_draft" else self._halt(guard_kind == "unknown")
         return await original(self, allow_incomplete=allow_incomplete, reload=reload)
-    monkeypatch.setattr(BusinessRuntime, "guard_result", guard)
+    monkeypatch.setattr(BusinessRuntime, "final_result_guard", guard)
     model.chat.completions.queue(build_llm_response(content=""))
     result = (await execute(api_client, value)).json()
     if guard_kind == "failure_draft":

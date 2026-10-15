@@ -206,6 +206,11 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     bind = op.get_bind()
+    # Fence acquisition writers before observing retained evidence. Without
+    # this lock, an UPDATE could assign a request after the EXISTS check but
+    # before the following DDL acquires its own table lock, erasing the only
+    # durable record of a committed Conversation permit on downgrade.
+    bind.execute(sa.text("LOCK TABLE business_operations IN ACCESS EXCLUSIVE MODE"))
     if bind.scalar(sa.text(
         "SELECT EXISTS (SELECT 1 FROM business_operations "
         "WHERE effect_request_turn_id IS NOT NULL OR effect_permit_id IS NOT NULL)"
