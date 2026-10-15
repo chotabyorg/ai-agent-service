@@ -108,7 +108,8 @@ async def test_voice_profile_cannot_bypass_booking_confirmation(api_client, db_s
     result = (await execute(api_client, value)).json()
     assert result['status'] == 'DRAFT_READY'
     assert authority.commands == []
-    assert result['operation_refs'] == []
+    assert len(result['operation_refs']) == 1 and result['operation_refs'][0]['outcome'] is None
+    assert len(model.chat.completions.calls) == 1
     assert model.chat.completions.calls[0]['extra_body']['reasoning'] == {'effort': 'none'}
 
 
