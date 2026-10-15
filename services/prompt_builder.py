@@ -9,6 +9,9 @@ class ChatContext:
 
     channel: str
     external_client_id: str
+    # Present only on the versioned managed v3 boundary. Older callers omit it,
+    # preserving their established prompt shape.
+    managed_communication_context: dict | None = None
 
 
 class PromptBuilder:

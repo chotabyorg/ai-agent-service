@@ -21,7 +21,7 @@ from services.llm_service import LLMService
 from tests.fakes import ScriptedLLMClient, build_llm_response
 from tests.test_business_migrations import _restore_env, _set_postgres_env
 
-REVISION = "g5_20261015_01"
+REVISION = "handoff_20261015_01"
 PREVIOUS = "bv2_20261008_01"
 
 
@@ -55,12 +55,28 @@ def test_model_migration_preserves_everything_except_model_and_next_call_uses_lu
         engine = create_async_engine(isolated_migration_postgres, poolclass=NullPool)
         try:
             async with engine.connect() as connection:
-                agents = (await connection.execute(text("SELECT to_jsonb(a) - 'model_name' FROM agent_templates a ORDER BY id"))).scalars().all()
+                agents = (await connection.execute(text(
+                    "SELECT to_jsonb(a) - 'model_name' - 'handoff_lifecycle_generation' "
+                    "- 'handoff_lifecycle_state' - 'handoff_lifecycle_source_generation' "
+                    "- 'handoff_lifecycle_scope_snapshot' FROM agent_templates a ORDER BY id"
+                ))).scalars().all()
                 credentials = (await connection.execute(text("SELECT to_jsonb(c) FROM agent_credentials c ORDER BY agent_id"))).scalars().all()
                 sessions = (await connection.execute(text("SELECT to_jsonb(s) FROM conversation_sessions s ORDER BY id"))).scalars().all()
                 models = (await connection.execute(text("SELECT model_name FROM agent_templates ORDER BY id"))).scalars().all()
                 revision = await connection.scalar(text("SELECT version_num FROM alembic_version"))
                 return (agents, credentials, sessions), models, revision
+        finally:
+            await engine.dispose()
+
+    async def lifecycle_snapshot():
+        engine = create_async_engine(isolated_migration_postgres, poolclass=NullPool)
+        try:
+            async with engine.connect() as connection:
+                return (await connection.execute(text(
+                    "SELECT id, is_active, handoff_lifecycle_generation, handoff_lifecycle_state, "
+                    "handoff_lifecycle_source_generation, handoff_lifecycle_scope_snapshot "
+                    "FROM agent_templates ORDER BY id"
+                ))).all()
         finally:
             await engine.dispose()
 
@@ -104,6 +120,12 @@ def test_model_migration_preserves_everything_except_model_and_next_call_uses_lu
         assert before == after
         assert models == ["openai/gpt-6-luna"] * 3
         assert revision == REVISION
+        lifecycle = asyncio.run(lifecycle_snapshot())
+        assert len(lifecycle) == 3
+        assert all(row.handoff_lifecycle_generation == (1 if row.is_active else 0)
+                   and row.handoff_lifecycle_state == "STABLE"
+                   and row.handoff_lifecycle_source_generation is None
+                   and row.handoff_lifecycle_scope_snapshot is None for row in lifecycle)
         asyncio.run(repeat_data_operation())
         assert asyncio.run(snapshot()) == (after, models, revision)
         command.check(config)

@@ -226,11 +226,13 @@ class LLMService:
         self, agent: object, db_session: AsyncSession, reason: str, runtime=None
     ) -> None:
         """Deactivate an agent due to key problems."""
-        agent.is_active = False  # type: ignore[attr-defined]
+        call = self.agent_service.deactivate_agent(
+            db_session, getattr(agent, "id"), getattr(agent, "user_id"), runtime=runtime,
+        )
         if runtime:
-            await runtime.operation(db_session.commit())
+            await runtime.operation(call)
         else:
-            await db_session.commit()
+            await call
         logger.warning("Agent %s deactivated: %s", getattr(agent, "id", "?"), reason)
 
     @staticmethod
@@ -458,6 +460,12 @@ class LLMService:
 
         executed_calls: set[str] = set()
 
+        def add_platform_control(tools):
+            if not runtime or not runtime.handoff_enabled:
+                return tools
+            from services.managed_execution_receipts import control_tool_schema
+            return [*tools, control_tool_schema()]
+
         set_chat_failure_stage(ChatFailureStage.MCP_SETUP)
         async with self._execution_stack(runtime) as stack:
             tool_registry: dict[str, MCPManager | None] = {}
@@ -467,7 +475,8 @@ class LLMService:
                 # Raw MCP is quarantined before lookup/decrypt/construction, not
                 # merely removed from model advertisement. Only code-owned
                 # business controls can enter the managed registry.
-                openai_tools = runtime.business.openai_tools() if runtime.business else []
+                openai_tools = add_platform_control(
+                    runtime.business.openai_tools() if runtime.business else [])
                 tool_registry = {tool["function"]["name"]: None for tool in openai_tools}
             else:
                 for credentials_record in credentials_records:
@@ -521,8 +530,12 @@ class LLMService:
             )
             if required_proposal_id is not None and "business_decide_proposal" not in tool_registry:
                 raise ManagedExecutionError("INVALID_RESULT")
+            # A customer may ask for a person while a proposal is pending. V3
+            # still rejects prose and every non-decision business call below,
+            # but must let the model select the exclusive platform control.
             tool_choice = ({"type": "function", "function": {"name": "business_decide_proposal"}}
-                           if required_proposal_id is not None else None)
+                           if required_proposal_id is not None
+                           and not (runtime and runtime.handoff_enabled) else None)
             preparation_schemas = {}
             if runtime:
                 from services.managed_preparation import PREPARATION_TOOLS, PreparationSchema
@@ -618,6 +631,35 @@ class LLMService:
                     message = selected.message
                 else:
                     message = response.choices[0].message
+                if runtime and runtime.handoff_enabled and selected is not None and selected.branch == "TOOL_CALLS":
+                    calls = getattr(message, "tool_calls", None)
+                    if type(calls) is not list or not calls:
+                        raise ManagedExecutionError("INVALID_RESULT")
+                    from services.managed_execution_receipts import (
+                        HANDOFF_TOOL_NAME,
+                        parse_control_arguments,
+                    )
+                    control_calls = [call for call in calls
+                                     if getattr(getattr(call, "function", None), "name", None)
+                                     == HANDOFF_TOOL_NAME]
+                    if control_calls:
+                        # Platform control is a terminal exclusive tool. A
+                        # mixed batch is rejected before any operation can run.
+                        if len(calls) != 1 or len(control_calls) != 1:
+                            raise ManagedExecutionError("INVALID_RESULT")
+                        call = calls[0]
+                        function = getattr(call, "function", None)
+                        if (getattr(call, "type", None) != "function"
+                                or not isinstance(getattr(call, "id", None), str)
+                                or not call.id or call.id in seen_tool_ids
+                                or HANDOFF_TOOL_NAME not in tool_registry
+                                or getattr(function, "name", None) != HANDOFF_TOOL_NAME):
+                            raise ManagedExecutionError("INVALID_RESULT")
+                        try:
+                            reason, note = parse_control_arguments(function.arguments)
+                        except ValueError:
+                            raise ManagedExecutionError("INVALID_RESULT") from None
+                        await runtime.request_handoff(reason, note)
                 if preparation_correction is not None:
                     calls = getattr(message, "tool_calls", None)
                     if selected.branch != "TOOL_CALLS" or type(calls) is not list or len(calls) != 1:
@@ -628,6 +670,34 @@ class LLMService:
                             or call.id in seen_tool_ids
                             or getattr(getattr(call, "function", None), "name", None) != preparation_correction):
                         raise ManagedExecutionError("INVALID_RESULT")
+                if runtime and runtime.handoff_enabled and selected is not None and selected.branch == "TOOL_CALLS":
+                    # V3 validates the complete batch before any business tool,
+                    # proposal feedback, or reservation can run.
+                    from services.managed_preparation import PREPARATION_TOOLS, PreparationSchema
+                    schema_by_name = {
+                        item["function"]["name"]: item["function"]["parameters"]
+                        for item in openai_tools
+                    }
+                    call_ids = set()
+                    for call in calls:
+                        function = getattr(call, "function", None)
+                        name = getattr(function, "name", None)
+                        call_id = getattr(call, "id", None)
+                        if (getattr(call, "type", None) != "function"
+                                or not isinstance(call_id, str) or not call_id or call_id in seen_tool_ids
+                                or call_id in call_ids or not isinstance(name, str)
+                                or name not in tool_registry):
+                            raise ManagedExecutionError("INVALID_RESULT")
+                        call_ids.add(call_id)
+                        try:
+                            arguments = parse_managed_tool_arguments(function.arguments)
+                            feedback = PreparationSchema(schema_by_name[name]).feedback(arguments)
+                        except ManagedExecutionError:
+                            raise ManagedExecutionError("INVALID_RESULT") from None
+                        except Exception:
+                            raise ManagedExecutionError("TOOL_SETUP_FAILED") from None
+                        if feedback is not None and (name not in PREPARATION_TOOLS or len(calls) != 1):
+                            raise ManagedExecutionError("INVALID_RESULT")
                 if required_proposal_id is not None:
                     # A pending customer's reply must reach the semantic runtime
                     # before reads or ordinary prose can bypass that decision.
@@ -677,7 +747,7 @@ class LLMService:
                         if name not in PREPARATION_TOOLS:
                             continue
                         if name not in preparation_schemas:
-                            raise ManagedExecutionError("TOOL_SETUP_FAILED")
+                            raise ManagedExecutionError("INVALID_RESULT" if runtime.handoff_enabled else "TOOL_SETUP_FAILED")
                         arguments = parse_managed_tool_arguments(call.function.arguments)
                         feedback = preparation_schemas[name].feedback(arguments)
                         if feedback is not None:
@@ -696,7 +766,8 @@ class LLMService:
                             raise ManagedExecutionError("TOOL_SETUP_FAILED")
                         preparation_correction = invalid_call.function.name
                         correction_used = True
-                        tool_choice = {"type": "function", "function": {"name": preparation_correction}}
+                        tool_choice = ({"type": "function", "function": {"name": preparation_correction}}
+                                       if not runtime.handoff_enabled else None)
                         messages.append(self._assistant_message_to_dict(message, managed=True))
                         messages.append({"role": "tool", "tool_call_id": invalid_call.id,
                             "name": preparation_correction, "content": json.dumps(feedback, ensure_ascii=False)})
@@ -753,7 +824,7 @@ class LLMService:
                             refreshed_context = await runtime.operation(
                                 runtime.business.prompt_context())
                             prompt_context = RuntimeCapabilityContext.model_validate(refreshed_context)
-                            openai_tools = runtime.business.openai_tools()
+                            openai_tools = add_platform_control(runtime.business.openai_tools())
                             tool_registry = {
                                 tool["function"]["name"]: None for tool in openai_tools
                             }
