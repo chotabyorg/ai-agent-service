@@ -30,6 +30,8 @@ class BusinessRuntimeError(Exception):
 def failure(code: str, retry: str = 'NEVER') -> dict:
     messages = {
         'STALE_CUSTOMER_CONTEXT': 'Customer details changed. Ask for the current contact details before continuing.',
+        'IDENTITY_CONFLICT': 'This contact is already linked to a different customer name. Ask which name to use before continuing.',
+        'AMBIGUOUS_IDENTITY': 'This contact matches more than one customer. Ask for another identifying detail before continuing.',
         'PERMISSION_DENIED': 'This action is currently unavailable.',
         'VALIDATION_ERROR': 'Check the required business details.',
         'CONFIRMATION_REQUIRED': 'Summarize the proposal and ask the customer to confirm.',

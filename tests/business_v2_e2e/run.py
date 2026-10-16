@@ -24,9 +24,13 @@ from sqlalchemy.engine import make_url
 import docker
 
 ROOT = Path(__file__).resolve().parents[2]
-ROOTS = {'ai': ROOT, 'cs': ROOT.parent / 'conversation', 'crm': ROOT.parent / 'crm'}
-IMAGES = {'ai':'ai-agent-service:goal3-source-fix-r1', 'model':'ai-agent-service:goal3-source-fix-r1',
-          'cs':'conversation-service:goal2-close-fix-r3', 'crm':'business-v2-current-crm-runtime:latest'}
+ROOTS = {'ai': ROOT,
+         'cs': Path(os.environ.get('BUSINESS_E2E_CONVERSATION_ROOT', ROOT.parent / 'conversation')).resolve(),
+         'crm': ROOT.parent / 'crm'}
+AI_IMAGE = os.environ.get('BUSINESS_E2E_AI_IMAGE', 'business-v2-current-ai-runtime:local')
+IMAGES = {'ai': AI_IMAGE, 'model': AI_IMAGE,
+          'cs': os.environ.get('BUSINESS_E2E_CONVERSATION_IMAGE', 'conversation-service:goal4a-author'),
+          'crm': os.environ.get('BUSINESS_E2E_CRM_IMAGE', 'business-v2-current-crm-runtime:latest')}
 PORTS = {'ai':8001,'cs':8002,'crm':8003,'model':8004}
 
 
@@ -37,7 +41,7 @@ def private(path, value):
 
 
 def clean_env():
-    return {'PYTHONDONTWRITEBYTECODE': '1', 'PYTHONUNBUFFERED':'1'}
+    return {'PYTHONDONTWRITEBYTECODE': '1', 'PYTHONUNBUFFERED':'1', 'PYTHONPATH':'/work/ai'}
 
 
 def tool(name, arguments=None):
@@ -53,7 +57,7 @@ class Harness:
         self.state, self.urls = state, urls
         self.docker, self.anchor, self.internal_urls = client, anchor, internal_urls
         self.ids = {k:str(uuid4()) for k in ['owner','agent','integration']}
-        self.tokens = {k:secrets.token_urlsafe(36) for k in ['cs','ai']}
+        self.tokens = {k:secrets.token_urlsafe(36) for k in ['cs','ai','effect']}
         self.volumes = {str(root): {'bind':'/work/'+name,'mode':'ro'} for name,root in ROOTS.items()}
         self.volumes[str(state)] = {'bind':'/evidence','mode':'rw'}
         self.processes, self.logs = {}, []
@@ -83,12 +87,19 @@ class Harness:
             KNOWLEDGE_BASE_ENABLED='false',PRIVACY_FILTER_ENABLED='false',SUBSCRIPTION_CHECK_ENABLED='false',
             BUSINESS_CAPABILITIES_ENABLED='true',BUSINESS_CRM_URL=self.internal_url('crm'),
             BUSINESS_CRM_PRIVATE_KEY=pem,BUSINESS_CRM_KEY_ID='synthetic', BUSINESS_CONFIG_ORIGINS='["https://chota.by"]',
+            BUSINESS_CONVERSATION_URL=self.internal_url('cs'),
+            BUSINESS_CONVERSATION_TOKEN=self.tokens['effect'],
             MANAGED_AI_AUTH_PRINCIPALS=json.dumps([{'principal_id':'synthetic-cs','token':self.tokens['ai'],
                 'caller':'conversation-service','execution_namespace':'main-chota.conversation.v1',
                 'grants':[dict(owner_id=self.grant['owner_id'],integration_id=self.ids['integration'],channel='TELEGRAM',
                     agent_id=self.ids['agent'],agent_owner_id=self.ids['owner'])]}]))
+        effect_grant = dict(self.grant, provider_namespace='main-chota.conversation.v1')
+        effect_principal = {'principal_id':'synthetic-business-effect','role':'BUSINESS_EFFECT',
+            'token':self.tokens['effect'],'grants':[effect_grant]}
         cs_env = dict(DATABASE_URL=self.internal_urls['cs'],LOG_LEVEL='ERROR',
-            CONVERSATION_AUTH_PRINCIPALS=json.dumps([{'principal_id':'synthetic-worker','token':self.tokens['cs'],'grants':[self.grant]}]),
+            CONVERSATION_AUTH_PRINCIPALS=json.dumps([
+                {'principal_id':'synthetic-worker','token':self.tokens['cs'],'grants':[self.grant]},
+                effect_principal]),
             MANAGED_AI_BASE_URL=self.internal_url('ai'),MANAGED_AI_BINDINGS=json.dumps([{
                 'owner_id':self.grant['owner_id'],'integration_id':self.ids['integration'],'channel':'TELEGRAM',
                 'agent_id':self.ids['agent'],'service_token':self.tokens['ai']}]))
@@ -159,6 +170,18 @@ class Harness:
         assert table in {'bookings','customers','deals','inquiries','agent_receipts','notes','follow_up_tasks'}
         return (await self.sql('crm','SELECT count(*) AS n FROM '+table))[0]['n']
 
+    def provider_attempt_count(self, operation_id):
+        """Count real CRM HTTP execute dispatches for one opaque operation ID."""
+        path = self.state/'crm-http.jsonl'
+        if not path.exists():
+            return 0
+        return sum(
+            1 for line in path.read_text().splitlines()
+            if (event := json.loads(line)).get('method') == 'POST'
+            and event.get('operation_id') == operation_id
+            and event.get('path', '').startswith('/internal/agent/v1/execute/')
+        )
+
     async def recover(self, turn_id):
         container = await asyncio.to_thread(self.docker.containers.run, IMAGES['ai'],
             ['python','/work/ai/tests/business_v2_e2e/bootstrap.py','recover',turn_id],
@@ -220,6 +243,25 @@ class Harness:
                     return json.loads(message['content'])
         raise AssertionError('No actual model-visible result for '+name)
 
+    def tool_results(self, name):
+        requests = (self.state/'model-requests.jsonl').read_text().splitlines()
+        if not requests:
+            raise AssertionError('No scripted model request was recorded')
+        value = json.loads(requests[-1])
+        calls = {}
+        for message in value['messages']:
+            for call in message.get('tool_calls', []) or []:
+                calls[call['id']] = call['function']['name']
+        return [json.loads(message['content']) for message in value['messages']
+                if message['role'] == 'tool' and calls.get(message['tool_call_id']) == name]
+
+    def last_provider_result(self, capability):
+        for line in reversed((self.state/'provider-results.jsonl').read_text().splitlines()):
+            value = json.loads(line)
+            if value.get('capability') == capability and value.get('ref'):
+                return value
+        raise AssertionError('No actual provider result for '+capability)
+
     async def cases(self):
         # A: factual answer must be derived from the actual typed tool payload.
         catalog=await self.turn('Какие у вас услуги?',[tool('catalog_search'),
@@ -232,10 +274,82 @@ class Harness:
             proposed=await self.turn('Хочу записаться на окрашивание',self.proposal_steps(start,'+3752998700'+str(i).zfill(2)),thread)
             self.check('B_proposal_'+str(i),proposed.get('draft_text') is not None and await self.count('bookings')==before)
             accepted=await self.confirm(thread,word)
-            self.check('C_confirm_'+word,await self.count('bookings')==before+1 and accepted.get('draft_text')=='Запись подтверждена.'
+            self.check('C_confirm_'+word,await self.count('bookings')==before+1
+                and accepted.get('draft_text','').startswith('Запись была подтверждена:')
                 and len(accepted['operation_refs'])==1 and accepted['operation_refs'][0]['outcome']=='SUCCEEDED')
             if i==0:
-                first_booking=(thread,self.last_tool('business_decide_proposal')['results'][0]['result']['data'])
+                first_booking=(thread,start,self.last_provider_result('booking.create'))
+        # L: a case-only existing-customer match gets an explicit reference
+        # instruction; the model must issue a separate booking call with it.
+        reuse_thread = str(uuid4())
+        reuse_start = (datetime.now(timezone.utc)+timedelta(days=20)).replace(
+            hour=16, minute=0, second=0, microsecond=0).isoformat()
+        reuse_phone = '+375299870000'
+        bookings_before, customers_before = await self.count('bookings'), await self.count('customers')
+        reuse_steps = self.proposal_steps(reuse_start, reuse_phone, name='вЛаД')
+        reuse_steps.append(tool('booking_create', {
+            'customer_ref': ref('booking_create', 'customer_ref'),
+            'offering_ref': ref('catalog_search', 'data', 'items', 0, 'ref'),
+            'resource_ref': ref('resource_search', 'data', 'items', 0, 'ref'),
+            'start_at': reuse_start, 'inquiry_summary': 'Хочу окрашивание',
+        }))
+        reuse_proposal = await self.turn('Запишите меня ещё раз на окрашивание', reuse_steps, reuse_thread)
+        guidance = next((value for value in self.tool_results('booking_create')
+                         if value.get('status') == 'CUSTOMER_REUSE_REQUIRED'), None)
+        self.check('L_existing_customer_explicit_ref_no_preconsent_effect',
+            guidance is not None and bool(guidance.get('customer_ref'))
+            and 'customer' not in guidance and 'вЛаД' not in json.dumps(guidance)
+            and reuse_proposal.get('draft_text') is not None
+            and await self.count('bookings') == bookings_before
+            and await self.count('customers') == customers_before)
+        reused = await self.confirm(reuse_thread)
+        reuse_booking = self.last_provider_result('booking.create')
+        self.check('L_existing_customer_one_confirmed_booking_no_duplicate',
+            await self.count('bookings') == bookings_before + 1
+            and await self.count('customers') == customers_before
+            and reuse_booking['customer_ref'] == guidance['customer_ref']
+            and len(reused['operation_refs']) == 1
+            and reused['operation_refs'][0]['outcome'] == 'SUCCEEDED')
+        # M: a supplied incompatible name is clarified without exposing the
+        # candidate name/ref or reserving an operation. Corrected canonical
+        # details can then follow the same explicit-reference path.
+        conflict_thread = str(uuid4())
+        conflict_start = (datetime.now(timezone.utc)+timedelta(days=21)).replace(
+            hour=16, minute=0, second=0, microsecond=0).isoformat()
+        bookings_before, customers_before = await self.count('bookings'), await self.count('customers')
+        conflict = await self.turn('Хочу записаться',
+            self.proposal_steps(conflict_start, reuse_phone, name='Different Synthetic'), conflict_thread)
+        self.check('M_name_conflict_safe_clarification_no_effect',
+            conflict.get('draft_text') == 'Этот контакт уже связан с другим именем. Уточните, пожалуйста, какое имя указать для записи.'
+            and 'Different Synthetic' not in conflict.get('draft_text', '')
+            and guidance['customer_ref'] not in conflict.get('draft_text', '')
+            and await self.count('bookings') == bookings_before
+            and await self.count('customers') == customers_before)
+        correction_thread = conflict_thread
+        corrected_start = (datetime.now(timezone.utc)+timedelta(days=22)).replace(
+            hour=16, minute=0, second=0, microsecond=0).isoformat()
+        corrected_steps = self.proposal_steps(corrected_start, reuse_phone, name='Влад')
+        corrected_steps.append(tool('booking_create', {
+            'customer_ref': ref('booking_create', 'customer_ref'),
+            'offering_ref': ref('catalog_search', 'data', 'items', 0, 'ref'),
+            'resource_ref': ref('resource_search', 'data', 'items', 0, 'ref'),
+            'start_at': corrected_start, 'inquiry_summary': 'Хочу окрашивание',
+        }))
+        corrected = await self.turn('Меня зовут Влад, запишите на окрашивание', corrected_steps, correction_thread)
+        corrected_guidance = next((value for value in self.tool_results('booking_create')
+                                   if value.get('status') == 'CUSTOMER_REUSE_REQUIRED'), None)
+        self.check('M_corrected_name_prepares_without_duplicate',
+            corrected.get('draft_text') is not None and corrected_guidance is not None
+            and await self.count('bookings') == bookings_before
+            and await self.count('customers') == customers_before)
+        corrected_result = await self.confirm(correction_thread)
+        corrected_booking = self.last_provider_result('booking.create')
+        self.check('M_corrected_name_confirms_existing_customer_once',
+            await self.count('bookings') == bookings_before + 1
+            and await self.count('customers') == customers_before
+            and corrected_booking['customer_ref'] == corrected_guidance['customer_ref']
+            and len(corrected_result['operation_refs']) == 1
+            and corrected_result['operation_refs'][0]['outcome'] == 'SUCCEEDED')
         # D: change the pending appointment; never execute original 18:00 facts.
         thread=str(uuid4()); start=(datetime.now(timezone.utc)+timedelta(days=10)).replace(hour=15,minute=0,second=0,microsecond=0)
         before=await self.count('bookings')
@@ -265,8 +379,8 @@ class Harness:
             and 'PRIVATE_STAFF_NOTE_SENTINEL' not in json.dumps(projection) and 'audit' not in json.dumps(projection).lower())
         # Same legitimate model-visible booking handle supports get/search and
         # two separately confirmed customer intents (reschedule, then cancel).
-        thread,booking=first_booking
-        moved_start=(datetime.fromisoformat(booking['start_at'].replace('Z','+00:00'))+timedelta(hours=1)).isoformat()
+        thread,booking_start,_=first_booking
+        moved_start=(datetime.fromisoformat(booking_start.replace('Z','+00:00'))+timedelta(hours=1)).isoformat()
         await self.turn('Перенеси на час позже',[
             tool('customer_find',{'identity':{'kind':'PHONE','value':'+375299870000'}}),
             tool('booking_search',{'customer_ref':ref('customer_find','data','candidates',0,'ref'),
@@ -277,7 +391,7 @@ class Harness:
                 'start_at':moved_start})],thread)
         moved=await self.confirm(thread)
         self.check('BOOKING_reschedule',moved['operation_refs'][0]['outcome']=='SUCCEEDED')
-        booking=self.last_tool('business_decide_proposal')['results'][0]['result']['data']
+        booking=self.last_provider_result('booking.reschedule')
         await self.turn('Отмени запись',[tool('booking_get',{'booking_ref':booking['ref']}),
             tool('booking_cancel',{'booking_ref':ref('booking_get','data','ref'),'expected_revision':ref('booking_get','data','revision')})],thread)
         cancelled=await self.confirm(thread)
@@ -326,7 +440,7 @@ class Harness:
                 'title':'Окрашивание','currency':'BYN','items':[{'offering_ref':ref('catalog_search','data','items',0,'ref'),'quantity':'1'}]})],thread)
         enabled_deal=await self.confirm(thread)
         self.check('J_enabled_deal',await self.count('deals')==before+1 and enabled_deal['operation_refs'][0]['outcome']=='SUCCEEDED')
-        deal=self.last_tool('business_decide_proposal')['results'][0]['result']['data']
+        deal=self.last_provider_result('deal.create')
         await self.turn('Начинайте выполнять заказ',[tool('deal_get',{'deal_ref':deal['ref']}),
             tool('deal_move',{'deal_ref':ref('deal_get','data','ref'),'expected_revision':ref('deal_get','data','revision'),'stage':'IN_PROGRESS'})],thread)
         moved_deal=await self.confirm(thread)
@@ -346,7 +460,7 @@ class Harness:
         grouped=await self.confirm(thread)
         self.check('GROUP_one_confirmation_two_effects',await self.count('bookings')==bookings+1 and await self.count('deals')==deals+1
             and len(grouped['operation_refs'])==2 and all(v['outcome']=='SUCCEEDED' for v in grouped['operation_refs']))
-        group_booking=self.last_tool('business_decide_proposal')['results'][0]['result']['data']
+        group_booking=self.last_provider_result('booking.create')
         unsupported=await self.turn('Измени и отмени одновременно',[
             tool('booking_get',{'booking_ref':group_booking['ref']}),
             tool('business_propose',{'actions':[
@@ -362,13 +476,20 @@ class Harness:
         await self.turn('Запиши',self.proposal_steps((start+timedelta(days=5)).isoformat(),'+375299870030'),thread)
         (self.state/'lose-response').touch()
         lost=await self.confirm(thread)
+        lost_operation_id=lost['operation_refs'][0]['operation_id']
+        lost_attempts=self.provider_attempt_count(lost_operation_id)
         self.check('K_lost_response_unknown',await self.count('bookings')==before+1 and lost.get('draft_text') is None
-            and lost['operation_refs'][0]['outcome']=='UNKNOWN')
+            and lost['operation_refs'][0]['outcome']=='UNKNOWN' and lost_attempts==1)
         blocked=await self.turn('Попробуй ещё раз',[{'answer':'Готово'}],thread)
-        self.check('K_no_blind_retry',await self.count('bookings')==before+1 and blocked.get('draft_text') is None)
+        self.check('K_no_blind_retry',await self.count('bookings')==before+1
+            and len(blocked['operation_refs'])==1
+            and blocked['operation_refs'][0]['operation_id']==lost_operation_id
+            and blocked['operation_refs'][0]['outcome']=='SUCCEEDED'
+            and self.provider_attempt_count(lost_operation_id)==lost_attempts)
         recovered=await self.recover(lost['id'])
         self.check('K_authoritative_receipt',await self.count('bookings')==before+1 and recovered[0]['outcome']=='SUCCEEDED'
-            and recovered[0]['operation_id']==lost['operation_refs'][0]['operation_id'])
+            and recovered[0]['operation_id']==lost_operation_id
+            and self.provider_attempt_count(lost_operation_id)==lost_attempts)
         # K2: authoritative no-effect outcome after facts change at provider
         # acceptance, following positive AI dispatch permission.
         thread=str(uuid4()); before=await self.count('bookings'); people=await self.count('customers')
@@ -429,7 +550,8 @@ async def main():
         internal_urls={'ai':url(5432,'business_e2e_ai'),'cs':url(5432,'business_e2e_cs'),'crm':url(5433,'business_e2e_crm')}
         harness=Harness(state,urls,client,anchor,internal_urls)
         await harness.setup(); await harness.cases()
-        private(state/'summary.json',{'status':'PASS','results':harness.results,'real_provider':True,'live_model':False})
+        private(state/'summary.json',{'status':'PASS','results':harness.results,'real_provider':True,'live_model':False,
+            'images':IMAGES,'source_roots':{name:str(path) for name,path in ROOTS.items()}})
         print('REAL_CROSS_SERVICE_E2E_PASS',flush=True)
     finally:
         if harness: await harness.close()

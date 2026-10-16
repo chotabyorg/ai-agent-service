@@ -1,5 +1,4 @@
 """Test-only HTTP process bootstrap; application/provider code stays real."""
-from tests.business_effect_helpers import open_business_runtime
 import asyncio
 import importlib.util
 import importlib.metadata
@@ -83,7 +82,41 @@ class Observe:
             record('projections.jsonl', json.loads(body))
         if SERVICE == 'crm':
             status = next((m['status'] for m in buffered if m['type'] == 'http.response.start'), 0)
-            record('crm-http.jsonl', {'path': scope['path'], 'method': scope['method'], 'status': status})
+            event = {'path': scope['path'], 'method': scope['method'], 'status': status}
+            if scope['method'] == 'POST' and '/internal/agent/v1/execute/' in scope['path']:
+                try:
+                    envelope = json.loads(body)
+                    operation = envelope.get('operation') if isinstance(envelope, dict) else None
+                    if isinstance(operation, dict) and isinstance(operation.get('id'), str):
+                        event['operation_id'] = operation['id']
+                except Exception:
+                    pass
+            record('crm-http.jsonl', event)
+            if (status == 200 and scope['method'] == 'POST'
+                    and scope['path'] in {
+                        '/internal/agent/v1/execute/booking.create',
+                        '/internal/agent/v1/execute/booking.reschedule',
+                        '/internal/agent/v1/execute/deal.create',
+                    }):
+                try:
+                    response_body = b''.join(m.get('body', b'') for m in buffered
+                                             if m['type'] == 'http.response.body')
+                    payload = json.loads(response_body)
+                    data = payload.get('data') if isinstance(payload, dict) else None
+                    if isinstance(data, dict) and payload.get('status') == 'OK':
+                        record('provider-results.jsonl', {
+                            'capability': scope['path'].rsplit('/', 1)[-1],
+                            'effect': payload.get('effect'),
+                            'ref': data.get('ref'),
+                            'customer_ref': data.get('customer_ref'),
+                            'start_at': data.get('start_at'),
+                            'revision': data.get('revision'),
+                        })
+                except Exception:
+                    record('provider-results.jsonl', {
+                        'capability': scope['path'].rsplit('/', 1)[-1],
+                        'result': 'UNAVAILABLE',
+                    })
             loss = STATE / 'lose-response'
             if loss.exists() and '/execute/' in scope['path'] and b'"operation"' in body and status == 200:
                 loss.unlink()
@@ -91,6 +124,24 @@ class Observe:
                 await send({'type': 'http.response.start', 'status': 503, 'headers': [(b'content-type', b'application/json')]})
                 await send({'type': 'http.response.body', 'body': b'{"code":"synthetic_response_loss"}'})
                 return
+        if SERVICE in {'ai', 'cs'}:
+            status = next((m['status'] for m in buffered if m['type'] == 'http.response.start'), 0)
+            event = {'path': scope['path'], 'method': scope['method'], 'status': status}
+            if SERVICE == 'cs' and scope['path'].endswith('/external-effect-eligibility'):
+                try:
+                    response_body = b''.join(m.get('body', b'') for m in buffered
+                                             if m['type'] == 'http.response.body')
+                    payload = json.loads(response_body)
+                    event['eligible'] = payload.get('eligible')
+                    reason = payload.get('reason')
+                    event['reason'] = reason if reason in {
+                        'ELIGIBLE', 'AUTHORITY_CHANGED', 'EXECUTION_INACTIVE', 'ORIGIN_STALE',
+                        'ORIGIN_INCOMPLETE', 'INPUT_INCOMPLETE', 'INPUT_BEFORE_AUTHORITY',
+                        'INPUT_SUPERSEDED', 'INTERVENING_SPLIT',
+                    } else 'OTHER'
+                except Exception:
+                    event['eligibility_response'] = 'INVALID'
+            record(SERVICE+'-http.jsonl', event)
         for message in buffered:
             await send(message)
 
@@ -119,6 +170,11 @@ def model_app():
         record('model-requests.jsonl', body)
         assert queue, 'Scripted model exhausted'
         step = queue.pop(0)
+        record('model-actions.jsonl', {
+            'tool': step.get('tool') if isinstance(step.get('tool'), str) else None,
+            'argument_keys': sorted(step.get('arguments', {})) if isinstance(step.get('arguments', {}), dict) else [],
+            'answer': isinstance(step.get('answer'), str),
+        })
         tool_names = {}
         results = {}
         for message in body['messages']:
@@ -162,6 +218,7 @@ def model_app():
 if SERVICE == 'recover':
     # Explicit operator recovery of the original selected plan, never a new
     # business command or a Conversation resubmission. All receipt HTTP is real.
+    from tests.business_effect_helpers import open_business_runtime
     from core.config import get_settings
     from db.database import AsyncSessionLocal
     from schemas.managed_turn import ManagedTurnRequest
