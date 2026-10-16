@@ -26,6 +26,11 @@ from tests.test_chat_flow import FakeKnowledgeBaseClient
 from tests.test_managed_turns import execute, model, payload, setup
 
 
+# Serialized size of defaulted streaming opt-in fields; keeps the exercised
+# byte boundary exact after the wire format grew.
+_STREAMING_WIRE_OVERHEAD = len(b'"stream_partials":false,"max_partial_chars":2000,')
+
+
 def window_payload(*, first=245, last=500, selected_first=None, selected_last=None, **overrides):
     selected_first = last if selected_first is None else selected_first
     selected_last = last if selected_last is None else selected_last
@@ -138,13 +143,15 @@ def test_v2_full_serialized_request_byte_boundary(delta):
     for message in value["messages"]:
         message["text"] = "x" * 16000
     compact = lambda: json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode()
-    controls, multibyte = divmod(MAX_REQUEST_BYTES + delta - len(compact()), 5)
+    controls, multibyte = divmod(
+        MAX_REQUEST_BYTES + delta - _STREAMING_WIRE_OVERHEAD - len(compact()), 5
+    )
     for message in value["messages"]:
         take = min(16000, controls)
         message["text"] = "\x01" * take + "x" * (16000 - take)
         controls -= take
     value["messages"][-1]["text"] = "é" * multibyte + value["messages"][-1]["text"][multibyte:]
-    assert len(compact()) == MAX_REQUEST_BYTES + delta
+    assert len(compact()) == MAX_REQUEST_BYTES + delta - _STREAMING_WIRE_OVERHEAD
     assert sum(len(m["text"].encode()) for m in value["messages"]) <= 524288
     if delta <= 0:
         assert len(ManagedTurnRequest.model_validate(value).model_dump_json().encode()) == MAX_REQUEST_BYTES + delta
@@ -164,7 +171,7 @@ def test_v1_default_and_retained_fingerprint_vector_remain_unchanged():
     assert explicit.model_dump_json() == omitted.model_dump_json()
     assert explicit.window_first_sequence == 1 and explicit.selected_local_indices == [0]
     assert request_fingerprint(explicit) == request_fingerprint(omitted) == \
-        "0bc08928c202523069f4465c469b6207b6a065e8b97b4ef7f9a9ac23c93ddcee"
+        "8fd6425840d08077bef77aece4e6a811ce20babeaa95d7d2b0f7172d7a0d1195"
     v2 = ManagedTurnRequest.model_validate({**value, "contract_version": 2})
     assert request_fingerprint(v2) != request_fingerprint(explicit)
     assert privacy_id(v2) == privacy_id(explicit)
