@@ -443,6 +443,10 @@ class LLMService:
         system_prompt = self.prompt_composer.compose(
             agent, chat_context, runtime_context=prompt_context,
         )
+        voice_profile = self._managed_voice_profile(agent, request=managed_request) if runtime else None
+        if voice_profile is not None and voice_profile.concise_speech:
+            from services.voice_reply_style import CONCISE_SPEECH
+            system_prompt += "\n\n" + CONCISE_SPEECH
         knowledge_base_message = await self._build_knowledge_base_message(
             agent=agent,
             query=query,

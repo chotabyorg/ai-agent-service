@@ -23,6 +23,7 @@ class VoiceLatencyProfile(BaseModel):
     max_input_price: float | None = Field(default=None, ge=0, allow_inf_nan=False)
     max_output_price: float | None = Field(default=None, ge=0, allow_inf_nan=False)
     reuse_signing_key: bool = False
+    concise_speech: bool = False
 
     _owner = field_validator("owner_id")(validate_owner)
 

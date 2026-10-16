@@ -78,6 +78,28 @@ milliseconds and a code-owned tool-name enum. Arguments, results and caller text
 never enter these records. Text requests do not emit them. Timing observation
 does not grant authority or alter the result.
 
+## Optional short spoken replies
+
+`concise_speech: true` adds a code-owned presentation instruction only to the
+exact authenticated Voice profile. Typical replies use one or two sentences,
+about 25 words, and start with useful content. Full requested details and all
+facts needed for confirmation take priority over brevity. Output is not cut off,
+and the model token allowance, tool schemas, authority gates, canonical history
+and text-channel prompts stay unchanged. The instruction counts toward the
+managed envelope budget and remains present during tool continuation.
+
+This reduces avoidable answer generation and narration; it does not guarantee
+one-second speech onset. Batch STT, end-of-speech, model prefill, tool round trips
+and TTS all contribute to that interval. Provider prompt-cache hits are not an
+application cache or permission to reuse business results.
+
+An alternating synthetic salon probe on 2026-10-16 kept Gemma/NextBit, temperature
+and the 1024-token allowance unchanged. In two warm repetitions of a services
+and prices question, full completion took 906/1126 ms with the prior presentation
+and 725/666 ms with concise speech (72/74 versus 54/55 output tokens). All answers
+finished normally. This small fixture result excludes STT, runtime preparation,
+CRM and TTS and is not a production latency claim.
+
 ## Native verification
 
 Tests can use an explicitly disposable PostgreSQL database on localhost with a
