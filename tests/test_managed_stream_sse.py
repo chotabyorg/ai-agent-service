@@ -61,10 +61,9 @@ async def test_streaming_turn_emits_sentences_then_authoritative_final(
     events = sse_events(body)
     partials = [event for event in events if not event.get("partial_final")]
     finals = [event for event in events if event.get("partial_final")]
-    assert [event["partial_text"] for event in partials] == [
-        "Здравствуйте! ",
-        "Чем могу помочь?",
-    ]
+    # Only sentences followed by more text stream early; the trailing
+    # sentence arrives with the authoritative final event.
+    assert [event["partial_text"] for event in partials] == ["Здравствуйте! "]
     assert len(finals) == 1
     final = finals[-1]
     assert final["status"] == "DRAFT_READY"
