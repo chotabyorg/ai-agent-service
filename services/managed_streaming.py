@@ -124,6 +124,23 @@ async def _chunks(source: Any) -> AsyncIterator[Any]:
     raise ValueError("Streaming completion source is not iterable")
 
 
+async def complete_with_partials(
+    create: Callable[..., Awaitable[Any]],
+    request_kwargs: dict[str, Any],
+    *,
+    on_text: Callable[[str], Awaitable[None]] | None = None,
+) -> Any:
+    """Buffered completion by default; streams only when on_text is set.
+
+    Without a callback this awaits a single non-streaming completion exactly
+    like the historical call path. With a callback it assembles through
+    stream_completion(), forwarding cumulative text partials.
+    """
+    if on_text is None:
+        return await create(**request_kwargs)
+    return await stream_completion(create, request_kwargs, on_text=on_text)
+
+
 async def stream_completion(
     create: Callable[..., Awaitable[Any]],
     request_kwargs: dict[str, Any],

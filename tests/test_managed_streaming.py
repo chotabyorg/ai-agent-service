@@ -4,7 +4,11 @@ import pytest
 from types import SimpleNamespace
 
 from services.managed_completion import select_managed_completion
-from services.managed_streaming import StreamLimitExceeded, stream_completion
+from services.managed_streaming import (
+    StreamLimitExceeded,
+    complete_with_partials,
+    stream_completion,
+)
 from tests.fakes import build_llm_response
 
 
@@ -172,3 +176,33 @@ async def test_provider_error_propagates_without_partials():
 
     with pytest.raises(RuntimeError, match="provider unavailable"):
         await collect(create)
+
+
+async def test_helper_without_hook_passes_request_through_unchanged():
+    async def create(**kwargs):
+        return build_llm_response(content="same model path")
+
+    result = await complete_with_partials(create, {"model": "m", "stream": False})
+    assert result.choices[0].message.content == "same model path"
+
+
+async def test_helper_with_hook_streams_partials_and_final():
+    async def create(**kwargs):
+        assert kwargs.get("stream") is True
+
+        async def generate():
+            yield chunk(text="nine")
+            yield chunk(text=" plus ten")
+            yield chunk(finish="stop")
+
+        return generate()
+
+    partials = []
+
+    async def on_text(cumulative):
+        partials.append(cumulative)
+
+    result = await complete_with_partials(create, {"model": "m"}, on_text=on_text)
+    assert partials == ["nine", "nine plus ten"]
+    selected = select_managed_completion(result, lambda text: text.strip())
+    assert selected.answer == "nine plus ten"
