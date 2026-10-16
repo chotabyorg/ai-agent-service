@@ -75,6 +75,8 @@ async def call_capability(runtime, name, arguments):
     capability = WIRE_REGISTRY.get(name)
     if capability is None:
         if name == 'business_propose':
+            if set(arguments) != {'actions'} or not isinstance(arguments['actions'], list):
+                raise BusinessSafetyError('ACTION_INVALID')
             actions = arguments.get('actions', [])
             if (not 1 <= len(actions) <= 2 or any(not isinstance(a, dict) for a in actions)
                     or len({a.get('capability','').split('.')[0] for a in actions}) != len(actions)):
@@ -86,6 +88,12 @@ async def call_capability(runtime, name, arguments):
                         or not booking.get('customer_ref') or booking.get('customer_ref') != deal.get('customer_ref')
                         or 'customer' in booking):
                     raise BusinessSafetyError('ACTION_INVALID')
+            try:
+                return await runtime.propose_plan(actions)
+            except BusinessRuntimeError as error:
+                if runtime.collector.snapshot():
+                    raise BusinessSafetyError('FACTS_UNAVAILABLE', processing_status='UNKNOWN') from None
+                return BusinessToolResult(tool_payload=failure(error.code))
         return None
     if capability.id not in runtime.binding.enabled_capabilities:
         raise BusinessSafetyError('CAPABILITY_DISABLED')
