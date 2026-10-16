@@ -30,7 +30,7 @@ class Capability:
 CAPABILITIES = (
     Capability('catalog.search', 'catalog_search', 'CATALOG', Risk.READ, s.CatalogSearch, 'Find active services and products with factual prices; empty query browses.'),
     Capability('catalog.get', 'catalog_get', 'CATALOG', Risk.READ, s.CatalogGet, 'Get the selected service or product.'),
-    Capability('customer.find', 'customer_find', 'CUSTOMERS', Risk.READ, s.CustomerFind, 'Find a returning customer by exact phone or email; ask clarification on ambiguity.'),
+    Capability('customer.find', 'customer_find', 'CUSTOMERS', Risk.READ, s.CustomerFind, 'Find a returning customer by exact phone or email. For booking identity checks, omit the name filter so existing contacts with a different supplied name are detected; ask for clarification on ambiguity.'),
     Capability('customer.create', 'customer_create', 'CUSTOMERS', Risk.WRITE_SAFE, s.CustomerCreate, 'Save a new customer and their supplied contact details atomically.'),
     Capability('customer.get_context', 'customer_get_context', 'CUSTOMERS', Risk.READ, s.CustomerContext, 'Get permitted customer context; customer-facing conversations can read safe bookings only.'),
     Capability('customer.add_note', 'customer_add_note', 'CUSTOMERS', Risk.WRITE_SAFE, s.CustomerNote, 'Record a relevant customer note.'),
@@ -39,7 +39,7 @@ CAPABILITIES = (
     Capability('booking.check_availability', 'booking_check_availability', 'BOOKINGS', Risk.READ, s.Availability, 'Check an appointment interval. Advisory only; creates no reservation.'),
     Capability('booking.search', 'booking_search', 'BOOKINGS', Risk.READ, s.BookingSearch, 'Find this customer appointments within a bounded time period.'),
     Capability('booking.get', 'booking_get', 'BOOKINGS', Risk.READ, s.BookingGet, 'Get current appointment details and revision.'),
-    Capability('booking.create', 'booking_create', 'BOOKINGS', Risk.WRITE_CONFIRM, s.BookingCreate, 'Propose an appointment; present the returned business summary and await natural confirmation.'),
+    Capability('booking.create', 'booking_create', 'BOOKINGS', Risk.WRITE_CONFIRM, s.BookingCreate, 'Before preparing from supplied customer details, look up the exact phone/email with customer_find and no name filter. Reuse one active match only via customer_ref; clarify name conflicts or ambiguity. If lookup returns NONE, pass the supplied customer with the booking so CRM records both together only after confirmation. Never call customer_create first or rename or duplicate a customer. Present the proposal and await confirmation.'),
     Capability('booking.reschedule', 'booking_reschedule', 'BOOKINGS', Risk.WRITE_CONFIRM, s.BookingReschedule, 'Propose moving an appointment using its current revision.'),
     Capability('booking.cancel', 'booking_cancel', 'BOOKINGS', Risk.WRITE_CONFIRM, s.BookingCancel, 'Propose cancelling an appointment using its current revision.'),
     Capability('deal.create', 'deal_create', 'DEALS', Risk.WRITE_CONFIRM, s.DealCreate, 'Propose recording a customer order with priced items. Confirm business facts, never internal system operations.', False),

@@ -223,6 +223,8 @@ async def execute_managed_owned(request, grant, runtime, db_provider, session_fa
                 outcome = dict(status=processing_status(),
                                draft_text=None, error_code="TOOL_CLEANUP_FAILED")
     if cancellation is not None or runtime.cancel_requested:
+        if runtime.business is not None:
+            runtime.business.finish_business_diagnostics("UNKNOWN")
         raise cancellation or asyncio.CancelledError()
     if missing:
         raise ManagedAgentNotFound
@@ -235,5 +237,14 @@ async def execute_managed_owned(request, grant, runtime, db_provider, session_fa
         outcome["draft_text"] = None
     elif outcome["status"] == "DRAFT_READY":
         apply_guard(final_guard)
+    if runtime.business is not None:
+        proposal_present = bool(
+            retained_gate is not None and retained_gate.plan is not None
+            and retained_gate.plan.proposal_state in {"PREPARED", "CONFIRMED"}
+        )
+        runtime.business.finish_business_diagnostics(
+            outcome["status"], proposal_present=proposal_present,
+            operation_present=bool(collector.snapshot()),
+        )
     return ManagedTurnResult.from_request(request, **outcome,
                                           operation_refs=collector.snapshot())

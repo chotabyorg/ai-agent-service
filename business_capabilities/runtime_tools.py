@@ -43,8 +43,6 @@ def canonical_tools(runtime, controls):
     for capability in selected:
         tool = capability.tool()
         tool['function']['description'] = capability.risk.value + ': ' + capability.description
-        if capability.id == 'booking.create':
-            tool['function']['description'] += ' For a new customer pass their name and exact phone/email in customer; this atomically records the customer and optional inquiry with the booking after confirmation. Do not create a separate customer first in this Turn.'
         result.append(tool)
     if runtime.recovery_mode:
         result.append(runtime._status_tool())
@@ -56,6 +54,10 @@ def canonical_tools(runtime, controls):
     propose = next(t for t in controls if t['function']['name'] == 'business_propose')
     propose['function']['description'] = (
         'Prepare and persist a proposal BEFORE asking the customer to confirm. '
+        'Before proposing booking.create from supplied customer details, look up the exact phone/email with customer_find and no name filter. '
+        'For one active match with the same name, make a separate proposal call using its customer_ref; clarify name conflicts or ambiguity. '
+        'If lookup returns NONE, include supplied customer details with booking.create so CRM records both together only after confirmation. '
+        'Never call customer_create first or rename or duplicate a customer. '
         'Propose one business action, or booking.create plus deal.create for the SAME EXISTING customer_ref. '
         'Other combinations are unsupported. Present the returned frozen business summary, '
         'ask once for confirmation, and wait for a later customer turn. '
@@ -71,7 +73,129 @@ def canonical_tools(runtime, controls):
     return result
 
 
-async def call_capability(runtime, name, arguments):
+def _lookup_refusal_category(result):
+    if getattr(result, 'halt_status', None):
+        return 'AUTHORITY_BLOCKED'
+    payload = getattr(result, 'tool_payload', None)
+    if not isinstance(payload, dict):
+        return 'LOOKUP_INVALID'
+    if payload.get('status') == 'ERROR':
+        code = payload.get('error', {}).get('code') if isinstance(payload.get('error'), dict) else None
+        if code == 'IDENTITY_CONFLICT':
+            return 'IDENTITY_CONFLICT'
+        if code in {'AMBIGUOUS', 'AMBIGUOUS_IDENTITY'}:
+            return 'AMBIGUOUS_IDENTITY'
+        return 'LOOKUP_UNAVAILABLE'
+    data = payload.get('data')
+    if payload.get('status') == 'AMBIGUOUS' or (isinstance(data, dict) and data.get('match') == 'AMBIGUOUS'):
+        return 'AMBIGUOUS_IDENTITY'
+    return 'NONE'
+
+
+def _observe_model_customer_lookup(runtime, arguments, *, result=None, refusal='NONE', lookup_result=None):
+    if lookup_result is None:
+        payload = getattr(result, 'tool_payload', None)
+        data = payload.get('data') if isinstance(payload, dict) else None
+        match = data.get('match') if isinstance(data, dict) else None
+        if (getattr(result, 'halt_status', None) is not None
+                or not isinstance(payload, dict) or payload.get('status') == 'ERROR'):
+            lookup_result = 'ERROR'
+        elif match in {'NONE', 'SINGLE', 'AMBIGUOUS'}:
+            lookup_result = match
+        else:
+            lookup_result = 'ERROR'
+            refusal = 'LOOKUP_INVALID'
+    try:
+        runtime.observe_business_diagnostic(
+            stage='LOOKUP', capability='customer.find', refusal_category=refusal,
+            lookup_source='MODEL', lookup_mode='NAME_FILTERED'
+            if isinstance(arguments, dict) and arguments.get('name') is not None else 'IDENTITY_ONLY',
+            lookup_result=lookup_result,
+        )
+    except Exception:
+        pass
+
+
+_REFUSAL_BY_ERROR = {
+    'IDENTITY_CONFLICT': 'IDENTITY_CONFLICT',
+    'AMBIGUOUS_IDENTITY': 'AMBIGUOUS_IDENTITY', 'AMBIGUOUS': 'AMBIGUOUS_IDENTITY',
+    'BOOKING_CONFLICT': 'BOOKING_CONFLICT', 'STATE_CONFLICT': 'STATE_CONFLICT',
+    'NOT_FOUND': 'NOT_FOUND', 'PERMISSION_DENIED': 'PERMISSION_DENIED',
+    'PROVIDER_UNAVAILABLE': 'PROVIDER_UNAVAILABLE',
+    'VALIDATION_ERROR': 'VALIDATION_ERROR', 'ACTION_INVALID': 'VALIDATION_ERROR',
+    'PROPOSAL_BOUNDS': 'VALIDATION_ERROR', 'STALE_CUSTOMER_CONTEXT': 'STALE_CUSTOMER_CONTEXT',
+}
+
+
+def _observe_proposal(runtime, name, *, result=None, error=None):
+    try:
+        code = getattr(error, 'code', None)
+        payload = getattr(result, 'tool_payload', None)
+        if code is None and isinstance(payload, dict) and isinstance(payload.get('error'), dict):
+            code = payload['error'].get('code')
+        refusal = _REFUSAL_BY_ERROR.get(code, 'OTHER') if code else 'NONE'
+        status = payload.get('status') if isinstance(payload, dict) else None
+        proposal_present = status in {'AWAITING_CONFIRMATION', 'PREPARED', 'CONFIRMED', 'SUCCEEDED'}
+        operation_present = False
+        collector = getattr(runtime, 'collector', None)
+        if collector is not None:
+            operation_present = bool(collector.snapshot())
+        runtime.observe_business_diagnostic(
+            stage='PROPOSAL', capability=name, refusal_category=refusal,
+            proposal_present=proposal_present, operation_present=operation_present,
+        )
+    except Exception:
+        pass
+
+
+async def call_capability(runtime, name, arguments, *, lookup_source='MODEL'):
+    if name in {'booking_create', 'business_propose'}:
+        from services.managed_preparation import prepare_booking_customer_reuse
+        prepared = await prepare_booking_customer_reuse(runtime, name, arguments)
+        if prepared is not None:
+            return prepared
+
+    if name == 'customer_find' and lookup_source == 'MODEL':
+        try:
+            normalized_arguments = runtime.registration.capability('customer.find').normalize(arguments)
+        except Exception:
+            _observe_model_customer_lookup(runtime, {}, refusal='VALIDATION_ERROR', lookup_result='NOT_RUN')
+            raise
+        try:
+            result = await _call_capability_impl(runtime, name, normalized_arguments)
+        except BusinessSafetyError as error:
+            refusal = ('CAPABILITY_DISABLED' if error.code == 'CAPABILITY_DISABLED'
+                       else 'AUTHORITY_BLOCKED' if error.processing_status == 'UNKNOWN'
+                       or error.code in {'BINDING_UNAVAILABLE', 'EFFECT_AUTHORITY_UNAVAILABLE'}
+                       else 'LOOKUP_UNAVAILABLE')
+            _observe_model_customer_lookup(runtime, normalized_arguments, refusal=refusal,
+                lookup_result='NOT_RUN' if refusal in {'CAPABILITY_DISABLED', 'AUTHORITY_BLOCKED'} else 'ERROR')
+            raise
+        except (TypeError, ValueError):
+            _observe_model_customer_lookup(runtime, normalized_arguments, refusal='LOOKUP_INVALID', lookup_result='ERROR')
+            raise
+        except Exception:
+            _observe_model_customer_lookup(runtime, normalized_arguments, refusal='LOOKUP_UNAVAILABLE', lookup_result='ERROR')
+            raise
+        refusal = _lookup_refusal_category(result)
+        _observe_model_customer_lookup(runtime, normalized_arguments, result=result, refusal=refusal)
+        return result
+    try:
+        result = await _call_capability_impl(runtime, name, arguments)
+    except BusinessSafetyError as error:
+        if name in {'booking_create', 'business_propose'}:
+            _observe_proposal(runtime, name, error=error)
+        raise
+    except Exception:
+        if name in {'booking_create', 'business_propose'}:
+            _observe_proposal(runtime, name)
+        raise
+    if name in {'booking_create', 'business_propose'}:
+        _observe_proposal(runtime, name, result=result)
+    return result
+
+
+async def _call_capability_impl(runtime, name, arguments):
     capability = WIRE_REGISTRY.get(name)
     if capability is None:
         if name == 'business_propose':

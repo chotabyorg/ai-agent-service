@@ -12,6 +12,7 @@ from pydantic import Field, SecretStr, field_validator
 from schemas.managed_turn import Channel, ManagedValue, validate_owner
 from core.managed_completion_diagnostics import _trusted_completion_record
 from core.voice_latency_diagnostics import _trusted_voice_timing_record
+from core.managed_business_diagnostics import _trusted_business_record
 
 EXECUTION_NAMESPACE = "main-chota.conversation.v1"
 MANAGED_SECRET_ENV_KEYS = frozenset({"managed_ai_auth_principals", "business_conversation_token"})
@@ -86,6 +87,8 @@ def install_managed_log_boundary() -> None:
         record = original(self, *args, **kwargs)
         if managed_logging.get():
             safe = _trusted_completion_record(record) or _trusted_voice_timing_record(record)
+            if safe is None:
+                safe = _trusted_business_record(record)
             if safe is None:
                 safe = logging.LogRecord(record.name, record.levelno, record.pathname,
                                      record.lineno, "Managed execution diagnostic", (), None)

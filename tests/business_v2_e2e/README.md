@@ -10,8 +10,11 @@ python -m tests.business_v2_e2e.run
 The candidate checkouts must be siblings named `ai`, `conversation`, and `crm`.
 The image names below identify dependency environments from the local foundation
 verification; build equivalent service images with the exact checked-in dependency
-pins and set `IMAGES` in the runner if those local tags are unavailable. Do not
-substitute host dependency versions for service environments. Every run records
+pins if those local tags are unavailable. `BUSINESS_E2E_AI_IMAGE`,
+`BUSINESS_E2E_CONVERSATION_IMAGE`, and `BUSINESS_E2E_CRM_IMAGE` can select local
+dependency images; `BUSINESS_E2E_CONVERSATION_ROOT` can select an isolated source
+export. These settings change only the disposable harness. Do not substitute host
+dependency versions for service environments. Every run records
 application source SHA256 and installed HTTP/ORM dependency versions in
 `runtime-manifests.jsonl` alongside its result, so cached image tags do not stand
 in for evidence of the source actually executed.
@@ -22,8 +25,8 @@ Conversation source, current AI source, and current CRM source are mounted
 read-only into separate application containers. Service-specific existing images
 supply their exact dependencies:
 
-- AI/model: `ai-agent-service:goal3-source-fix-r1`
-- Conversation: `conversation-service:goal2-close-fix-r3`
+- AI/model: `business-v2-current-ai-runtime:local`
+- Conversation: `conversation-service:goal4a-author`
 - CRM: `business-v2-current-crm-runtime:latest`
 
 The AI and Conversation images use their pinned `/opt/venv`; CRM uses its image's
@@ -53,6 +56,9 @@ Coverage includes:
 
 - Catalog factual lookup; customer lookup and useful booking answer.
 - New customer + inquiry + booking atomic aggregate, with no effect before consent.
+- Existing active customer reuse requires a separate explicit reference call;
+  case-only name matches work, mismatches receive a safe clarification, and
+  corrected details complete one booking without creating another customer.
 - Natural model-decision protocol for `+`, `ага`, `ок`, `👍`, `давайте`.
 - Changed details require a replacement proposal and later consent; reject and
   unrelated replies produce no effect or borrowed operation refs.

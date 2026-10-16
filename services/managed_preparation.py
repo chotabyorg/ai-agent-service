@@ -1,6 +1,7 @@
-"""Local advertised-schema checks, never runtime admission or normalization."""
+"""Validate preparation input and perform guarded customer lookup without dispatch."""
 from jsonschema import Draft202012Validator, FormatChecker
 
+from schemas.business import BusinessAction, BusinessSafetyError, BusinessToolResult
 from services.managed_tools import ManagedExecutionError
 
 PREPARATION_TOOLS = frozenset({'business_propose', 'booking_create'})
@@ -46,3 +47,244 @@ class PreparationSchema:
             'rule': error.validator if error.validator in SAFE_RULES else 'schema'},
             'correction': 'No runtime action was executed. Return exactly one corrected call to the same tool, '
                           'using its advertised schema and a new tool-call ID.'}
+
+
+def _validated_preparation_actions(runtime, name, arguments):
+    """Validate the full advertised preparation before any CRM read or write."""
+    try:
+        if not isinstance(arguments, dict):
+            raise BusinessSafetyError('ACTION_INVALID')
+        if name == 'booking_create':
+            definition = runtime.registration.capability('booking.create')
+            if definition is None:
+                raise BusinessSafetyError('ACTION_INVALID')
+            actions = [BusinessAction(capability='booking.create', arguments=definition.normalize(arguments))]
+        elif name == 'business_propose':
+            if set(arguments) != {'actions'} or not isinstance(arguments['actions'], list):
+                raise BusinessSafetyError('ACTION_INVALID')
+            values = arguments['actions']
+            if not 1 <= len(values) <= 2 or any(not isinstance(value, dict) for value in values):
+                raise BusinessSafetyError('ACTION_INVALID')
+            capabilities = [value.get('capability') for value in values]
+            if (any(type(capability) is not str for capability in capabilities)
+                    or len({capability.split('.')[0] for capability in capabilities}) != len(values)):
+                raise BusinessSafetyError('ACTION_INVALID')
+            if len(values) == 2:
+                by_name = {value.get('capability'): value.get('arguments', {}) for value in values}
+                booking, deal = by_name.get('booking.create'), by_name.get('deal.create')
+                if (not isinstance(booking, dict) or not isinstance(deal, dict)
+                        or not booking.get('customer_ref') or booking.get('customer_ref') != deal.get('customer_ref')
+                        or 'customer' in booking):
+                    raise BusinessSafetyError('ACTION_INVALID')
+            actions = []
+            for value in values:
+                action = BusinessAction.model_validate(value)
+                definition = runtime.registration.capability(action.capability)
+                if definition is None:
+                    raise BusinessSafetyError('ACTION_INVALID')
+                actions.append(BusinessAction(capability=action.capability,
+                    arguments=definition.normalize(action.arguments)))
+        else:
+            return []
+
+        for action in actions:
+            if action.capability not in runtime.binding.enabled_capabilities:
+                raise BusinessSafetyError('CAPABILITY_DISABLED')
+        return actions
+    except BusinessSafetyError:
+        raise
+    except Exception:
+        raise BusinessSafetyError('ACTION_INVALID') from None
+
+
+def _safe_lookup_draft(category):
+    if category == 'IDENTITY_CONFLICT':
+        return 'Этот контакт уже связан с другим именем. Уточните, пожалуйста, какое имя указать для записи.'
+    if category == 'AMBIGUOUS_IDENTITY':
+        return 'По этому контакту найдено несколько клиентов. Уточните, пожалуйста, другой контакт.'
+    if category == 'CAPABILITY_DISABLED':
+        return 'Не удалось проверить контакт для записи. Уточните, пожалуйста, контакт или попробуйте позже.'
+    return 'Не удалось проверить контакт. Пожалуйста, попробуйте позже или уточните другой контакт.'
+
+
+def _observe_preparation(runtime, *, name, lookup_result='NOT_RUN', refusal='NONE',
+                         lookup_mode='NOT_APPLICABLE'):
+    try:
+        runtime.observe_business_diagnostic(
+            stage='PREPARATION', capability=name, refusal_category=refusal,
+            lookup_source='BOOKING_PREFLIGHT', lookup_mode=lookup_mode,
+            lookup_result=lookup_result,
+        )
+    except Exception:
+        pass
+
+
+async def _preflight_guard(runtime):
+    try:
+        return await runtime.execution_guard(allow_incomplete=True)
+    except Exception:
+        try:
+            return runtime._halt(True)
+        except Exception:
+            return BusinessToolResult(halt_status='UNKNOWN', error_code='TOOL_EXECUTION_UNKNOWN')
+
+
+async def _preflight_feedback_guard(runtime):
+    """Do not emit ordinary preflight feedback over retained effect evidence."""
+    gate = await _preflight_guard(runtime)
+    if gate is not None:
+        return gate
+    try:
+        if runtime.collector.snapshot():
+            return runtime._halt(True)
+    except Exception:
+        return runtime._halt(True)
+    return None
+
+
+async def prepare_booking_customer_reuse(runtime, name, arguments):
+    """Resolve supplied booking identity through the guarded customer.find read.
+
+    The helper only supplies a validated reference to the model. It never edits
+    booking arguments or reserves an operation as part of the lookup.
+    """
+    if name not in PREPARATION_TOOLS:
+        return None
+    try:
+        actions = _validated_preparation_actions(runtime, name, arguments)
+    except BusinessSafetyError as error:
+        refusal = 'CAPABILITY_DISABLED' if error.code == 'CAPABILITY_DISABLED' else 'OTHER'
+        _observe_preparation(runtime, name=name, refusal=refusal)
+        raise
+    except Exception as error:
+        refusal = 'VALIDATION_ERROR' if getattr(error, 'code', None) == 'ACTION_INVALID' else 'OTHER'
+        _observe_preparation(runtime, name=name, refusal=refusal)
+        raise
+
+    booking = next((action for action in actions if action.capability == 'booking.create'), None)
+    customer = booking.arguments.get('customer') if booking is not None else None
+    if customer is None:
+        _observe_preparation(runtime, name=name)
+        return None
+
+    # This fresh gate preserves retained UNKNOWN/proposal evidence before any
+    # lookup feedback can be returned to the model or customer.
+    gate = await _preflight_feedback_guard(runtime)
+    if gate is not None:
+        _observe_preparation(runtime, name=name, refusal='AUTHORITY_BLOCKED')
+        return gate
+
+    find_capability = runtime.registration.capability('customer.find')
+    if (find_capability is None or runtime.binding is None
+            or 'customer.find' not in runtime.binding.enabled_capabilities):
+        _observe_preparation(runtime, name=name, refusal='CAPABILITY_DISABLED',
+                             lookup_mode='IDENTITY_ONLY')
+        return BusinessToolResult(safe_draft=_safe_lookup_draft('CAPABILITY_DISABLED'))
+
+    lookup_mode = 'IDENTITY_ONLY'
+    try:
+        from business_capabilities.runtime_tools import call_capability
+        lookup_arguments = find_capability.normalize({'identity': customer['identity']})
+        result = await call_capability(runtime, 'customer_find', lookup_arguments,
+                                       lookup_source='BOOKING_PREFLIGHT')
+    except ManagedExecutionError:
+        raise
+    except BusinessSafetyError as error:
+        try:
+            retained = runtime.collector.snapshot()
+        except Exception:
+            raise BusinessSafetyError('RESULT_GATE_UNAVAILABLE', processing_status='UNKNOWN') from None
+        if error.processing_status == 'UNKNOWN' or retained:
+            if error.processing_status != 'UNKNOWN':
+                raise BusinessSafetyError('RESULT_GATE_UNAVAILABLE', processing_status='UNKNOWN') from None
+            raise
+        gate = await _preflight_feedback_guard(runtime)
+        if gate is not None:
+            return gate
+        refusal = 'CAPABILITY_DISABLED' if error.code == 'CAPABILITY_DISABLED' else 'LOOKUP_UNAVAILABLE'
+        _observe_preparation(runtime, name=name, lookup_result='ERROR', refusal=refusal,
+                             lookup_mode=lookup_mode)
+        return BusinessToolResult(safe_draft=_safe_lookup_draft(refusal))
+    except Exception:
+        try:
+            retained = runtime.collector.snapshot()
+        except Exception:
+            return runtime._halt(True)
+        if retained:
+            return runtime._halt(True)
+        gate = await _preflight_feedback_guard(runtime)
+        if gate is not None:
+            return gate
+        _observe_preparation(runtime, name=name, lookup_result='ERROR', refusal='LOOKUP_UNAVAILABLE',
+                             lookup_mode=lookup_mode)
+        return BusinessToolResult(safe_draft=_safe_lookup_draft('LOOKUP_UNAVAILABLE'))
+
+    # The ordinary read path performs this guard itself. Check once more before
+    # making a preflight result visible or continuing to booking facts.
+    gate = await _preflight_feedback_guard(runtime)
+    if gate is not None:
+        return gate
+    if result is None or result.halt_status is not None:
+        if result is not None and result.halt_status == 'UNKNOWN':
+            return result
+        _observe_preparation(runtime, name=name, lookup_result='ERROR',
+                             refusal='LOOKUP_UNAVAILABLE', lookup_mode=lookup_mode)
+        return BusinessToolResult(safe_draft=_safe_lookup_draft('LOOKUP_UNAVAILABLE'))
+    if result.safe_draft is not None:
+        _observe_preparation(runtime, name=name, lookup_result='ERROR',
+                             refusal='LOOKUP_UNAVAILABLE', lookup_mode=lookup_mode)
+        return BusinessToolResult(safe_draft=_safe_lookup_draft('LOOKUP_UNAVAILABLE'))
+
+    payload = result.tool_payload
+    if not isinstance(payload, dict) or payload.get('status') not in {'OK', 'AMBIGUOUS'}:
+        error_code = payload.get('error', {}).get('code') if isinstance(payload, dict) else None
+        if error_code == 'AMBIGUOUS_IDENTITY':
+            refusal, draft = 'AMBIGUOUS_IDENTITY', _safe_lookup_draft('AMBIGUOUS_IDENTITY')
+        elif error_code == 'IDENTITY_CONFLICT':
+            refusal, draft = 'IDENTITY_CONFLICT', _safe_lookup_draft('IDENTITY_CONFLICT')
+        else:
+            refusal, draft = 'LOOKUP_UNAVAILABLE', _safe_lookup_draft('LOOKUP_UNAVAILABLE')
+        _observe_preparation(runtime, name=name, lookup_result='ERROR', refusal=refusal,
+                             lookup_mode=lookup_mode)
+        return BusinessToolResult(safe_draft=draft)
+
+    try:
+        from business_capabilities.results import Find
+        data = Find.model_validate(payload.get('data'))
+    except Exception:
+        _observe_preparation(runtime, name=name, lookup_result='ERROR', refusal='LOOKUP_INVALID',
+                             lookup_mode=lookup_mode)
+        return BusinessToolResult(safe_draft=_safe_lookup_draft('LOOKUP_INVALID'))
+
+    if payload.get('status') == 'AMBIGUOUS' or data.match == 'AMBIGUOUS':
+        _observe_preparation(runtime, name=name, lookup_result='AMBIGUOUS',
+                             refusal='AMBIGUOUS_IDENTITY', lookup_mode=lookup_mode)
+        return BusinessToolResult(safe_draft=_safe_lookup_draft('AMBIGUOUS_IDENTITY'))
+    if data.match == 'NONE':
+        if data.candidates:
+            _observe_preparation(runtime, name=name, lookup_result='ERROR', refusal='LOOKUP_INVALID',
+                                 lookup_mode=lookup_mode)
+            return BusinessToolResult(safe_draft=_safe_lookup_draft('LOOKUP_INVALID'))
+        _observe_preparation(runtime, name=name, lookup_result='NONE', lookup_mode=lookup_mode)
+        return None
+    if data.match != 'SINGLE' or len(data.candidates) != 1:
+        _observe_preparation(runtime, name=name, lookup_result='ERROR', refusal='LOOKUP_INVALID',
+                             lookup_mode=lookup_mode)
+        return BusinessToolResult(safe_draft=_safe_lookup_draft('LOOKUP_INVALID'))
+
+    candidate = data.candidates[0]
+    if candidate.archived:
+        _observe_preparation(runtime, name=name, lookup_result='SINGLE',
+                             refusal='IDENTITY_CONFLICT', lookup_mode=lookup_mode)
+        return BusinessToolResult(safe_draft='Этот контакт связан с архивной записью. Уточните, пожалуйста, другой контакт.')
+    if candidate.display_name.casefold() != customer['display_name'].casefold():
+        _observe_preparation(runtime, name=name, lookup_result='SINGLE',
+                             refusal='IDENTITY_CONFLICT', lookup_mode=lookup_mode)
+        return BusinessToolResult(safe_draft=_safe_lookup_draft('IDENTITY_CONFLICT'))
+
+    _observe_preparation(runtime, name=name, lookup_result='SINGLE', lookup_mode=lookup_mode)
+    return BusinessToolResult(tool_payload={
+        'status': 'CUSTOMER_REUSE_REQUIRED',
+        'customer_ref': candidate.ref,
+        'instruction': 'Call the booking tool again with this customer_ref and omit customer.',
+    })
