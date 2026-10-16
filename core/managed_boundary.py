@@ -11,12 +11,15 @@ from core.config import get_settings
 from core.managed_security import install_managed_log_boundary, managed_logging, valid_token
 from schemas.managed_turn import MAX_REQUEST_BYTES, ManagedTurnRequest
 from schemas.managed_evidence import MAX_EVIDENCE_REQUEST_BYTES, ManagedEvidenceRequest
+from schemas.voice_warmup import VoiceWarmupRequest
 
 MANAGED_PATH = "/internal/v1/managed-turns/execute"
 EVIDENCE_PATH = "/internal/v1/managed-turns/evidence"
+WARMUP_PATH = "/internal/v1/voice/warmup"
 MANAGED_PATHS = {
     MANAGED_PATH: (ManagedTurnRequest, MAX_REQUEST_BYTES, "managed_turn_request"),
     EVIDENCE_PATH: (ManagedEvidenceRequest, MAX_EVIDENCE_REQUEST_BYTES, "managed_evidence_request"),
+    WARMUP_PATH: (VoiceWarmupRequest, 4096, "voice_warmup_request"),
 }
 BOUNDARY_MESSAGES = {
     "UNAUTHENTICATED": "Managed authentication required.",
@@ -71,9 +74,9 @@ class ManagedTurnBoundary:
                 return await boundary_error(401, "UNAUTHENTICATED")(scope, receive, send)
             # Evidence has one exact route. Neither aliases nor other methods
             # can fall through to another parser or a redirect with a new cap.
-            if path == EVIDENCE_PATH and scope["path"] != EVIDENCE_PATH:
+            if path in {EVIDENCE_PATH, WARMUP_PATH} and scope["path"] != path:
                 return await boundary_error(404, "AGENT_NOT_FOUND")(scope, receive, send)
-            if path == EVIDENCE_PATH and scope.get("method") != "POST":
+            if path in {EVIDENCE_PATH, WARMUP_PATH} and scope.get("method") != "POST":
                 response = boundary_error(405, "INVALID_CONTEXT")
                 response.headers["Allow"] = "POST"
                 return await response(scope, receive, send)
@@ -95,7 +98,7 @@ class ManagedTurnBoundary:
                 if not event.get("more_body", False):
                     break
             try:
-                raw = json.loads(body.decode("utf-8") if path == EVIDENCE_PATH else body,
+                raw = json.loads(body.decode("utf-8") if path != MANAGED_PATH else body,
                                  object_pairs_hook=_pairs,
                                  parse_constant=lambda _: (_ for _ in ()).throw(ValueError()))
                 value = schema.model_validate(raw)

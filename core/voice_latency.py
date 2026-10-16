@@ -1,4 +1,6 @@
 """Operator-selected Voice scope; this config never grants execution authority."""
+import hashlib
+import json
 from typing import Annotated
 from uuid import UUID
 
@@ -23,6 +25,7 @@ class VoiceLatencyProfile(BaseModel):
     max_input_price: float | None = Field(default=None, ge=0, allow_inf_nan=False)
     max_output_price: float | None = Field(default=None, ge=0, allow_inf_nan=False)
     reuse_signing_key: bool = False
+    prompt_warmup: bool = False
 
     _owner = field_validator("owner_id")(validate_owner)
 
@@ -39,10 +42,17 @@ class VoiceLatencyProfile(BaseModel):
     def extra_body(self):
         if self.completion_model is None:
             return {"reasoning": {"effort": "none"}, "provider": {"sort": "latency"}}
-        return {"reasoning": {"enabled": False}, "provider": {
+        body = {"reasoning": {"enabled": False}, "provider": {
             "sort": "latency", "only": list(self.provider_only), "allow_fallbacks": False,
             "max_price": {"prompt": self.max_input_price, "completion": self.max_output_price},
         }}
+        if self.prompt_warmup:
+            # Routing affinity only, never provider conversation state/authority.
+            # Warmup's synthetic opening message differs from the actual caller.
+            scope = json.dumps([self.owner_id, str(self.integration_id), str(self.agent_id),
+                                self.completion_model], separators=(",", ":"))
+            body["session_id"] = "voice-" + hashlib.sha256(scope.encode()).hexdigest()
+        return body
 
     def matches(self, request: ManagedTurnRequest | None, model: str) -> bool:
         return (type(request) is ManagedTurnRequest and request.channel == "VOICE"

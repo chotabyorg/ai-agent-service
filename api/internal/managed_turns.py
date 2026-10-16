@@ -12,8 +12,38 @@ from schemas.managed_turn import ManagedTurnRequest, ManagedTurnResult
 from schemas.managed_evidence import ManagedEvidenceRequest, ManagedEvidenceResult
 from services.managed_runtime import ManagedRuntime, join_owner
 from services.managed_turn_service import ManagedAgentNotFound, execute_managed_owned
+from schemas.voice_warmup import VoiceWarmupRequest, VoiceWarmupResult
+from services.voice_warmup import WarmupLimiter, warm_owned
 
 router = APIRouter()
+warmup_limiter = WarmupLimiter()
+
+
+@router.post("/voice/warmup", response_model=VoiceWarmupResult,
+             tags=["internal-managed-turns"],
+             openapi_extra={"requestBody": {"required": True, "content": {
+                 "application/json": {"schema": VoiceWarmupRequest.model_json_schema()}}}})
+async def warm_voice(request: Request):
+    runtime = ManagedRuntime(2.5)
+    provider = request.app.dependency_overrides.get(get_db, get_db)
+    owner = asyncio.create_task(warm_owned(
+        request.scope["voice_warmup_request"], request.scope["managed_grant"], runtime,
+        provider, _business_dependency(request, get_business_registry), warmup_limiter),
+        name="voice-warmup-owner")
+
+    async def watch_disconnect():
+        while True:
+            if (await request.receive())["type"] == "http.disconnect":
+                runtime.signal_cancel()
+                return
+
+    disconnect = asyncio.create_task(watch_disconnect(), name="voice-warmup-disconnect")
+    try:
+        result = await join_owner(owner, runtime)
+        return JSONResponse(result.model_dump(mode="json"), headers={"Cache-Control": "no-store"})
+    finally:
+        disconnect.cancel()
+        await asyncio.gather(disconnect, return_exceptions=True)
 
 
 def _request_schema(model=ManagedTurnRequest):
