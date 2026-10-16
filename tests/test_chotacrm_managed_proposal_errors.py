@@ -23,6 +23,7 @@ from tests.business_effect_helpers import FakeConversationEffectPort, open_busin
 from tests.fakes import ScriptedLLMClient, build_llm_response, build_tool_call
 from tests.test_chat_flow import create_agent
 from tests.test_managed_turns import configure, execute, payload
+from tests.test_business_runtime import later
 from business_capabilities.registry import DEFAULTS
 
 
@@ -35,38 +36,267 @@ def crm_test_settings():
                     business_crm_url="http://synthetic.local")
 
 
+def existing_customer_lookup(*, name="Влад", ref="customer_existing", archived=False):
+    return {"status": "OK", "data": {"match": "SINGLE", "candidates": [{
+        "ref": ref, "display_name": name, "archived": archived,
+        "identities": [{"kind": "PHONE", "value": "+375291112233"}],
+    }]}}
+
+
+def preparation_arguments(tool_name, booking_arguments):
+    if tool_name == "booking_create":
+        return booking_arguments
+    return {"actions": [{"capability": "booking.create", "arguments": booking_arguments}]}
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("tool_name", ["booking_create", "business_propose"])
+@pytest.mark.parametrize("candidate_name", ["Влад", "вЛаД"])
+async def test_existing_customer_requires_explicit_reference_then_confirms_once(
+    api_client, db_session, monkeypatch, tool_name, candidate_name,
+):
+    value, arguments, registry, calls, effect_port, _ = await install_managed_crm(
+        api_client, db_session, monkeypatch, 200, {},
+        lookup_response=existing_customer_lookup(name=candidate_name),
+        allow_execute=True,
+    )
+    request = ManagedTurnRequest.model_validate(value)
+    grant = next(grant for grant in get_settings().managed_principals[0].grants
+                 if grant.scope() == (value["owner_id"], UUID(value["integration_id"]),
+                                      value["channel"], UUID(value["agent_id"])))
+    runtime = await open_business_runtime(request, grant, db_session, registry, effect_port=effect_port)
+    await runtime.prompt_context()
+
+    guidance = await runtime.call_tool(tool_name, preparation_arguments(tool_name, arguments))
+    assert guidance.tool_payload == {
+        "status": "CUSTOMER_REUSE_REQUIRED", "customer_ref": "customer_existing",
+        "instruction": "Call the booking tool again with this customer_ref and omit customer.",
+    }
+    assert calls["lookup"] == 1 and calls["facts"] == calls["execute"] == 0
+    assert calls["lookup_arguments"] == [{
+        "limit": 10, "identity": {"kind": "PHONE", "value": "+375291112233"},
+    }]
+    assert effect_port.permit_requests == []
+    async with db_session() as db:
+        assert await db.scalar(select(func.count()).select_from(BusinessPlan)) == 0
+        assert await db.scalar(select(func.count()).select_from(BusinessOperation)) == 0
+
+    reference_arguments = {key: val for key, val in arguments.items() if key != "customer"}
+    reference_arguments["customer_ref"] = "customer_existing"
+    proposed = await runtime.call_tool(tool_name,
+        preparation_arguments(tool_name, reference_arguments))
+    assert proposed.safe_draft and "Окрашивание" in proposed.safe_draft
+    assert calls["lookup"] == 1 and calls["facts"] >= 1 and calls["execute"] == 0
+    assert calls["fact_arguments"] and all(
+        value.get("customer_ref") == "customer_existing" and "customer" not in value
+        for value in calls["fact_arguments"]
+    )
+    async with db_session() as db:
+        plans = (await db.scalars(select(BusinessPlan))).all()
+        operations = (await db.scalars(select(BusinessOperation))).all()
+        assert len(plans) == len(operations) == 1
+        assert operations[0].request_payload["arguments"]["customer_ref"] == "customer_existing"
+        assert "customer" not in operations[0].request_payload["arguments"]
+
+    later_runtime = await open_business_runtime(later(request, "Да, подтверждаю."), grant,
+                                                db_session, registry, effect_port=effect_port)
+    await later_runtime.prompt_context()
+    confirmed = await later_runtime.call_tool("business_decide_proposal", {
+        "proposal_id": proposed.tool_payload["proposal_id"], "intent": "CONFIRM",
+    })
+    assert confirmed.halt_status is None and calls["execute"] == 1
+    assert effect_port.permit_requests
+    async with db_session() as db:
+        assert await db.scalar(select(func.count()).select_from(BusinessPlan)) == 1
+        assert await db.scalar(select(func.count()).select_from(BusinessOperation)) == 1
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("tool_name", ["booking_create", "business_propose"])
+@pytest.mark.parametrize("lookup", [
+    existing_customer_lookup(name="Different Customer"),
+    {"status": "AMBIGUOUS", "data": {"match": "AMBIGUOUS", "candidates": []}},
+])
+async def test_conflicting_or_ambiguous_customer_returns_private_safe_clarification(
+    api_client, db_session, monkeypatch, tool_name, lookup,
+):
+    value, arguments, registry, calls, effect_port, _model = await install_managed_crm(
+        api_client, db_session, monkeypatch, 200, {}, lookup_response=lookup,
+    )
+    request = ManagedTurnRequest.model_validate(value)
+    grant = next(grant for grant in get_settings().managed_principals[0].grants
+                 if grant.scope() == (value["owner_id"], UUID(value["integration_id"]),
+                                      value["channel"], UUID(value["agent_id"])))
+    runtime = await open_business_runtime(request, grant, db_session, registry, effect_port=effect_port)
+    await runtime.prompt_context()
+
+    result = await runtime.call_tool(tool_name, preparation_arguments(tool_name, arguments))
+    assert result.safe_draft and result.halt_status is None
+    assert "customer_existing" not in repr(result)
+    assert "Different Customer" not in repr(result)
+    assert calls["lookup"] == 1 and calls["facts"] == calls["execute"] == 0
+    assert effect_port.permit_requests == []
+    async with db_session() as db:
+        assert await db.scalar(select(func.count()).select_from(BusinessPlan)) == 0
+        assert await db.scalar(select(func.count()).select_from(BusinessOperation)) == 0
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("tool_name", ["booking_create", "business_propose"])
+@pytest.mark.parametrize("lookup_response,enabled_capabilities", [
+    ({"status": "ERROR", "error": {"code": "PROVIDER_UNAVAILABLE",
+                                      "message": "private provider detail", "retry": "SAFE"}}, list(DEFAULTS)),
+    ({"status": "OK", "data": {"match": "SINGLE", "candidates": []}}, list(DEFAULTS)),
+    (None, [capability for capability in DEFAULTS if capability != "customer.find"]),
+])
+async def test_unavailable_invalid_or_disabled_lookup_fails_closed(
+    api_client, db_session, monkeypatch, tool_name, lookup_response, enabled_capabilities,
+):
+    value, arguments, registry, calls, effect_port, _model = await install_managed_crm(
+        api_client, db_session, monkeypatch, 200, {}, lookup_response=lookup_response,
+        enabled_capabilities=enabled_capabilities,
+    )
+    request = ManagedTurnRequest.model_validate(value)
+    grant = next(grant for grant in get_settings().managed_principals[0].grants
+                 if grant.scope() == (value["owner_id"], UUID(value["integration_id"]),
+                                      value["channel"], UUID(value["agent_id"])))
+    runtime = await open_business_runtime(request, grant, db_session, registry, effect_port=effect_port)
+    await runtime.prompt_context()
+
+    result = await runtime.call_tool(tool_name, preparation_arguments(tool_name, arguments))
+    assert result.safe_draft and result.halt_status is None
+    assert "private provider detail" not in repr(result)
+    expected_lookups = 0 if "customer.find" not in enabled_capabilities else 1
+    assert calls["lookup"] == expected_lookups and calls["facts"] == calls["execute"] == 0
+    assert effect_port.permit_requests == []
+    async with db_session() as db:
+        assert await db.scalar(select(func.count()).select_from(BusinessPlan)) == 0
+        assert await db.scalar(select(func.count()).select_from(BusinessOperation)) == 0
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("lookup", [
+    {"status": "ERROR", "error": {"code": "PROVIDER_UNAVAILABLE",
+                                      "message": "private provider detail", "retry": "NEVER"}},
+    {"status": "OK", "data": {"match": "SINGLE", "candidates": []}},
+    existing_customer_lookup(name="Different Customer"),
+])
+async def test_preflight_never_returns_ordinary_feedback_over_retained_success_refs(
+    api_client, db_session, monkeypatch, lookup,
+):
+    value, arguments, registry, calls, effect_port, _model = await install_managed_crm(
+        api_client, db_session, monkeypatch, 200, {}, lookup_response=lookup,
+    )
+    request = ManagedTurnRequest.model_validate(value)
+    grant = next(grant for grant in get_settings().managed_principals[0].grants
+                 if grant.scope() == (value["owner_id"], UUID(value["integration_id"]),
+                                      value["channel"], UUID(value["agent_id"])))
+    runtime = await open_business_runtime(request, grant, db_session, registry, effect_port=effect_port)
+    await runtime.prompt_context()
+    reference = OperationReference(origin="AI_AGENT_SERVICE", operation_id="retained-success",
+                                   outcome="SUCCEEDED")
+    guard_calls = 0
+    snapshot_calls = 0
+
+    async def open_guard(**_kwargs):
+        nonlocal guard_calls
+        guard_calls += 1
+        return None
+
+    def refs_after_lookup():
+        nonlocal snapshot_calls
+        snapshot_calls += 1
+        return [] if snapshot_calls == 1 else [reference]
+
+    monkeypatch.setattr(runtime, "execution_guard", open_guard)
+    monkeypatch.setattr(runtime.collector, "snapshot", refs_after_lookup)
+    result = await runtime.call_tool("business_propose", {
+        "actions": [{"capability": "booking.create", "arguments": arguments}],
+    })
+
+    assert guard_calls >= 2 and calls["lookup"] == 1
+    assert result.halt_status == "UNKNOWN" and result.safe_draft is None
+    assert calls["facts"] == calls["execute"] == 0 and effect_port.permit_requests == []
+
+
+@pytest.mark.integration
+async def test_fact_refusal_with_newly_retained_success_ref_remains_unknown(
+    api_client, db_session, monkeypatch,
+):
+    value, arguments, registry, calls, effect_port, _model = await install_managed_crm(
+        api_client, db_session, monkeypatch, 503, {},
+    )
+    request = ManagedTurnRequest.model_validate(value)
+    grant = next(grant for grant in get_settings().managed_principals[0].grants
+                 if grant.scope() == (value["owner_id"], UUID(value["integration_id"]),
+                                      value["channel"], UUID(value["agent_id"])))
+    runtime = await open_business_runtime(request, grant, db_session, registry, effect_port=effect_port)
+    await runtime.prompt_context()
+    reference = OperationReference(origin="AI_AGENT_SERVICE", operation_id="retained-success",
+                                   outcome="SUCCEEDED")
+    snapshot_calls = 0
+
+    async def open_guard(**_kwargs):
+        return None
+
+    def refs_at_fact_refusal():
+        nonlocal snapshot_calls
+        snapshot_calls += 1
+        return [] if snapshot_calls <= 3 else [reference]
+
+    monkeypatch.setattr(runtime, "execution_guard", open_guard)
+    monkeypatch.setattr(runtime.collector, "snapshot", refs_at_fact_refusal)
+    result = await runtime.call_tool("business_propose", {
+        "actions": [{"capability": "booking.create", "arguments": arguments}],
+    })
+
+    assert calls["lookup"] == 1 and calls["facts"] == 1 and calls["execute"] == 0
+    assert result.halt_status == "UNKNOWN" and result.safe_draft is None
+    assert effect_port.permit_requests == []
+
+
 async def install_managed_crm(api_client, db_session, monkeypatch, response_status, response_body,
-                              *, recover_after_first=False):
+                              *, recover_after_first=False, lookup_response=None,
+                              enabled_capabilities=None, allow_execute=False):
     agent = await create_agent(api_client, db_session_factory=db_session)
     value = payload(agent["id"])
     owner_id = UUID(agent["user_id"])
     configure(monkeypatch, value, owner_id)
 
     connection_id, workspace_id, grant_id = uuid4(), uuid4(), uuid4()
+    enabled_capabilities = list(enabled_capabilities or DEFAULTS)
     async with db_session() as db:
         db.add(BusinessConnection(
             id=connection_id, agent_id=UUID(agent["id"]), owner_id=owner_id,
             workspace_id=workspace_id, workspace_name="Synthetic salon",
             timezone="Europe/Minsk", grant_id=grant_id, grant_revision=1,
-            generation=1, active=True, enabled_capabilities=list(DEFAULTS),
+            generation=1, active=True, enabled_capabilities=enabled_capabilities,
         ))
         await db.commit()
 
     settings = crm_test_settings()
     registry = create_business_registry(settings, db_session)
-    calls = {"facts": 0, "execute": 0}
+    calls = {"lookup": 0, "facts": 0, "execute": 0,
+             "lookup_arguments": [], "fact_arguments": []}
     context = {
         "workspace_id": str(workspace_id), "grant_id": str(grant_id),
-        "revision": 1, "capabilities": list(DEFAULTS), "timezone": "Europe/Minsk",
+        "revision": 1, "capabilities": enabled_capabilities, "timezone": "Europe/Minsk",
     }
 
     async def handle(request):
         if request.url.path.endswith("/context"):
             return httpx.Response(200, json=context)
+        if request.url.path.endswith("/execute/customer.find"):
+            calls["lookup"] += 1
+            calls["lookup_arguments"].append(json.loads(request.content)["arguments"])
+            body = lookup_response or {"status": "OK", "data": {"match": "NONE", "candidates": []}}
+            return httpx.Response(200, json=body)
         if "/facts/" in request.url.path:
             calls["facts"] += 1
+            fact_arguments = json.loads(request.content)["arguments"]
+            calls["fact_arguments"].append(fact_arguments)
             if recover_after_first and calls["facts"] > 1:
-                arguments = json.loads(request.content)["arguments"]
+                arguments = fact_arguments
                 start = datetime.fromisoformat(arguments["start_at"].replace("Z", "+00:00"))
                 return httpx.Response(200, json={
                     "status": "OK",
@@ -82,9 +312,41 @@ async def install_managed_crm(api_client, db_session, monkeypatch, response_stat
                         },
                     },
                 })
+            if response_status == 200 and not response_body:
+                start = datetime.fromisoformat(fact_arguments["start_at"].replace("Z", "+00:00"))
+                return httpx.Response(200, json={
+                    "status": "OK",
+                    "data": {
+                        "arguments": fact_arguments,
+                        "payload_hash": "a" * 64,
+                        "facts_hash": "b" * 64,
+                        "summary": {
+                            "customer": "Влад", "service": "Окрашивание", "resource": "Анна",
+                            "start_at": start.isoformat(),
+                            "end_at": (start + timedelta(hours=1)).isoformat(),
+                            "timezone": "Europe/Minsk", "price": "50.00", "currency": "BYN",
+                        },
+                    },
+                })
             return httpx.Response(response_status, json=response_body)
         if "/execute/" in request.url.path:
             calls["execute"] += 1
+            if allow_execute and request.url.path.endswith("/execute/booking.create"):
+                body = json.loads(request.content)
+                action = body["arguments"]
+                start = datetime.fromisoformat(action["start_at"].replace("Z", "+00:00"))
+                return httpx.Response(200, json={
+                    "status": "OK", "operation_ref": "synthetic_receipt",
+                    "operation_id": body["operation"]["id"], "effect": "APPLIED",
+                    "data": {
+                        "ref": "booking_test", "customer_ref": action["customer_ref"],
+                        "offering_ref": action["offering_ref"], "resource_ref": action["resource_ref"],
+                        "offering_name": "Окрашивание", "resource_name": "Анна",
+                        "timezone": "Europe/Minsk", "start_at": start.isoformat(),
+                        "end_at": (start + timedelta(hours=1)).isoformat(),
+                        "status": "CONFIRMED", "revision": "1",
+                    },
+                })
             raise AssertionError("facts refusal must happen before provider execute")
         raise AssertionError(request.url.path)
 
@@ -145,7 +407,10 @@ async def test_managed_proposal_provider_refusal_is_recoverable_before_reservati
     async with db_session() as db:
         assert await db.scalar(select(func.count()).select_from(BusinessPlan)) == 0
         assert await db.scalar(select(func.count()).select_from(BusinessOperation)) == 0
-    assert calls == {"facts": 1, "execute": 0}
+    assert calls["lookup"] == 1 and calls["facts"] == 1 and calls["execute"] == 0
+    assert calls["lookup_arguments"] == [{
+        "limit": 10, "identity": {"kind": "PHONE", "value": "+375291112233"},
+    }]
     assert effect_port.permit_requests == []
 
 
@@ -210,7 +475,8 @@ async def test_managed_proposal_provider_refusal_with_retained_evidence_is_unkno
     async with db_session() as db:
         assert await db.scalar(select(func.count()).select_from(BusinessPlan)) == 0
         assert await db.scalar(select(func.count()).select_from(BusinessOperation)) == 0
-    assert calls == {"facts": 1, "execute": 0}
+    assert calls == {"lookup": 0, "facts": 0, "execute": 0,
+                     "lookup_arguments": [], "fact_arguments": []}
     assert effect_port.permit_requests == []
 
 
@@ -238,5 +504,6 @@ async def test_managed_proposal_rejects_extra_top_level_fields_before_provider_c
     async with db_session() as db:
         assert await db.scalar(select(func.count()).select_from(BusinessPlan)) == 0
         assert await db.scalar(select(func.count()).select_from(BusinessOperation)) == 0
-    assert calls == {"facts": 0, "execute": 0}
+    assert calls == {"lookup": 0, "facts": 0, "execute": 0,
+                     "lookup_arguments": [], "fact_arguments": []}
     assert effect_port.permit_requests == []

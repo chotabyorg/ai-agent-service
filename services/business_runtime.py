@@ -69,6 +69,10 @@ class BusinessRuntime:
         if self.scope is not None:
             await self.repository.recover_attempts(request, grant)
         self.last_gate = None
+        self._business_diagnostics_used = False
+        self._business_diagnostics_terminal = False
+        self._last_business_diagnostic = None
+        self._business_diagnostic_observations = 0
         self.business_scope_seen = self.scope is not None
         self._proposal_decision = None
         self.effect_eligible = False
@@ -92,6 +96,84 @@ class BusinessRuntime:
                 await self.repository.close_recovery_acquisition(request, grant)
                 await self.collect_refs()
         return self
+
+    def observe_business_diagnostic(self, *, stage, capability, refusal_category="NONE",
+                                    lookup_source="NOT_APPLICABLE", lookup_mode="NOT_APPLICABLE",
+                                    lookup_result="NOT_RUN", proposal_present=None,
+                                    operation_present=None):
+        """Emit a bounded observation using only closed runtime categories."""
+        try:
+            if getattr(self, "_business_diagnostic_observations", 0) >= 16:
+                return
+            request = getattr(self, "request", None)
+            turn_id = getattr(request, "turn_id", None)
+            if type(turn_id) is not UUID:
+                return
+            from core.managed_business_diagnostics import (
+                ManagedBusinessDiagnostic, refusal_category as normalize_refusal,
+            )
+            previous = getattr(self, "_last_business_diagnostic", None)
+            if previous is not None and stage in {"PROPOSAL", "TERMINAL"}:
+                if lookup_source == "NOT_APPLICABLE":
+                    lookup_source = previous.lookup_source
+                if lookup_mode == "NOT_APPLICABLE":
+                    lookup_mode = previous.lookup_mode
+                if lookup_result == "NOT_RUN":
+                    lookup_result = previous.lookup_result
+            if proposal_present is None:
+                gate = getattr(self, "last_gate", None)
+                proposal_present = bool(
+                    gate is not None and gate.plan is not None
+                    and gate.plan.proposal_state in {"PREPARED", "CONFIRMED"}
+                )
+            if operation_present is None:
+                collector = getattr(self, "collector", None)
+                operation_present = bool(collector.snapshot()) if collector is not None else False
+            diagnostic = ManagedBusinessDiagnostic(
+                turn_id=turn_id, stage=stage, capability=capability,
+                refusal_category=normalize_refusal(refusal_category), lookup_source=lookup_source,
+                lookup_mode=lookup_mode, lookup_result=lookup_result,
+                proposal_present=proposal_present, operation_present=operation_present,
+            )
+            from core.managed_business_diagnostics import emit_business_diagnostic
+            self._business_diagnostic_observations += 1
+            self._business_diagnostics_used = True
+            self._last_business_diagnostic = diagnostic
+            emit_business_diagnostic(diagnostic)
+        except Exception:
+            # Observation construction, collector inspection and logging are
+            # best-effort and must never alter the managed business result.
+            return
+
+    def finish_business_diagnostics(self, final_outcome, *, proposal_present=None,
+                                    operation_present=None):
+        """Emit at most one terminal category after managed Business work ends."""
+        try:
+            if (not getattr(self, "_business_diagnostics_used", False)
+                    or getattr(self, "_business_diagnostics_terminal", False)):
+                return
+            previous = getattr(self, "_last_business_diagnostic", None)
+            if previous is None:
+                return
+            if final_outcome not in {"DRAFT_READY", "FAILED", "UNKNOWN"}:
+                final_outcome = "UNKNOWN"
+            if proposal_present is None:
+                gate = getattr(self, "last_gate", None)
+                proposal_present = bool(
+                    gate is not None and gate.plan is not None
+                    and gate.plan.proposal_state in {"PREPARED", "CONFIRMED"}
+                )
+            if operation_present is None:
+                collector = getattr(self, "collector", None)
+                operation_present = bool(collector.snapshot()) if collector is not None else False
+            from dataclasses import replace
+            from core.managed_business_diagnostics import emit_business_diagnostic
+            terminal = replace(previous, stage="TERMINAL", proposal_present=bool(proposal_present),
+                               operation_present=bool(operation_present), final_outcome=final_outcome)
+            self._business_diagnostics_terminal = True
+            emit_business_diagnostic(terminal)
+        except Exception:
+            return
 
     async def collect_refs(self):
         try:

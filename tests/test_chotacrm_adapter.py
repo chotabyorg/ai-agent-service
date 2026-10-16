@@ -17,7 +17,6 @@ from models.agent import AgentTemplate
 from models.business import BusinessOperation, BusinessPlan
 from models.business_connection import BusinessConnection
 from services.business_registry import BusinessRegistry
-from services.business_runtime import BusinessRuntime
 from business_capabilities.chotacrm_adapter import ChotaCRMAdapter
 from business_capabilities.registration import create_business_registry
 from business_capabilities.registry import DEFAULTS, CAPABILITIES
@@ -53,6 +52,10 @@ async def setup(factory, settings):
                 revision=1, capabilities=list(DEFAULTS), timezone='Europe/Minsk'))
         if path.endswith('/execute/catalog.search'):
             return httpx.Response(200, json=dict(status='OK', data={'items':[]}))
+        if path.endswith('/execute/customer.find'):
+            arguments = json.loads(request.content)['arguments']
+            assert 'name' not in arguments
+            return httpx.Response(200, json=dict(status='OK', data={'match':'NONE','candidates':[]}))
         if '/facts/' in path:
             body = json.loads(request.content)
             return httpx.Response(200, json=dict(status='OK', data=dict(arguments=body['arguments'],
@@ -107,6 +110,13 @@ async def test_proposal_tool_instructs_preparation_before_later_confirmation(db_
     assert 'one business action' in description
     assert 'same existing customer_ref' in description
     assert 'other combinations are unsupported' in description
+    assert 'if lookup returns none' in description
+    assert 'only after confirmation' in description
+    assert 'never call customer_create first' in description
+    booking_description = tools['booking_create']['description'].lower()
+    assert 'if lookup returns none' in booking_description
+    assert 'only after confirmation' in booking_description
+    assert 'never call customer_create first' in booking_description
 
 
 @pytest.mark.asyncio
