@@ -37,8 +37,10 @@ the matching authenticated Voice request uses `completion_model`, including tool
 continuation. Shared agent templates and text-channel requests keep their model.
 Duplicate scope tuples are rejected at startup.
 
-Replacement requests use `reasoning.enabled=false`, latency sorting, the explicit
-provider allowlist and price ceilings, with `allow_fallbacks=false`. The provider
+Replacement requests use `reasoning.enabled=false` and the explicit provider
+allowlist as both `only` and `order`, with price ceilings. The first listed
+provider is preferred; `allow_fallbacks=true` lets OpenRouter fall back only to
+the later allowlisted providers under the same ceilings. Each provider
 must support non-reasoning completion and the existing tool protocol. We retain
 `parallel_tool_calls=false`; as above, `require_parameters` is not set because the
 provider catalog may omit that parameter even when tool calling is supported.

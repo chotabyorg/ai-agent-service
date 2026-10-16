@@ -95,8 +95,8 @@ async def test_sdk_wire_voice_only_then_managed_text_and_legacy_unchanged(api_cl
     assert legacy.status_code == 200
     assert len(captured) == 4
     assert captured[0]['reasoning'] == ({'enabled': False} if replacement else {'effort': 'none'})
-    assert captured[0]['provider'] == ({'sort': 'latency', 'only': ['synthetic/bf16'],
-        'allow_fallbacks': False, 'max_price': {'prompt': 0.09, 'completion': 0.30}}
+    assert captured[0]['provider'] == ({'order': ['synthetic/bf16'], 'only': ['synthetic/bf16'],
+        'allow_fallbacks': True, 'max_price': {'prompt': 0.09, 'completion': 0.30}}
         if replacement else {'sort': 'latency'})
     assert captured[0]['model'] == (selected.completion_model or agent['model_name'])
     for body in captured[1:]:

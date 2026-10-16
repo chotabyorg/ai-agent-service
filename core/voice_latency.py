@@ -40,8 +40,9 @@ class VoiceLatencyProfile(BaseModel):
     def extra_body(self):
         if self.completion_model is None:
             return {"reasoning": {"effort": "none"}, "provider": {"sort": "latency"}}
+        # Allowlist order is the preference; fallbacks stay inside "only" and the price ceilings.
         return {"reasoning": {"enabled": False}, "provider": {
-            "sort": "latency", "only": list(self.provider_only), "allow_fallbacks": False,
+            "order": list(self.provider_only), "only": list(self.provider_only), "allow_fallbacks": True,
             "max_price": {"prompt": self.max_input_price, "completion": self.max_output_price},
         }}
 
