@@ -6,13 +6,13 @@
 [{"owner_id":"example-owner","integration_id":"00000000-0000-4000-8000-000000000001","agent_id":"00000000-0000-4000-8000-000000000002","model":"example/model-with-optional-reasoning"}]
 ```
 
-Only an authenticated managed request with channel `VOICE` and the exact
+With no replacement model configured, only an authenticated managed request with channel `VOICE` and the exact
 owner/integration/agent/model tuple receives `reasoning.effort=none` and
 `provider.sort=latency`. Public/legacy requests cannot select the profile with
 their channel string. Profiles grant no authority. Changing the configured model
 disables a match until an operator validates and explicitly adds the new model.
 
-The model, prompt layers, knowledge retrieval, token limit, tool definitions,
+This default profile keeps the model, prompt layers, knowledge retrieval, token limit, tool definitions,
 confirmation gates, business receipts and Conversation contract are unchanged.
 The existing global managed reasoning-model configuration remains unchanged for
 requests outside the Voice profile. There is no retry with different model or
@@ -24,9 +24,33 @@ the exact model, native isolation/tool tests and a synthetic provider probe.
 OpenRouter documents [reasoning control](https://openrouter.ai/docs/guides/best-practices/reasoning-tokens)
 and [latency routing](https://openrouter.ai/docs/guides/routing/provider-selection).
 Latency sorting is a preference, not a response-time guarantee; it may select a
-different priced endpoint. Provider defaults for fallbacks and privacy are not
+different priced endpoint. In the default profile, provider defaults for fallbacks and privacy are not
 overridden. `require_parameters` is deliberately not set: it also filters on
 unchanged parameters such as temperature and can leave this model without a route.
+
+## Optional Voice model replacement
+
+A profile may add `completion_model`, `provider_only`, `max_input_price` and
+`max_output_price`. All four are required together; prices are ceilings in USD
+per million tokens. `model` still matches the original stored agent model. Only
+the matching authenticated Voice request uses `completion_model`, including tool
+continuation. Shared agent templates and text-channel requests keep their model.
+Duplicate scope tuples are rejected at startup.
+
+Replacement requests use `reasoning.enabled=false`, latency sorting, the explicit
+provider allowlist and price ceilings, with `allow_fallbacks=false`. The provider
+must support non-reasoning completion and the existing tool protocol. We retain
+`parallel_tool_calls=false`; as above, `require_parameters` is not set because the
+provider catalog may omit that parameter even when tool calling is supported.
+The replacement model and routing fields count toward the context byte budget.
+No prompt, history, tool authority or Conversation scheduling change is included.
+
+The MTS runtime inspected on 2026-10-16 used Nemotron ASR, Gemma 4 26B A4B on
+NextBit BF16 and Eleven Flash v2.5 / George through OpenRouter. Its old NextBit
+ceilings (0.07 input / 0.26 output) now reject requests; the inspected endpoint
+quotes 0.09 / 0.30. Activate only after an exact-route synthetic tool/continuation
+probe, with the current bounded tariff. These component probes do not prove
+audible delivery, production latency or model quality on real calls.
 
 Rollback: remove the exact profile from the deployment configuration. There is
 no agent database migration or update, and no text queue change.

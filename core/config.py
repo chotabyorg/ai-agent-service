@@ -89,6 +89,10 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_managed_reasoning_transport(self) -> "Settings":
+        scopes = [(p.owner_id, p.integration_id, p.agent_id, p.model)
+                  for p in self.managed_voice_latency_profiles]
+        if len(scopes) != len(set(scopes)):
+            raise RuntimeError("Duplicate managed Voice profile scope")
         if self.managed_openrouter_disable_reasoning_models or self.managed_voice_latency_profiles:
             if (self.privacy_filter_enabled
                     or self.llm_base_url.rstrip('/') != 'https://openrouter.ai/api/v1'):
