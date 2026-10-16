@@ -55,6 +55,29 @@ audible delivery, production latency or model quality on real calls.
 Rollback: remove the exact profile from the deployment configuration. There is
 no agent database migration or update, and no text queue change.
 
+## Optional signing material reuse
+
+`reuse_signing_key: true` reuses the validated RSA private-key object inside one
+matching authenticated Voice Turn. It is off by default. The request-owned
+scope clears on normal completion, failure and cancellation. A different owner
+cannot reuse it; changing the PEM revalidates it and an invalid replacement does
+not fall back. Every CRM request still receives a fresh assertion with its own
+scope, claims, 45-second expiry and unique `jti`. Authorization, grant reads,
+Business guards, HTTP ownership and result freshness remain unchanged. No token,
+grant, tool result or availability is cached. Text channels retain their prior
+path.
+
+On the live host, three synthetic comparisons of four signatures measured
+522–539 ms without reuse and 128–155 ms with reuse (including the first parse).
+These measurements send no CRM requests and do not establish end-to-end latency.
+
+Matching Voice profiles also emit finite `voice_phase_timing` diagnostics:
+`PREPARE` before the first model request, `MODEL` for each completion and `TOOL`
+for each tool execution. Records contain only Turn UUID, step, phase, elapsed
+milliseconds and a code-owned tool-name enum. Arguments, results and caller text
+never enter these records. Text requests do not emit them. Timing observation
+does not grant authority or alter the result.
+
 ## Native verification
 
 Tests can use an explicitly disposable PostgreSQL database on localhost with a

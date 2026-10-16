@@ -550,6 +550,14 @@ class LLMService:
                         self._check_managed_envelope(agent, messages, openai_tools,
                                                      tool_choice=tool_choice, request=managed_request)
                     model_extra_body = self._managed_model_extra_body(agent, request=managed_request) if runtime else {}
+                    voice_profile = self._managed_voice_profile(agent, request=managed_request) if runtime else None
+                    if voice_profile is not None:
+                        import time
+                        from core.voice_latency_diagnostics import VoiceTiming, emit_voice_timing
+                        model_started = time.monotonic()
+                        if step_index == 0:
+                            emit_voice_timing(VoiceTiming(runtime.request.turn_id, 0, "PREPARE",
+                                round((model_started - getattr(runtime, "voice_started_at", model_started)) * 1000)))
                     pending_response = llm_client.chat.completions.create(
                         model=(self._managed_model(agent, request=managed_request) if runtime
                                else agent.model_name or self.settings.llm_default_model),
@@ -563,6 +571,9 @@ class LLMService:
                         extra_headers=self._build_extra_headers(),
                     )
                     response = await runtime.operation(pending_response) if runtime else await pending_response
+                    if voice_profile is not None:
+                        emit_voice_timing(VoiceTiming(runtime.request.turn_id, step_index + 1, "MODEL",
+                            round((time.monotonic() - model_started) * 1000)))
                 except AuthenticationError:
                     await self._deactivate_agent(agent, db_session, "OpenRouter API key invalid or revoked", runtime=runtime)
                     if runtime:
@@ -724,6 +735,8 @@ class LLMService:
                             raise ManagedExecutionError("TOOL_SETUP_FAILED")
                         func_args = parse_managed_tool_arguments(func_args_str)
                         from schemas.business import BusinessSafetyError
+                        if voice_profile is not None:
+                            tool_started = time.monotonic()
                         try:
                             business_result = await runtime.operation(
                                 runtime.business.call_tool(func_name, func_args))
@@ -731,6 +744,10 @@ class LLMService:
                             raise ManagedExecutionError("TOOL_EXECUTION_UNKNOWN"
                                 if exc.processing_status == "UNKNOWN" else "TOOL_SETUP_FAILED",
                                 processing_status=exc.processing_status) from None
+                        finally:
+                            if voice_profile is not None:
+                                emit_voice_timing(VoiceTiming(runtime.request.turn_id, step_index + 1, "TOOL",
+                                    round((time.monotonic() - tool_started) * 1000), func_name))
                         if business_result.halt_status:
                             raise ManagedExecutionError(business_result.error_code,
                                 processing_status=business_result.halt_status)

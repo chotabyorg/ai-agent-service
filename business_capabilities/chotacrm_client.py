@@ -23,15 +23,21 @@ class ChotaCRMClient:
         self.settings = settings
         self.transport = transport
 
-    def assertion(self, scope: str, claims: dict) -> str:
+    @staticmethod
+    def _validated_key(pem):
+        key = serialization.load_pem_private_key(pem.encode(), password=None)
+        if not isinstance(key, rsa.RSAPrivateKey) or key.key_size < 2048:
+            raise ValueError('Invalid signing key')
+        return key
+
+    def assertion(self, scope: str, claims: dict, *, execution=None) -> str:
         pem = self.settings.business_crm_private_key.get_secret_value()
         kid = self.settings.business_crm_key_id
         if not pem or not kid:
             raise BusinessRuntimeError('PROVIDER_UNAVAILABLE')
         try:
-            key = serialization.load_pem_private_key(pem.encode(), password=None)
-            if not isinstance(key, rsa.RSAPrivateKey) or key.key_size < 2048:
-                raise ValueError('Invalid signing key')
+            from services.voice_signing import signing_key
+            key = signing_key(execution, pem, self._validated_key)
             now = int(time.time())
             header = _b64(json.dumps({'alg': 'RS256', 'typ': 'JWT', 'kid': kid}, separators=(',', ':')).encode())
             payload = _b64(json.dumps({'iss': 'ai-agent-service', 'aud': 'chota-crm-agent', 'iat': now,
@@ -45,7 +51,7 @@ class ChotaCRMClient:
     async def request(self, method, path, *, scope, claims, body=None, cookie=None, execution=None):
         if not self.settings.business_capabilities_enabled:
             raise BusinessRuntimeError('PROVIDER_UNAVAILABLE')
-        headers = {'Authorization': 'Bearer ' + self.assertion(scope, claims)}
+        headers = {'Authorization': 'Bearer ' + self.assertion(scope, claims, execution=execution)}
         if cookie is not None:
             # Configuration only; no cookies are retained in model/connection/runtime state.
             headers['Cookie'] = cookie

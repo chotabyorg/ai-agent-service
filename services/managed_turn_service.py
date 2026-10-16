@@ -1,6 +1,7 @@
 """Managed adapter: explicit canonical projection, no Session or Redis access."""
 
 import asyncio
+import time
 from contextlib import asynccontextmanager
 
 import anyio
@@ -70,6 +71,7 @@ async def execute_managed_owned(request, grant, runtime, db_provider, session_fa
     from services.business_repository import BusinessRepository
     from services.business_runtime import BusinessRuntime, CommittedReferenceCollector
 
+    runtime.voice_started_at = time.monotonic()
     collector = CommittedReferenceCollector()
     runtime.collector = collector
     retained_repository = BusinessRepository(session_factory)
@@ -117,6 +119,10 @@ async def execute_managed_owned(request, grant, runtime, db_provider, session_fa
                 raise ManagedAgentNotFound
             if not agent.is_active:
                 raise ManagedExecutionError("AGENT_INACTIVE")
+            profile = service._managed_voice_profile(agent, request=request)
+            if profile is not None and profile.reuse_signing_key:
+                from services.voice_signing import voice_signing_scope
+                runtime.stack.enter_context(voice_signing_scope(runtime))
             try:
                 key = service._get_agent_api_key(agent)
             except Exception:
