@@ -18,8 +18,10 @@ from tests.test_managed_business_fakes import install_business, plan_arguments
 from tests.test_managed_turns import configure, execute, model, payload, setup
 
 
-def profile(value, model):
-    return VoiceLatencyProfile(**{k: value[k] for k in ("owner_id", "integration_id", "agent_id")}, model=model)
+def profile(value, model, replacement=False):
+    options = dict(completion_model="synthetic/voice-model", provider_only=["synthetic/bf16"],
+                   max_input_price=0.09, max_output_price=0.30) if replacement else {}
+    return VoiceLatencyProfile(**{k: value[k] for k in ("owner_id", "integration_id", "agent_id")}, model=model, **options)
 
 
 @pytest.mark.parametrize("channel", ["TELEGRAM", "WEBSITE_WIDGET", "INSTAGRAM", "WHATSAPP"])
@@ -51,7 +53,8 @@ def test_profile_rejects_incompatible_transport(overrides):
         Settings(_env_file=None, managed_voice_latency_profiles=[profile(payload(), "synthetic/model")], **overrides)
 
 
-def test_profile_fields_are_counted_before_provider_dispatch():
+@pytest.mark.parametrize("replacement", [False, True])
+def test_profile_fields_are_counted_before_provider_dispatch(replacement):
     value = payload(channel="VOICE")
     request = ManagedTurnRequest.model_validate(value)
     service = LLMService()
@@ -61,15 +64,17 @@ def test_profile_fields_are_counted_before_provider_dispatch():
     size = len(json.dumps(service._managed_envelope(agent, messages, [])).encode())
     messages[0]["content"] = "x" * (1024 - size)
     service._check_managed_envelope(agent, messages, [], request=request)
-    service.settings.managed_voice_latency_profiles = [profile(value, agent.model_name)]
+    service.settings.managed_voice_latency_profiles = [profile(value, agent.model_name, replacement)]
     with pytest.raises(ManagedExecutionError, match="CONTEXT_LIMIT"):
         service._check_managed_envelope(agent, messages, [], request=request)
 
 
 @pytest.mark.asyncio
-async def test_sdk_wire_voice_only_then_managed_text_and_legacy_unchanged(api_client, db_session, monkeypatch):
+@pytest.mark.parametrize("replacement", [False, True])
+async def test_sdk_wire_voice_only_then_managed_text_and_legacy_unchanged(api_client, db_session, monkeypatch, replacement):
     agent, value = await setup(api_client, db_session, monkeypatch, channel="VOICE")
-    monkeypatch.setattr(get_settings(), "managed_voice_latency_profiles", [profile(value, agent['model_name'])])
+    selected = profile(value, agent['model_name'], replacement)
+    monkeypatch.setattr(get_settings(), "managed_voice_latency_profiles", [selected])
     captured = []
     def create_client(**kwargs):
         def respond(request):
@@ -89,19 +94,24 @@ async def test_sdk_wire_voice_only_then_managed_text_and_legacy_unchanged(api_cl
         'agent_id': agent['id'], 'external_client_id': 'legacy-voice', 'channel': 'voice', 'message': 'Hello'})
     assert legacy.status_code == 200
     assert len(captured) == 4
-    assert captured[0]['reasoning'] == {'effort': 'none'}
-    assert captured[0]['provider'] == {'sort': 'latency'}
+    assert captured[0]['reasoning'] == ({'enabled': False} if replacement else {'effort': 'none'})
+    assert captured[0]['provider'] == ({'sort': 'latency', 'only': ['synthetic/bf16'],
+        'allow_fallbacks': False, 'max_price': {'prompt': 0.09, 'completion': 0.30}}
+        if replacement else {'sort': 'latency'})
+    assert captured[0]['model'] == (selected.completion_model or agent['model_name'])
     for body in captured[1:]:
         assert 'reasoning' not in body and 'provider' not in body
+        assert body['model'] == agent['model_name']
     for body in captured:
-        assert body['model'] == agent['model_name'] and body['temperature'] == 0.4
+        assert body['temperature'] == 0.4
         assert body['max_tokens'] == 1024 and body['parallel_tool_calls'] is False
 
 
 @pytest.mark.asyncio
-async def test_voice_profile_cannot_bypass_booking_confirmation(api_client, db_session, monkeypatch, model):
+@pytest.mark.parametrize("replacement", [False, True])
+async def test_voice_profile_cannot_bypass_booking_confirmation(api_client, db_session, monkeypatch, model, replacement):
     agent, value = await setup(api_client, db_session, monkeypatch, channel="VOICE")
-    monkeypatch.setattr(get_settings(), "managed_voice_latency_profiles", [profile(value, agent['model_name'])])
+    monkeypatch.setattr(get_settings(), "managed_voice_latency_profiles", [profile(value, agent['model_name'], replacement)])
     authority = await install_business(monkeypatch, value, db_session, confirmation=True)
     model.chat.completions.queue(build_llm_response(tool_calls=[build_tool_call(
         tool_id="voice-prepare", name="business_execute_plan", arguments=plan_arguments())]))
@@ -110,13 +120,15 @@ async def test_voice_profile_cannot_bypass_booking_confirmation(api_client, db_s
     assert authority.commands == []
     assert len(result['operation_refs']) == 1 and result['operation_refs'][0]['outcome'] is None
     assert len(model.chat.completions.calls) == 1
-    assert model.chat.completions.calls[0]['extra_body']['reasoning'] == {'effort': 'none'}
+    assert model.chat.completions.calls[0]['extra_body']['reasoning'] == ({'enabled': False} if replacement else {'effort': 'none'})
+    assert model.chat.completions.calls[0]['model'] == ('synthetic/voice-model' if replacement else agent['model_name'])
 
 
 @pytest.mark.asyncio
-async def test_failed_profile_request_never_retries_with_text_defaults(api_client, db_session, monkeypatch):
+@pytest.mark.parametrize("replacement", [False, True])
+async def test_failed_profile_request_never_retries_with_text_defaults(api_client, db_session, monkeypatch, replacement):
     agent, value = await setup(api_client, db_session, monkeypatch, channel="VOICE")
-    monkeypatch.setattr(get_settings(), "managed_voice_latency_profiles", [profile(value, agent['model_name'])])
+    monkeypatch.setattr(get_settings(), "managed_voice_latency_profiles", [profile(value, agent['model_name'], replacement)])
     calls = []
     def create_client(**kwargs):
         def respond(request):
@@ -127,3 +139,58 @@ async def test_failed_profile_request_never_retries_with_text_defaults(api_clien
     result = (await execute(api_client, value)).json()
     assert result['status'] == 'FAILED' and result['draft_text'] is None
     assert len(calls) == 1
+    assert calls[0]['model'] == ('synthetic/voice-model' if replacement else agent['model_name'])
+
+
+@pytest.mark.parametrize("field", ["owner_id", "integration_id", "agent_id", "model", "channel"])
+def test_model_replacement_is_confined_to_exact_authenticated_voice_scope(field):
+    value = payload(channel="VOICE")
+    selected = profile(value, "original/model", True)
+    service = LLMService()
+    service.settings = Settings(_env_file=None, managed_voice_latency_profiles=[selected])
+    agent = SimpleNamespace(model_name="original/model", temperature=0.4)
+    if field == "model":
+        agent.model_name = "other/model"
+    else:
+        value[field] = "TELEGRAM" if field == "channel" else str(uuid4())
+    request = ManagedTurnRequest.model_validate(value)
+    envelope = service._managed_envelope(agent, [], [], request=request)
+    assert envelope['model'] == agent.model_name and 'provider' not in envelope
+    assert service._managed_model(agent) == agent.model_name
+
+
+@pytest.mark.parametrize("changes", [
+    {'provider_only': []}, {'provider_only': ['x', 'x']}, {'provider_only': ['x?api_key=bad']},
+    {'max_input_price': None}, {'max_output_price': None}, {'max_output_price': float('inf')},
+    {'max_input_price': -1}, {'completion_model': 'x\nmodel'}, {'completion_model': None},
+])
+def test_replacement_requires_bounded_explicit_route(changes):
+    data = profile(payload(channel="VOICE"), 'original/model', True).model_dump()
+    data.update(changes)
+    with pytest.raises(ValueError):
+        VoiceLatencyProfile.model_validate(data)
+
+
+def test_duplicate_profile_scope_rejected():
+    selected = profile(payload(channel="VOICE"), 'original/model', True)
+    with pytest.raises(RuntimeError, match='Duplicate managed Voice profile scope'):
+        Settings(_env_file=None, managed_voice_latency_profiles=[selected, selected])
+
+
+@pytest.mark.asyncio
+async def test_replacement_persists_through_tool_continuation(api_client, db_session, monkeypatch, model):
+    agent, value = await setup(api_client, db_session, monkeypatch, channel="VOICE")
+    monkeypatch.setattr(get_settings(), "managed_voice_latency_profiles", [profile(value, agent['model_name'], True)])
+    authority = await install_business(monkeypatch, value, db_session, confirmation=False)
+    model.chat.completions.queue(
+        build_llm_response(tool_calls=[build_tool_call('voice-tool', 'business_execute_plan', plan_arguments())]),
+        build_llm_response(content='Completed synthetic tool result.'),
+    )
+    result = (await execute(api_client, value)).json()
+    assert result['status'] == 'DRAFT_READY'
+    assert len(authority.commands) == 1
+    assert len(model.chat.completions.calls) == 2
+    for call in model.chat.completions.calls:
+        assert call['model'] == 'synthetic/voice-model'
+        assert call['extra_body']['provider']['only'] == ['synthetic/bf16']
+        assert call['parallel_tool_calls'] is False

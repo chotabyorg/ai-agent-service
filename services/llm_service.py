@@ -551,7 +551,8 @@ class LLMService:
                                                      tool_choice=tool_choice, request=managed_request)
                     model_extra_body = self._managed_model_extra_body(agent, request=managed_request) if runtime else {}
                     pending_response = llm_client.chat.completions.create(
-                        model=agent.model_name or self.settings.llm_default_model,
+                        model=(self._managed_model(agent, request=managed_request) if runtime
+                               else agent.model_name or self.settings.llm_default_model),
                         temperature=agent.temperature,
                         max_tokens=self.settings.llm_max_tokens,
                         messages=messages,
@@ -846,16 +847,27 @@ class LLMService:
             raise ManagedExecutionError("MODEL_ERROR")
         raise ChatProcessingError("Maximum number of LLM tool steps reached.")
 
-    def _managed_model_extra_body(self, agent, *, request=None):
+    def _managed_voice_profile(self, agent, *, request=None):
         model = agent.model_name or self.settings.llm_default_model
-        if any(profile.matches(request, model) for profile in self.settings.managed_voice_latency_profiles):
-            return {"reasoning": {"effort": "none"}, "provider": {"sort": "latency"}}
+        return next((profile for profile in self.settings.managed_voice_latency_profiles
+                     if profile.matches(request, model)), None)
+
+    def _managed_model(self, agent, *, request=None):
+        profile = self._managed_voice_profile(agent, request=request)
+        return (profile.completion_model if profile and profile.completion_model
+                else agent.model_name or self.settings.llm_default_model)
+
+    def _managed_model_extra_body(self, agent, *, request=None):
+        profile = self._managed_voice_profile(agent, request=request)
+        if profile:
+            return profile.extra_body()
+        model = agent.model_name or self.settings.llm_default_model
         if model in self.settings.managed_openrouter_disable_reasoning_models:
             return {"reasoning": {"enabled": False}}
         return {}
 
     def _managed_envelope(self, agent, messages, tools, *, tool_choice=None, request=None):
-        envelope = {"model": agent.model_name or self.settings.llm_default_model,
+        envelope = {"model": self._managed_model(agent, request=request),
                 "temperature": agent.temperature, "max_tokens": self.settings.llm_max_tokens,
                 "messages": messages, "tools": tools or None, "parallel_tool_calls": False}
         if tool_choice is not None:
