@@ -1,4 +1,5 @@
 """Voice-only signing reuse and bounded phase timings; native test database."""
+import asyncio
 import base64
 import json
 import logging
@@ -156,7 +157,42 @@ async def test_managed_activation_is_exact_voice_only_and_cleanup_owned(
     assert len(counts) == expected and _current.get() is None
     assert all(entry is None or entry == {} for entry in entries)
     timings = [r for r in caplog.records if getattr(r, "event", None) == "voice_phase_timing"]
-    assert [r.phase for r in timings] == (["PREPARE", "MODEL", "TOOL", "MODEL"] if channel == "VOICE" else [])
+    assert [r.phase for r in timings] == (
+        ["SETUP", "BUSINESS", "CONTEXT", "KNOWLEDGE", "PREPARE", "MODEL", "TOOL", "MODEL"]
+        if channel == "VOICE" else [])
+    elapsed = [r.elapsed_ms for r in timings[:5]]
+    assert elapsed == sorted(elapsed)
+
+
+@pytest.mark.asyncio
+async def test_model_connection_warmup_reuses_one_owned_pool_connection():
+    from openai import AsyncOpenAI
+    from services.managed_turn_service import _join_warmup, _warm_model_connection
+    seen = []
+    def handle(request):
+        seen.append((request.method, request.url.path, request.headers["Authorization"]))
+        return httpx.Response(200, json={"data": {}})
+    client = AsyncOpenAI(base_url="https://synthetic.invalid/api/v1", api_key="synthetic-key",
+                         http_client=httpx.AsyncClient(transport=httpx.MockTransport(handle)))
+    task = asyncio.create_task(_warm_model_connection(client))
+    await asyncio.wait({task}, timeout=1)
+    await _join_warmup(task)
+    assert seen == [("GET", "/api/v1/key", "Bearer synthetic-key")]
+
+    def fail(request):
+        raise httpx.ConnectError("synthetic")
+    broken = AsyncOpenAI(base_url="https://synthetic.invalid/api/v1", api_key="synthetic-key",
+                         http_client=httpx.AsyncClient(transport=httpx.MockTransport(fail)))
+    await _warm_model_connection(broken)
+
+    async def hang(request):
+        await asyncio.sleep(30)
+    stuck = AsyncOpenAI(base_url="https://synthetic.invalid/api/v1", api_key="synthetic-key",
+                        http_client=httpx.AsyncClient(transport=httpx.MockTransport(hang)))
+    pending = asyncio.create_task(_warm_model_connection(stuck))
+    await asyncio.sleep(0)
+    await asyncio.wait_for(_join_warmup(pending), 1)
+    assert pending.done()
 
 
 @pytest.mark.parametrize("changes", [

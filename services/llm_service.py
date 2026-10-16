@@ -1,5 +1,6 @@
 """LLM orchestration service with DB, Redis and MCP integration."""
 
+import asyncio
 import json
 import logging
 import re
@@ -446,6 +447,9 @@ class LLMService:
             agent, chat_context, runtime_context=prompt_context,
         )
         voice_profile = self._managed_voice_profile(agent, request=managed_request) if runtime else None
+        if voice_profile is not None:
+            from core.voice_latency_diagnostics import emit_voice_checkpoint
+            emit_voice_checkpoint(runtime, "CONTEXT")
         if voice_profile is not None and voice_profile.concise_speech:
             from services.voice_reply_style import CONCISE_SPEECH
             system_prompt += "\n\n" + CONCISE_SPEECH
@@ -454,6 +458,8 @@ class LLMService:
             query=query,
             **({"runtime": runtime} if runtime else {}),
         )
+        if voice_profile is not None:
+            emit_voice_checkpoint(runtime, "KNOWLEDGE")
 
         messages: list[dict[str, object]] = [
             {"role": "system", "content": system_prompt},
@@ -560,6 +566,10 @@ class LLMService:
                     if voice_profile is not None:
                         import time
                         from core.voice_latency_diagnostics import VoiceTiming, emit_voice_timing
+                        warmup = getattr(runtime, "model_warmup", None)
+                        if step_index == 0 and warmup is not None and not warmup.done():
+                            # Reusing a nearly-open connection beats starting a second handshake.
+                            await runtime.operation(asyncio.wait({warmup}, timeout=1.0))
                         model_started = time.monotonic()
                         if step_index == 0:
                             emit_voice_timing(VoiceTiming(runtime.request.turn_id, 0, "PREPARE",
