@@ -71,6 +71,22 @@ async def test_raw_sse_text_is_parsed():
     assert selected.answer == "Hi!"
 
 
+async def test_non_awaitable_stream_is_consumed_directly():
+    def create(**kwargs):
+        assert kwargs.get("stream") is True
+
+        async def generate():
+            yield chunk(text="direct")
+            yield chunk(finish="stop")
+
+        return generate()
+
+    result, partials = await collect(create)
+    assert partials == ["direct"]
+    selected = select_managed_completion(result, lambda text: text.strip())
+    assert selected.answer == "direct"
+
+
 async def test_buffered_answer_returns_unchanged_without_partials():
     sentinel = build_llm_response(content="full answer")
 

@@ -11,6 +11,7 @@ retries, falls back to another model, or logs content.
 
 from __future__ import annotations
 
+import inspect
 from collections.abc import AsyncIterator, Awaitable, Callable
 from types import SimpleNamespace
 from typing import Any
@@ -133,16 +134,20 @@ async def stream_completion(
 ) -> Any:
     """Assemble one completion while forwarding cumulative text partials.
 
-    Calls create() with stream enabled. Text deltas invoke on_text() with the
-    cumulative text so far; the first tool-call delta stops partial emission
-    and the remainder is buffered for the assembled full result. Returns a
-    namespace shaped like a buffered completion for the existing validation.
-    Raises ValueError on malformed chunks or exceeded bounds; provider errors
-    from create() propagate unchanged.
+    Calls create() with stream enabled. Awaitable results are awaited; async
+    iterables are consumed directly, so both buffered clients and OpenAI-style
+    streaming clients work. Text deltas invoke on_text() with the cumulative
+    text so far; the first tool-call delta stops partial emission and the
+    remainder is buffered for the assembled full result. Returns a namespace
+    shaped like a buffered completion for the existing validation. Raises
+    ValueError on malformed chunks or exceeded bounds; provider errors from
+    create() propagate unchanged.
     """
     if not 1 <= max_chars <= 65536 or not 1 <= max_chunks <= 65536:
         raise ValueError("Invalid streaming bounds")
-    result = await create(**request_kwargs, stream=True)
+    result = create(**request_kwargs, stream=True)
+    if inspect.isawaitable(result):
+        result = await result
     if _get(result, "choices") is not None:
         return result
     text_parts: list[str] = []
