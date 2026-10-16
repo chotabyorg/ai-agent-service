@@ -26,11 +26,17 @@ needed for SSE. Not wired into any caller yet.
 ## Hop 2: managed turn request/response (proposed)
 
 - `ManagedTurnRequest` gains explicit opt-in: `stream_partials: bool = False`
-  plus bounded `max_partial_chars`. Default off: byte-identical behavior.
-- `ManagedTurnResult` gains `partial_text: str | None` (cumulative,
-  sentence-aligned by the producer: only complete sentences, never a torn
-  sentence) and `partial_final: bool`. Full `draft_text` semantics unchanged;
-  partials never substitute the final text in transcripts or receipts.
+  (requires contract version 2) plus bounded `max_partial_chars`. Default
+  off: byte-identical behavior.
+- Streaming responses are server-sent events: interim
+  `{"partial_text": <new complete sentence>, "partial_final": false}` events
+  followed by one final event carrying the complete validated
+  `ManagedTurnResult` with `partial_final: true`. Full `draft_text`
+  semantics unchanged; partials never substitute the final text in
+  transcripts or receipts. A revised, failed or tool-continued turn ends
+  partial emission; the final event stays authoritative and always closes
+  the stream. Sentence splitting is a documented heuristic (terminal mark +
+  whitespace + uppercase); decimals never split.
 - `_execute_core` accepts an optional partial hook and uses
   `stream_completion()` only when set; tool activity suppresses partials.
 

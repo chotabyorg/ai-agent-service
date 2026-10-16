@@ -124,6 +124,62 @@ async def _chunks(source: Any) -> AsyncIterator[Any]:
     raise ValueError("Streaming completion source is not iterable")
 
 
+class SentenceAccumulator:
+    """Collects newly completed sentences from cumulative streamed text.
+
+    A sentence completes at a terminal mark (. ! ? …) followed by whitespace
+    and an uppercase letter. This is a heuristic, not a linguistic parser:
+    decimals never match, while abbreviations before a capital (such as
+    "ул. Ленина") may split early; the voice layer applies the same class of
+    heuristic when fragmenting speech. If streamed text ever revises already
+    emitted content instead of extending it, emission freezes and the final
+    result stays authoritative.
+    """
+
+    def __init__(self, *, max_chars: int = MAX_STREAM_CHARS) -> None:
+        if not 1 <= max_chars <= 65536:
+            raise ValueError("Invalid streaming bounds")
+        self._max_chars = max_chars
+        self._emitted = ""
+        self._frozen = False
+
+    @property
+    def emitted(self) -> str:
+        return self._emitted
+
+    def feed(self, cumulative: str) -> list[str]:
+        """Return newly completed sentences; empty list while incomplete."""
+        if not isinstance(cumulative, str):
+            raise ValueError("Cumulative partial text is not a string")
+        if len(cumulative) > self._max_chars:
+            raise StreamLimitExceeded("Streaming completion exceeded text bound")
+        if self._frozen or not cumulative.startswith(self._emitted):
+            self._frozen = True
+            return []
+        fresh = cumulative[len(self._emitted) :]
+        sentences: list[str] = []
+        start = 0
+        index = 0
+        while index < len(fresh):
+            if fresh[index] in ".!?…":
+                end = index + 1
+                while end < len(fresh) and fresh[end] in ".!?…":
+                    end += 1
+                if end < len(fresh) and fresh[end] in (" ", "\t", "\n", "\r"):
+                    look = end + 1
+                    while look < len(fresh) and fresh[look] in (" ", "\t", "\n", "\r"):
+                        look += 1
+                    if look < len(fresh) and fresh[look].isupper():
+                        sentences.append(fresh[start:look])
+                        start = look
+                        index = look
+                        continue
+            index += 1
+        if sentences:
+            self._emitted += "".join(sentences)
+        return sentences
+
+
 async def complete_with_partials(
     create: Callable[..., Awaitable[Any]],
     request_kwargs: dict[str, Any],

@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 from services.managed_completion import select_managed_completion
 from services.managed_streaming import (
+    SentenceAccumulator,
     StreamLimitExceeded,
     complete_with_partials,
     stream_completion,
@@ -206,3 +207,88 @@ async def test_helper_with_hook_streams_partials_and_final():
     assert partials == ["nine", "nine plus ten"]
     selected = select_managed_completion(result, lambda text: text.strip())
     assert selected.answer == "nine plus ten"
+
+
+def test_accumulator_emits_only_completed_sentences():
+    acc = SentenceAccumulator()
+    assert acc.feed("Hel") == []
+    assert acc.feed("Hello. W") == ["Hello. "]
+    assert acc.emitted == "Hello. "
+    assert acc.feed("Hello. World") == []
+    assert acc.feed("Hello. World. Done") == ["World. "]
+
+
+def test_accumulator_ignores_decimals_but_documents_abbreviation_risk():
+    acc = SentenceAccumulator()
+    assert acc.feed("Price 10.30 rub") == []
+    assert acc.feed("Price 10.30 rubles. Thanks") == ["Price 10.30 rubles. "]
+
+
+def test_accumulator_freezes_on_revision_and_bounds_input():
+    acc = SentenceAccumulator()
+    assert acc.feed("Hello. World") == ["Hello. "]
+    assert acc.feed("Hi. World") == []
+    assert acc.feed("Hi. World. Again") == []
+    with pytest.raises(StreamLimitExceeded):
+        SentenceAccumulator(max_chars=4).feed("Hello. World")
+    with pytest.raises(ValueError, match="not a string"):
+        acc.feed(None)
+
+
+def test_streaming_request_contract_defaults_and_version_gate():
+    from schemas.managed_turn import ManagedTurnRequest
+
+    base = {
+        "conversation_id": "00000000-0000-4000-8000-000000000001",
+        "turn_id": "00000000-0000-4000-8000-000000000002",
+        "owner_id": "owner",
+        "integration_id": "00000000-0000-4000-8000-000000000003",
+        "agent_id": "00000000-0000-4000-8000-000000000004",
+        "channel": "VOICE",
+        "input_revision": 1,
+        "authority_revision": 0,
+        "input_first_sequence": 1,
+        "input_last_sequence": 1,
+        "context_last_sequence": 1,
+        "messages": [
+            {
+                "id": "00000000-0000-4000-8000-000000000005",
+                "sequence": 1,
+                "actor": "CUSTOMER",
+                "direction": "INBOUND",
+                "content_type": "TEXT",
+                "text": "hi",
+            }
+        ],
+        "selected_input_message_ids": ["00000000-0000-4000-8000-000000000005"],
+    }
+    plain = ManagedTurnRequest(**base)
+    assert plain.stream_partials is False and plain.max_partial_chars == 2000
+    assert plain.contract_version == 1
+    with pytest.raises(ValueError, match="contract version 2"):
+        ManagedTurnRequest(**{**base, "stream_partials": True})
+    streamed = ManagedTurnRequest(
+        **{**base, "contract_version": 2, "stream_partials": True, "max_partial_chars": 50}
+    )
+    assert streamed.stream_partials is True and streamed.max_partial_chars == 50
+
+
+def test_partial_result_fields_validate_text_and_shape():
+    from schemas.managed_turn import ManagedTurnResult
+
+    base = {
+        "conversation_id": "00000000-0000-4000-8000-000000000001",
+        "turn_id": "00000000-0000-4000-8000-000000000002",
+        "agent_id": "00000000-0000-4000-8000-000000000004",
+        "input_revision": 1,
+        "authority_revision": 0,
+        "input_first_sequence": 1,
+        "input_last_sequence": 1,
+        "context_last_sequence": 1,
+        "status": "DRAFT_READY",
+        "draft_text": "Hello there.",
+        "error_code": None,
+    }
+    result = ManagedTurnResult(**base)
+    assert result.partial_text is None and result.partial_final is False
+    assert ManagedTurnResult(**{**base, "partial_text": "Hello."}).partial_text == "Hello."

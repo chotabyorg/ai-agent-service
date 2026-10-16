@@ -1,9 +1,10 @@
 """Internal, independently authenticated AgentTurn execution; no delivery."""
 
 import asyncio
+import json
 
 from fastapi import APIRouter, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 
 from api.dependencies import get_db
 from core.config import get_settings
@@ -11,6 +12,7 @@ from core.managed_boundary import boundary_error
 from schemas.managed_turn import ManagedTurnRequest, ManagedTurnResult
 from schemas.managed_evidence import ManagedEvidenceRequest, ManagedEvidenceResult
 from services.managed_runtime import ManagedRuntime, join_owner
+from services.managed_streaming import SentenceAccumulator
 from services.managed_turn_service import ManagedAgentNotFound, execute_managed_owned
 
 router = APIRouter()
@@ -64,6 +66,77 @@ def _business_dependency(request, dependency):
     return request.app.dependency_overrides.get(dependency, dependency)(request)
 
 
+def _sse_event(payload):
+    return ("data: " + json.dumps(payload, ensure_ascii=False) + "\n\n").encode("utf-8")
+
+
+async def _stream_managed_turn(value, grant, runtime, provider, factory, registry):
+    """Forward sentence-aligned partials, then the authoritative final result.
+
+    Partial sentences are advisory: only the final event carries the
+    validated turn outcome. A revised, failed or tool-continued turn ends
+    partial emission; the final event stays authoritative and always closes
+    the stream. Client disconnect cancels execution through the runtime.
+    """
+
+    accumulator = SentenceAccumulator(max_chars=value.max_partial_chars)
+    pending: asyncio.Queue[str] = asyncio.Queue(maxsize=32)
+
+    async def hook(cumulative):
+        for sentence in accumulator.feed(cumulative):
+            try:
+                pending.put_nowait(sentence)
+            except asyncio.QueueFull:
+                pass
+
+    task = asyncio.create_task(
+        execute_managed_owned(
+            value, grant, runtime, provider, factory, registry, partial_hook=hook
+        ),
+        name="managed-turn-stream-owner",
+    )
+    try:
+        while not task.done():
+            try:
+                sentence = await asyncio.wait_for(pending.get(), timeout=0.05)
+            except TimeoutError:
+                continue
+            yield _sse_event({"partial_text": sentence, "partial_final": False})
+        while not pending.empty():
+            yield _sse_event({"partial_text": pending.get_nowait(), "partial_final": False})
+        result = task.result()
+    except asyncio.CancelledError:
+        task.cancel()
+        runtime.signal_cancel()
+        try:
+            task.result()
+        except BaseException:
+            pass
+        raise
+    except ManagedAgentNotFound:
+        result = None
+    except Exception:
+        result = None
+    if result is None:
+        result = ManagedTurnResult(
+            contract_version=value.contract_version,
+            conversation_id=value.conversation_id,
+            turn_id=value.turn_id,
+            agent_id=value.agent_id,
+            input_revision=value.input_revision,
+            authority_revision=value.authority_revision,
+            input_first_sequence=value.input_first_sequence,
+            input_last_sequence=value.input_last_sequence,
+            context_last_sequence=value.context_last_sequence,
+            status="UNKNOWN",
+            draft_text=None,
+            error_code="INTERNAL_ERROR",
+        )
+    final = result.model_dump(mode="json")
+    final["partial_final"] = True
+    yield _sse_event(ManagedTurnResult.model_validate(final).model_dump(mode="json"))
+
+
 @router.post("/managed-turns/execute", response_model=ManagedTurnResult,
              tags=["internal-managed-turns"],
              openapi_extra={"requestBody": {"required": True, "content": {
@@ -80,6 +153,12 @@ async def execute_managed_turn(request: Request):
     provider = request.app.dependency_overrides.get(get_db, get_db)
     factory = _business_dependency(request, get_business_session_factory)
     registry = _business_dependency(request, get_business_registry)
+    if value.stream_partials:
+        return StreamingResponse(
+            _stream_managed_turn(value, grant, runtime, provider, factory, registry),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
+        )
     owner = asyncio.create_task(execute_managed_owned(value, grant, runtime, provider,
                                                      factory, registry),
                                 name="managed-turn-owner")
