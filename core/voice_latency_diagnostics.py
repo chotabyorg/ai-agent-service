@@ -1,12 +1,14 @@
 """Finite Voice timings, without arguments, results, prompts or transcripts."""
 from dataclasses import dataclass
 import logging
+import time
 from uuid import UUID
 
 from business_capabilities.registry import WIRE_REGISTRY
 
 
 _IDENTITY = object()
+_PHASES = frozenset({"MODEL", "TOOL", "PREPARE", "SETUP", "BUSINESS", "CONTEXT", "KNOWLEDGE"})
 _TOOLS = frozenset(WIRE_REGISTRY) | {
     "business_propose", "business_decide_proposal", "business_confirm",
     "business_execute_plan",
@@ -33,6 +35,13 @@ def emit_voice_timing(value):
         pass
 
 
+def emit_voice_checkpoint(runtime, phase):
+    started = getattr(runtime, "voice_started_at", None)
+    if started is not None:
+        emit_voice_timing(VoiceTiming(runtime.request.turn_id, 0, phase,
+                                      max(0, round((time.monotonic() - started) * 1000))))
+
+
 def _trusted_voice_timing_record(record):
     if record.__dict__.get("_voice_timing_identity") is not _IDENTITY:
         return None
@@ -42,7 +51,7 @@ def _trusted_voice_timing_record(record):
     if (type(value.turn_id) is not UUID or type(value.step) is not int
             or not 0 <= value.step <= 20 or type(value.elapsed_ms) is not int
             or not 0 <= value.elapsed_ms <= 2147483647
-            or type(value.phase) is not str or value.phase not in {"MODEL", "TOOL", "PREPARE"}):
+            or type(value.phase) is not str or value.phase not in _PHASES):
         return None
     if value.phase == "TOOL":
         if type(value.tool) is not str or value.tool not in _TOOLS:

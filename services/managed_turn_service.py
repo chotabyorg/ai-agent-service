@@ -57,6 +57,32 @@ async def _close_client(client):
         raise ManagedExecutionError("TOOL_CLEANUP_FAILED")
 
 
+def _owned_client(service, key, request, runtime):
+    client = service._create_llm_client(key, privacy_id(request), managed=True)
+    # The proxy creates/closes each owned HTTP request client in its helper.
+    if hasattr(client, "close"):
+        runtime.stack.push_async_callback(_close_client, client)
+    if isinstance(client, AsyncOpenAI):
+        own_managed_http(client._client)
+    return client
+
+
+async def _warm_model_connection(client):
+    # A pooled keep-alive connection takes TLS setup off the first model call.
+    try:
+        response = await client._client.get(
+            client.base_url.join("key"), headers={"Authorization": f"Bearer {client.api_key}"}, timeout=2)
+        await response.aclose()
+    except Exception:
+        pass
+
+
+async def _join_warmup(task):
+    # Registered after the client's close, so it unwinds before the pool closes.
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+
+
 def _communication(message):
     if message.actor in {"AGENT", "HUMAN"}:
         return {"role": "assistant", "content": message.text}
@@ -69,6 +95,7 @@ async def execute_managed_owned(request, grant, runtime, db_provider, session_fa
                                 partial_hook=None):
     """All DB/runtime/resource work and strict LIFO teardown run in this task."""
     from schemas.business import BusinessSafetyError
+    from core.voice_latency_diagnostics import emit_voice_checkpoint
     from services.business_repository import BusinessRepository
     from services.business_runtime import BusinessRuntime, CommittedReferenceCollector
 
@@ -136,6 +163,13 @@ async def execute_managed_owned(request, grant, runtime, db_provider, session_fa
             # End the configuration read transaction before any model/provider
             # lifetime. expire_on_commit=False retains the loaded agent values.
             await runtime.operation(db.commit())
+            client = None
+            if profile is not None:
+                emit_voice_checkpoint(runtime, "SETUP")
+                client = _owned_client(service, key, request, runtime)
+                if isinstance(client, AsyncOpenAI):
+                    runtime.model_warmup = asyncio.create_task(_warm_model_connection(client))
+                    runtime.stack.push_async_callback(_join_warmup, runtime.model_warmup)
             runtime.business = await runtime.operation(BusinessRuntime.open(
                 request, grant, session_factory, registry, execution=runtime,
                 collector=collector))
@@ -143,17 +177,15 @@ async def execute_managed_owned(request, grant, runtime, db_provider, session_fa
             entry = await runtime.operation(runtime.business.execution_guard(allow_incomplete=True))
             if entry is None:
                 entry = runtime.business.completed_confirmation_replay()
+            if profile is not None:
+                emit_voice_checkpoint(runtime, "BUSINESS")
             if entry is not None and entry.halt_status:
                 raise ManagedExecutionError(entry.error_code, processing_status=entry.halt_status)
             if entry is not None and entry.safe_draft is not None:
                 answer = entry.safe_draft
             else:
-                client = service._create_llm_client(key, privacy_id(request), managed=True)
-                # The proxy creates/closes each owned HTTP request client in its helper.
-                if hasattr(client, "close"):
-                    runtime.stack.push_async_callback(_close_client, client)
-                if isinstance(client, AsyncOpenAI):
-                    own_managed_http(client._client)
+                if client is None:
+                    client = _owned_client(service, key, request, runtime)
                 answer = await service._execute_core(
                     db, agent=agent, llm_client=client, credentials_records=(),
                     communication=[_communication(message) for message in request.messages],
