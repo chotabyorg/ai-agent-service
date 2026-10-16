@@ -68,6 +68,8 @@ class ManagedTurnRequest(ManagedValue):
     context_last_sequence: Counter
     messages: Annotated[list[ManagedMessage], Field(min_length=1, max_length=MAX_MESSAGES)]
     selected_input_message_ids: Annotated[list[UUID], Field(min_length=1, max_length=MAX_MESSAGES)]
+    stream_partials: bool = False
+    max_partial_chars: Annotated[StrictInt, Field(ge=1, le=8000)] = 2000
 
     _owner = field_validator("owner_id")(validate_owner)
 
@@ -125,6 +127,8 @@ class ManagedTurnRequest(ManagedValue):
             raise ValueError("Projection exceeds limit")
         if self.contract_version == 2 and len(self.model_dump_json().encode("utf-8")) > MAX_REQUEST_BYTES:
             raise ValueError("Request exceeds limit")
+        if self.stream_partials and self.contract_version != 2:
+            raise ValueError("Streaming partials require contract version 2")
         return self
 
 
@@ -148,10 +152,17 @@ class ManagedTurnResult(ManagedValue):
     draft_text: str | None
     error_code: ErrorCode | None
     operation_refs: Annotated[list[OperationReference], Field(max_length=32)] = Field(default_factory=list)
+    partial_text: str | None = None
+    partial_final: bool = False
 
     @field_validator("draft_text")
     @classmethod
     def valid_draft(cls, value):
+        return validate_text(value) if value is not None else None
+
+    @field_validator("partial_text")
+    @classmethod
+    def valid_partial(cls, value):
         return validate_text(value) if value is not None else None
 
     @model_validator(mode="after")
@@ -159,6 +170,8 @@ class ManagedTurnResult(ManagedValue):
         if ((self.status == "DRAFT_READY") != (self.draft_text is not None)
                 or (self.status in {"FAILED", "UNKNOWN"}) != (self.error_code is not None)):
             raise ValueError("Invalid result shape")
+        # partial_final only marks the end of a partial stream; the
+        # authoritative outcome stays in status/draft_text/error_code.
         keys = [(ref.origin, ref.operation_id) for ref in self.operation_refs]
         if len(keys) != len(set(keys)):
             raise ValueError("Duplicate operation reference")

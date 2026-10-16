@@ -65,7 +65,8 @@ def _communication(message):
     return {"role": "user", "content": text}
 
 
-async def execute_managed_owned(request, grant, runtime, db_provider, session_factory, registry):
+async def execute_managed_owned(request, grant, runtime, db_provider, session_factory, registry,
+                                partial_hook=None):
     """All DB/runtime/resource work and strict LIFO teardown run in this task."""
     from schemas.business import BusinessSafetyError
     from services.business_repository import BusinessRepository
@@ -161,6 +162,7 @@ async def execute_managed_owned(request, grant, runtime, db_provider, session_fa
                     query=query, runtime=runtime,
                     selected_indices=request.selected_local_indices,
                     simple_selection=request.simple_selection,
+                    partial_hook=partial_hook,
                 )
             try:
                 ready = ManagedTurnResult.from_request(

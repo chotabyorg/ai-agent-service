@@ -27,6 +27,7 @@ from services.managed_tools import (ManagedExecutionError, inspect_managed_tool_
 from services.managed_http_cleanup import close_managed_helper, own_managed_http
 from services.managed_reasoning import managed_reasoning_fields
 from services.managed_completion import select_managed_completion, observe_managed_completion
+from services.managed_streaming import complete_with_partials
 from services.chat_diagnostics import ChatFailureStage, set_chat_failure_stage
 from services.agent_service import AgentService
 from services.encryption_service import EncryptionService
@@ -430,6 +431,7 @@ class LLMService:
     async def _execute_core(
         self, db_session, *, agent, llm_client, credentials_records, communication,
         chat_context, query, completion_hook=None, runtime=None, selected_indices=None, simple_selection=True,
+        partial_hook=None,
     ) -> str:
         """Shared prompt/KB/model/tools/normalization; adapters own persistence."""
         managed_request = runtime.request if runtime else None
@@ -558,7 +560,7 @@ class LLMService:
                         if step_index == 0:
                             emit_voice_timing(VoiceTiming(runtime.request.turn_id, 0, "PREPARE",
                                 round((model_started - getattr(runtime, "voice_started_at", model_started)) * 1000)))
-                    pending_response = llm_client.chat.completions.create(
+                    completion_kwargs = dict(
                         model=(self._managed_model(agent, request=managed_request) if runtime
                                else agent.model_name or self.settings.llm_default_model),
                         temperature=agent.temperature,
@@ -570,7 +572,16 @@ class LLMService:
                         **({"extra_body": model_extra_body} if model_extra_body else {}),
                         extra_headers=self._build_extra_headers(),
                     )
-                    response = await runtime.operation(pending_response) if runtime else await pending_response
+                    pending_response = complete_with_partials(
+                        llm_client.chat.completions.create,
+                        completion_kwargs,
+                        on_text=partial_hook,
+                    )
+                    response = (
+                        await runtime.operation(pending_response)
+                        if runtime
+                        else await pending_response
+                    )
                     if voice_profile is not None:
                         emit_voice_timing(VoiceTiming(runtime.request.turn_id, step_index + 1, "MODEL",
                             round((time.monotonic() - model_started) * 1000)))
