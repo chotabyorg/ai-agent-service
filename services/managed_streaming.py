@@ -20,6 +20,13 @@ from typing import Any
 MAX_STREAM_CHARS = 8000
 MAX_STREAM_CHUNKS = 4096
 
+# The first spoken chunk must not wait for a full sentence boundary: a long
+# opening sentence would otherwise stay silent until the model stops. Cut the
+# first chunk at a clause or word boundary inside this window instead.
+FIRST_CHUNK_MIN_CHARS = 24
+FIRST_CHUNK_MAX_CHARS = 72
+_CLAUSE_MARKS = (",", ";", ":", "—", "–", "\u2014")
+
 
 class StreamLimitExceeded(ValueError):
     """A streamed completion exceeded its assembly bounds."""
@@ -125,30 +132,47 @@ async def _chunks(source: Any) -> AsyncIterator[Any]:
 
 
 class SentenceAccumulator:
-    """Collects newly completed sentences from cumulative streamed text.
+    """Collects newly spokable chunks from cumulative streamed text.
 
-    A sentence completes at a terminal mark (. ! ? …) followed by whitespace
-    and an uppercase letter. This is a heuristic, not a linguistic parser:
-    decimals never match, while abbreviations before a capital (such as
-    "ул. Ленина") may split early; the voice layer applies the same class of
-    heuristic when fragmenting speech. If streamed text ever revises already
-    emitted content instead of extending it, emission freezes and the final
-    result stays authoritative.
+    From the second chunk onward a sentence completes at a terminal mark
+    (. ! ? …) followed by whitespace and an uppercase letter. This is a
+    heuristic, not a linguistic parser: decimals never match, while
+    abbreviations before a capital (such as "ул. Ленина") may split early; the
+    voice layer applies the same class of heuristic when fragmenting speech.
+
+    The first chunk is latency-critical, so it does not wait for a full
+    sentence: once the un-emitted text reaches ``first_max_chars`` the earliest
+    clause boundary (else the last word boundary) inside that window is spoken,
+    so a long opening sentence starts sounding while the model keeps decoding.
+    If streamed text ever revises already emitted content instead of extending
+    it, emission freezes and the final result stays authoritative.
     """
 
-    def __init__(self, *, max_chars: int = MAX_STREAM_CHARS) -> None:
-        if not 1 <= max_chars <= 65536:
+    def __init__(
+        self,
+        *,
+        max_chars: int = MAX_STREAM_CHARS,
+        first_min_chars: int = FIRST_CHUNK_MIN_CHARS,
+        first_max_chars: int = FIRST_CHUNK_MAX_CHARS,
+    ) -> None:
+        if (
+            not 1 <= max_chars <= 65536
+            or not 1 <= first_min_chars <= first_max_chars <= 65536
+        ):
             raise ValueError("Invalid streaming bounds")
         self._max_chars = max_chars
+        self._first_min_chars = first_min_chars
+        self._first_max_chars = first_max_chars
         self._emitted = ""
         self._frozen = False
+        self._first_done = False
 
     @property
     def emitted(self) -> str:
         return self._emitted
 
     def feed(self, cumulative: str) -> list[str]:
-        """Return newly completed sentences; empty list while incomplete."""
+        """Return newly emitted chunks; empty list while nothing new is ready."""
         if not isinstance(cumulative, str):
             raise ValueError("Cumulative partial text is not a string")
         if len(cumulative) > self._max_chars:
@@ -157,6 +181,16 @@ class SentenceAccumulator:
             self._frozen = True
             return []
         fresh = cumulative[len(self._emitted) :]
+        chunks = self._completed_sentences(fresh)
+        if not chunks and not self._first_done:
+            chunks = self._first_chunk(fresh)
+        if chunks:
+            self._emitted += "".join(chunks)
+            self._first_done = True
+        return chunks
+
+    @staticmethod
+    def _completed_sentences(fresh: str) -> list[str]:
         sentences: list[str] = []
         start = 0
         index = 0
@@ -175,9 +209,22 @@ class SentenceAccumulator:
                         index = look
                         continue
             index += 1
-        if sentences:
-            self._emitted += "".join(sentences)
         return sentences
+
+    def _first_chunk(self, fresh: str) -> list[str]:
+        """Cut the first chunk at a clause/word boundary once it is long enough."""
+        if len(fresh) < self._first_max_chars:
+            return []
+        window = fresh[: self._first_max_chars]
+        cut = max(window.rfind(mark) for mark in _CLAUSE_MARKS)
+        if cut < self._first_min_chars - 1:
+            cut = window.rfind(" ")
+        if cut < self._first_min_chars - 1:
+            return []
+        end = cut + 1
+        while end < len(fresh) and fresh[end] in (" ", "\t", "\n", "\r"):
+            end += 1
+        return [fresh[:end]]
 
 
 async def complete_with_partials(

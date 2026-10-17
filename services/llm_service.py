@@ -253,6 +253,7 @@ class LLMService:
         agent: object,
         query: str,
         runtime=None,
+        use_operation: bool = True,
         max_chars_per_chunk: int | None = None,
         max_total_context_chars: int | None = None,
     ) -> str | None:
@@ -274,7 +275,11 @@ class LLMService:
                     agent_id=agent.id,  # type: ignore[attr-defined]
                     query=query,
                 )
-                response = await runtime.operation(pending) if runtime else await pending
+                response = (
+                    await runtime.operation(pending)
+                    if runtime and use_operation
+                    else await pending
+                )
             finally:
                 await client.aclose()
 
@@ -436,7 +441,7 @@ class LLMService:
     async def _execute_core(
         self, db_session, *, agent, llm_client, credentials_records, communication,
         chat_context, query, completion_hook=None, runtime=None, selected_indices=None, simple_selection=True,
-        partial_hook=None,
+        partial_hook=None, knowledge_task=None,
     ) -> str:
         """Shared prompt/KB/model/tools/normalization; adapters own persistence."""
         managed_request = runtime.request if runtime else None
@@ -475,12 +480,17 @@ class LLMService:
             {"max_chars_per_chunk": 500, "max_total_context_chars": 1200}
             if voice_profile is not None else {}
         )
-        knowledge_base_message = await self._build_knowledge_base_message(
-            agent=agent,
-            query=query,
-            **({"runtime": runtime} if runtime else {}),
-            **knowledge_overrides,
-        )
+        if knowledge_task is not None:
+            # The Voice path starts retrieval during business/prompt work; awaiting
+            # it here joins the already-running request instead of paying serially.
+            knowledge_base_message = await knowledge_task
+        else:
+            knowledge_base_message = await self._build_knowledge_base_message(
+                agent=agent,
+                query=query,
+                **({"runtime": runtime} if runtime else {}),
+                **knowledge_overrides,
+            )
         if voice_profile is not None:
             emit_voice_checkpoint(runtime, "KNOWLEDGE")
 

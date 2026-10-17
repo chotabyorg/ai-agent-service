@@ -83,6 +83,24 @@ async def _join_warmup(task):
     await asyncio.gather(task, return_exceptions=True)
 
 
+async def _prefetch_knowledge_base(service, agent, query, runtime):
+    # Best-effort context. It deliberately skips the runtime's single operation
+    # scope, so it can overlap business/prompt work without stealing the cancel
+    # scope; teardown cancels it through the same join as the model warm-up.
+    profile = service._managed_voice_profile(agent, request=getattr(runtime, "request", None))
+    overrides = (
+        {"max_chars_per_chunk": 500, "max_total_context_chars": 1200}
+        if profile is not None
+        else {}
+    )
+    return await service._build_knowledge_base_message(
+        agent=agent, query=query, runtime=runtime, use_operation=False, **overrides
+    )
+
+
+_join_knowledge = _join_warmup
+
+
 def _communication(message):
     if message.actor in {"AGENT", "HUMAN"}:
         return {"role": "assistant", "content": message.text}
@@ -170,6 +188,9 @@ async def execute_managed_owned(request, grant, runtime, db_provider, session_fa
                 if isinstance(client, AsyncOpenAI):
                     runtime.model_warmup = asyncio.create_task(_warm_model_connection(client))
                     runtime.stack.push_async_callback(_join_warmup, runtime.model_warmup)
+                runtime.knowledge_task = asyncio.create_task(
+                    _prefetch_knowledge_base(service, agent, query, runtime))
+                runtime.stack.push_async_callback(_join_knowledge, runtime.knowledge_task)
             runtime.business = await runtime.operation(BusinessRuntime.open(
                 request, grant, session_factory, registry, execution=runtime,
                 collector=collector))
@@ -198,6 +219,7 @@ async def execute_managed_owned(request, grant, runtime, db_provider, session_fa
                     selected_indices=request.selected_local_indices,
                     simple_selection=request.simple_selection,
                     partial_hook=partial_hook,
+                    knowledge_task=getattr(runtime, "knowledge_task", None),
                 )
             try:
                 ready = ManagedTurnResult.from_request(
