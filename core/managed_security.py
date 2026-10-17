@@ -89,6 +89,12 @@ def install_managed_log_boundary() -> None:
             safe = _trusted_completion_record(record) or _trusted_voice_timing_record(record)
             if safe is None:
                 safe = _trusted_business_record(record)
+            if safe is None and self.name == "uvicorn.access":
+                # uvicorn's AccessFormatter unpacks exactly five positional fields.
+                # Keep that shape while never echoing the request line or query.
+                safe = logging.LogRecord(self.name, record.levelno, record.pathname,
+                                         record.lineno, '%s - "%s %s HTTP/%s" %s',
+                                         ("-", "-", "-", "1.1", "0"), None)
             if safe is None:
                 safe = logging.LogRecord(record.name, record.levelno, record.pathname,
                                      record.lineno, "Managed execution diagnostic", (), None)
