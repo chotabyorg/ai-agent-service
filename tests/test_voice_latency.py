@@ -95,7 +95,7 @@ async def test_sdk_wire_voice_only_then_managed_text_and_legacy_unchanged(api_cl
     assert legacy.status_code == 200
     assert len(captured) == 4
     assert captured[0]['reasoning'] == ({'enabled': False} if replacement else {'effort': 'none'})
-    assert captured[0]['provider'] == ({'order': ['synthetic/bf16'], 'only': ['synthetic/bf16'],
+    assert captured[0]['provider'] == ({'only': ['synthetic/bf16'], 'sort': 'latency',
         'allow_fallbacks': True, 'max_price': {'prompt': 0.09, 'completion': 0.30}}
         if replacement else {'sort': 'latency'})
     assert captured[0]['model'] == (selected.completion_model or agent['model_name'])
@@ -169,6 +169,16 @@ def test_replacement_requires_bounded_explicit_route(changes):
     data.update(changes)
     with pytest.raises(ValueError):
         VoiceLatencyProfile.model_validate(data)
+
+
+def test_replacement_route_is_latency_sorted_inside_the_allowlist():
+    selected = VoiceLatencyProfile(**{k: payload(channel="VOICE")[k]
+        for k in ("owner_id", "integration_id", "agent_id")}, model="original/model",
+        completion_model="synthetic/voice-model", provider_only=["nextbit/bf16", "makora"],
+        max_input_price=0.10, max_output_price=0.30)
+    provider = selected.extra_body()["provider"]
+    assert provider["sort"] == "latency" and "order" not in provider
+    assert provider["only"] == ["nextbit/bf16", "makora"] and provider["allow_fallbacks"] is True
 
 
 def test_duplicate_profile_scope_rejected():
