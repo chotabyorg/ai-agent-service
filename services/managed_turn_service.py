@@ -174,7 +174,10 @@ async def execute_managed_owned(request, grant, runtime, db_provider, session_fa
                 request, grant, session_factory, registry, execution=runtime,
                 collector=collector))
             runtime.check()
-            entry = await runtime.operation(runtime.business.execution_guard(allow_incomplete=True))
+            # open() already loaded the result gate; avoid a duplicate round-trip
+            # before the first model step on the Voice path.
+            entry = await runtime.operation(
+                runtime.business.execution_guard(allow_incomplete=True, reload=False))
             if entry is None:
                 entry = runtime.business.completed_confirmation_replay()
             if profile is not None:
