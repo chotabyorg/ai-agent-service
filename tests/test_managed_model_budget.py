@@ -39,6 +39,39 @@ def test_unsupported_transport_is_rejected_without_settings_or_credentials(overr
     assert Settings(_env_file=None, **overrides).managed_openrouter_disable_reasoning_models == []
 
 
+def test_text_reasoning_control_is_channel_scoped_and_opt_in():
+    service = LLMService()
+    agent = SimpleNamespace(model_name="openai/gpt-6-luna", temperature=0.4)
+    service.settings = Settings(_env_file=None, managed_text_disable_reasoning=True)
+    assert service._managed_model_extra_body(
+        agent, request=SimpleNamespace(channel="TELEGRAM")) == {"reasoning": {"enabled": False}}
+    assert service._managed_model_extra_body(
+        agent, request=SimpleNamespace(channel="VOICE")) == {}
+    service.settings = Settings(_env_file=None)
+    assert service._managed_model_extra_body(
+        agent, request=SimpleNamespace(channel="TELEGRAM")) == {}
+
+
+def test_text_reasoning_control_requires_direct_openrouter():
+    with pytest.raises(RuntimeError) as failure:
+        Settings(_env_file=None, managed_text_disable_reasoning=True,
+                 llm_base_url="https://another.invalid/v1")
+    assert str(failure.value) == "Managed reasoning control requires direct OpenRouter transport"
+
+
+def test_text_parallel_tool_calls_is_channel_scoped_and_opt_in():
+    service = LLMService()
+    agent = SimpleNamespace(model_name="openai/gpt-6-luna", temperature=0.4)
+    service.settings = Settings(_env_file=None, managed_text_parallel_tool_calls=True)
+    assert service._managed_parallel_tool_calls(SimpleNamespace(channel="TELEGRAM")) is True
+    assert service._managed_parallel_tool_calls(SimpleNamespace(channel="VOICE")) is False
+    assert service._managed_parallel_tool_calls(None) is False
+    envelope = service._managed_envelope(agent, [], [], request=SimpleNamespace(channel="TELEGRAM"))
+    assert envelope["parallel_tool_calls"] is True
+    service.settings = Settings(_env_file=None)
+    assert service._managed_parallel_tool_calls(SimpleNamespace(channel="TELEGRAM")) is False
+
+
 def test_reasoning_control_counts_against_context_limit():
     service = LLMService()
     service.settings = Settings(_env_file=None, managed_ai_context_bytes=1024)

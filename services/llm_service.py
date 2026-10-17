@@ -592,7 +592,7 @@ class LLMService:
                         max_tokens=self.settings.llm_max_tokens,
                         messages=messages,
                         tools=openai_tools or None,
-                        parallel_tool_calls=False,
+                        parallel_tool_calls=self._managed_parallel_tool_calls(managed_request),
                         **({"tool_choice": tool_choice} if tool_choice is not None else {}),
                         **({"extra_body": model_extra_body} if model_extra_body else {}),
                         extra_headers=self._build_extra_headers(),
@@ -910,6 +910,12 @@ class LLMService:
         return (profile.completion_model if profile and profile.completion_model
                 else agent.model_name or self.settings.llm_default_model)
 
+    def _managed_parallel_tool_calls(self, request=None):
+        if not self.settings.managed_text_parallel_tool_calls or request is None:
+            return False
+        channel = getattr(request, "channel", None)
+        return getattr(channel, "value", channel) != "VOICE"
+
     def _managed_model_extra_body(self, agent, *, request=None):
         profile = self._managed_voice_profile(agent, request=request)
         if profile:
@@ -917,12 +923,18 @@ class LLMService:
         model = agent.model_name or self.settings.llm_default_model
         if model in self.settings.managed_openrouter_disable_reasoning_models:
             return {"reasoning": {"enabled": False}}
+        if self.settings.managed_text_disable_reasoning and request is not None:
+            channel = getattr(request, "channel", None)
+            if getattr(channel, "value", channel) != "VOICE":
+                # Text channels trade hidden reasoning for first-token latency.
+                return {"reasoning": {"enabled": False}}
         return {}
 
     def _managed_envelope(self, agent, messages, tools, *, tool_choice=None, request=None):
         envelope = {"model": self._managed_model(agent, request=request),
                 "temperature": agent.temperature, "max_tokens": self.settings.llm_max_tokens,
-                "messages": messages, "tools": tools or None, "parallel_tool_calls": False}
+                "messages": messages, "tools": tools or None,
+                "parallel_tool_calls": self._managed_parallel_tool_calls(request)}
         if tool_choice is not None:
             envelope["tool_choice"] = tool_choice
         envelope.update(self._managed_model_extra_body(agent, request=request))

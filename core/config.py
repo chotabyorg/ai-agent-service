@@ -83,6 +83,10 @@ class Settings(BaseSettings):
     managed_ai_context_bytes: int = Field(default=131072, ge=1024, le=1048576)
     # Explicit model IDs only; no default override, pattern matching or routing change.
     managed_openrouter_disable_reasoning_models: list[str] = Field(default_factory=list, max_length=16)
+    # Opt-in: skip provider reasoning for managed non-VOICE channels (text).
+    managed_text_disable_reasoning: bool = False
+    # Opt-in: let managed non-VOICE channels batch independent tool lookups.
+    managed_text_parallel_tool_calls: bool = False
     # Empty by default; only authenticated managed VOICE requests can match.
     managed_voice_latency_profiles: list[VoiceLatencyProfile] = Field(default_factory=list, max_length=64)
     _managed_principals: tuple = PrivateAttr(default=())
@@ -93,7 +97,9 @@ class Settings(BaseSettings):
                   for p in self.managed_voice_latency_profiles]
         if len(scopes) != len(set(scopes)):
             raise RuntimeError("Duplicate managed Voice profile scope")
-        if self.managed_openrouter_disable_reasoning_models or self.managed_voice_latency_profiles:
+        if (self.managed_openrouter_disable_reasoning_models
+                or self.managed_voice_latency_profiles
+                or self.managed_text_disable_reasoning):
             if (self.privacy_filter_enabled
                     or self.llm_base_url.rstrip('/') != 'https://openrouter.ai/api/v1'):
                 # Do not silently drop an unsupported proxy/provider parameter or
