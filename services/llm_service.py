@@ -453,6 +453,15 @@ class LLMService:
         if voice_profile is not None and voice_profile.concise_speech:
             from services.voice_reply_style import CONCISE_SPEECH
             system_prompt += "\n\n" + CONCISE_SPEECH
+        caller_phone = getattr(runtime, "caller_phone", "") if runtime else ""
+        if voice_profile is not None and caller_phone:
+            # The caller's own number is the booking contact; do not make them
+            # dictate it (VAD/STT cut digits badly).
+            system_prompt += (
+                "\n\nНомер, с которого звонит клиент: " + caller_phone
+                + ". Для записи используй этот номер: не проси клиента диктовать телефон "
+                "и подтверди, что записываешь на него."
+            )
         knowledge_base_message = await self._build_knowledge_base_message(
             agent=agent,
             query=query,
