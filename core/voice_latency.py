@@ -40,9 +40,12 @@ class VoiceLatencyProfile(BaseModel):
     def extra_body(self):
         if self.completion_model is None:
             return {"reasoning": {"effort": "none"}, "provider": {"sort": "latency"}}
-        # Allowlist order is the preference; fallbacks stay inside "only" and the price ceilings.
+        # Allowlist and price ceilings are the hard boundary; inside them the
+        # router picks the currently fastest provider (latency-sorted) and may
+        # fall back within the same allowlist on an error. No preference order,
+        # so nextbit/makora move with live latency instead of a fixed pin.
         return {"reasoning": {"enabled": False}, "provider": {
-            "order": list(self.provider_only), "only": list(self.provider_only), "allow_fallbacks": True,
+            "only": list(self.provider_only), "sort": "latency", "allow_fallbacks": True,
             "max_price": {"prompt": self.max_input_price, "completion": self.max_output_price},
         }}
 
