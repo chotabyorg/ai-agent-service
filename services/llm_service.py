@@ -469,9 +469,12 @@ class LLMService:
         if voice_profile is not None:
             system_prompt += (
                 "\n\nЕсли последняя реплика клиента — ровно «[silence]», значит он молчит: "
-                "коротко спроси, на связи ли он, и предложи помощь. Не произноси это служебное слово."
+                "один раз коротко и по-человечески спроси, на связи ли он («Вы ещё на линии?»), "
+                "и продолжи по делу. Не повторяй один и тот же вопрос и не произноси служебное слово."
                 "\n\nЕсли для ответа нужна проверка или запись — выполни её сразу в этом же ответе "
                 "и сообщи результат или предложение. Не говори «я проверю» и не заканчивай ответ обещанием."
+                "\n\nЗакрывая разговор, скажи одну короткую тёплую фразу прощания («Всего доброго!») "
+                "и больше ничего не добавляй — без вопросов и повторных благодарностей."
             )
         if voice_profile is not None and caller_phone:
             system_prompt += (
@@ -650,8 +653,20 @@ class LLMService:
                         else await pending_response
                     )
                     if voice_profile is not None:
+                        elapsed_ms = round((time.monotonic() - model_started) * 1000)
                         emit_voice_timing(VoiceTiming(runtime.request.turn_id, step_index + 1, "MODEL",
-                            round((time.monotonic() - model_started) * 1000)))
+                            elapsed_ms))
+                        if elapsed_ms >= 8000:
+                            # Rare provider spikes would otherwise be invisible.
+                            logger.warning(
+                                "voice_model_step_slow",
+                                extra={
+                                    "event": "voice_model_step_slow",
+                                    "turn_id": str(runtime.request.turn_id),
+                                    "step": step_index + 1,
+                                    "elapsed_ms": elapsed_ms,
+                                },
+                            )
                 except AuthenticationError:
                     await self._deactivate_agent(agent, db_session, "OpenRouter API key invalid or revoked", runtime=runtime)
                     if runtime:
