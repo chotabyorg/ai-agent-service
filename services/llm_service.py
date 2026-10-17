@@ -454,6 +454,12 @@ class LLMService:
             from services.voice_reply_style import CONCISE_SPEECH
             system_prompt += "\n\n" + CONCISE_SPEECH
         caller_phone = getattr(runtime, "caller_phone", "") if runtime else ""
+        if voice_profile is not None:
+            # A synthetic idle admission means the caller has gone quiet.
+            system_prompt += (
+                "\n\nЕсли последняя реплика клиента — ровно «[silence]», значит он молчит: "
+                "коротко спроси, на связи ли он, и предложи помощь. Не произноси это служебное слово."
+            )
         if voice_profile is not None and caller_phone:
             # The caller's own number is the booking contact; do not make them
             # dictate it (VAD/STT cut digits badly).
