@@ -253,6 +253,8 @@ class LLMService:
         agent: object,
         query: str,
         runtime=None,
+        max_chars_per_chunk: int | None = None,
+        max_total_context_chars: int | None = None,
     ) -> str | None:
         if not self.settings.knowledge_base_enabled:
             return None
@@ -280,8 +282,10 @@ class LLMService:
                 return None
             return build_knowledge_base_system_message(
                 response.contexts,
-                max_chars_per_chunk=self.settings.knowledge_base_max_chars_per_chunk,
-                max_total_context_chars=self.settings.knowledge_base_max_total_context_chars,
+                max_chars_per_chunk=(max_chars_per_chunk
+                                     or self.settings.knowledge_base_max_chars_per_chunk),
+                max_total_context_chars=(max_total_context_chars
+                                         or self.settings.knowledge_base_max_total_context_chars),
             )
         except ManagedExecutionError:
             raise
@@ -455,7 +459,6 @@ class LLMService:
             system_prompt += "\n\n" + CONCISE_SPEECH
         caller_phone = getattr(runtime, "caller_phone", "") if runtime else ""
         if voice_profile is not None:
-            # A synthetic idle admission means the caller has gone quiet.
             system_prompt += (
                 "\n\nЕсли последняя реплика клиента — ровно «[silence]», значит он молчит: "
                 "коротко спроси, на связи ли он, и предложи помощь. Не произноси это служебное слово."
@@ -468,10 +471,15 @@ class LLMService:
                 + ". Для записи используй этот номер: не проси клиента диктовать телефон "
                 "и подтверди, что записываешь на него."
             )
+        knowledge_overrides = (
+            {"max_chars_per_chunk": 500, "max_total_context_chars": 1200}
+            if voice_profile is not None else {}
+        )
         knowledge_base_message = await self._build_knowledge_base_message(
             agent=agent,
             query=query,
             **({"runtime": runtime} if runtime else {}),
+            **knowledge_overrides,
         )
         if voice_profile is not None:
             emit_voice_checkpoint(runtime, "KNOWLEDGE")

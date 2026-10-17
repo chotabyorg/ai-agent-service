@@ -30,8 +30,10 @@ def test_policy_and_five_layer_order_for_raw_and_structured(structured):
             "proposal_id": str(uuid4()), "summary": "Запись в 18:00", "confirmable": True,
         }}), knowledge_context="Стрижка — 50 BYN",
     )
+    # Static layers stay first and volatile layers (knowledge, clock) last so
+    # provider prefix caching can reuse the stable prefix across turns.
     tags = ["<platform_policy>", "<business_prompt>", "<runtime_capability_context>",
-            "<channel_temporal_context>", "<knowledge_context>"]
+            "<knowledge_context>", "<channel_temporal_context>"]
     positions = [result.index(tag) for tag in tags]
     assert positions == sorted(positions)
     for required in ("READ", "WRITE_SAFE", "WRITE_CONFIRM", "UNKNOWN", "+", "ага", "👍",
