@@ -462,28 +462,8 @@ class LLMService:
         if voice_profile is not None:
             from core.voice_latency_diagnostics import emit_voice_checkpoint
             emit_voice_checkpoint(runtime, "CONTEXT")
-        if voice_profile is not None and voice_profile.concise_speech:
-            from services.voice_reply_style import CONCISE_SPEECH
-            system_prompt += "\n\n" + CONCISE_SPEECH
         caller_phone = getattr(runtime, "caller_phone", "") if runtime else ""
-        if voice_profile is not None:
-            system_prompt += (
-                "\n\nЕсли последняя реплика клиента — ровно «[silence]», значит он молчит: "
-                "коротко спроси, на связи ли он, и предложи помощь. Не произноси это служебное слово."
-                "\n\nЕсли для ответа нужна проверка или запись — выполни её сразу в этом же ответе "
-                "и сообщи результат или предложение. Не говори «я проверю» и не заканчивай ответ обещанием."
-            )
-        if voice_profile is not None and caller_phone:
-            system_prompt += (
-                "\n\nКлиент звонит с номера " + caller_phone
-                + ". Этот номер уже известен: никогда не проси продиктовать телефон и не переспрашивай "
-                "его — сразу используй этот номер для записи."
-            )
-        elif voice_profile is not None:
-            system_prompt += (
-                "\n\nТелефон для записи ещё неизвестен: коротко попроси продиктовать его и используй "
-                "именно продиктованные цифры, не подменяя их другим номером."
-            )
+        system_prompt += self._voice_prompt_suffix(voice_profile, caller_phone)
         knowledge_overrides = (
             {"max_chars_per_chunk": 500, "max_total_context_chars": 1200}
             if voice_profile is not None else {}
@@ -650,8 +630,20 @@ class LLMService:
                         else await pending_response
                     )
                     if voice_profile is not None:
+                        elapsed_ms = round((time.monotonic() - model_started) * 1000)
                         emit_voice_timing(VoiceTiming(runtime.request.turn_id, step_index + 1, "MODEL",
-                            round((time.monotonic() - model_started) * 1000)))
+                            elapsed_ms))
+                        if elapsed_ms >= 8000:
+                            # Rare provider spikes would otherwise be invisible.
+                            logger.warning(
+                                "voice_model_step_slow",
+                                extra={
+                                    "event": "voice_model_step_slow",
+                                    "turn_id": str(runtime.request.turn_id),
+                                    "step": step_index + 1,
+                                    "elapsed_ms": elapsed_ms,
+                                },
+                            )
                 except AuthenticationError:
                     await self._deactivate_agent(agent, db_session, "OpenRouter API key invalid or revoked", runtime=runtime)
                     if runtime:
@@ -880,8 +872,12 @@ class LLMService:
                                 for tool in openai_tools
                                 if tool["function"]["name"] in PREPARATION_TOOLS
                             }
-                            messages[0]["content"] = self.prompt_composer.compose(
-                                agent, chat_context, runtime_context=prompt_context)
+                            messages[0]["content"] = (
+                                self.prompt_composer.compose(
+                                    agent, chat_context, runtime_context=prompt_context)
+                                + self._voice_prompt_suffix(
+                                    voice_profile, getattr(runtime, "caller_phone", ""))
+                            )
                             self._check_managed_envelope(
                                 agent, messages, openai_tools, tool_choice=tool_choice,
                                 request=managed_request)
@@ -954,6 +950,38 @@ class LLMService:
         if runtime:
             raise ManagedExecutionError("MODEL_ERROR")
         raise ChatProcessingError("Maximum number of LLM tool steps reached.")
+
+    @staticmethod
+    def _voice_prompt_suffix(voice_profile, caller_phone: str) -> str:
+        """Voice-only task instructions, re-applied whenever the prompt is rebuilt."""
+        if voice_profile is None:
+            return ""
+        suffix = ""
+        if voice_profile.concise_speech:
+            from services.voice_reply_style import CONCISE_SPEECH
+
+            suffix += "\n\n" + CONCISE_SPEECH
+        suffix += (
+            "\n\nЕсли последняя реплика клиента — ровно «[silence]», значит он молчит: "
+            "один раз коротко и по-человечески спроси, на связи ли он («Вы ещё на линии?»), "
+            "и продолжи по делу. Не повторяй один и тот же вопрос и не произноси служебное слово."
+            "\n\nЕсли для ответа нужна проверка или запись — выполни её сразу в этом же ответе "
+            "и сообщи результат или предложение. Не говори «я проверю» и не заканчивай ответ обещанием."
+            "\n\nЗакрывая разговор, скажи одну короткую тёплую фразу прощания («Всего доброго!») "
+            "и больше ничего не добавляй — без вопросов и повторных благодарностей."
+        )
+        if caller_phone:
+            suffix += (
+                "\n\nКлиент звонит с номера " + caller_phone
+                + ". Этот номер уже известен: никогда не проси продиктовать телефон и не переспрашивай "
+                "его — сразу используй этот номер для записи."
+            )
+        else:
+            suffix += (
+                "\n\nТелефон для записи ещё неизвестен: коротко попроси продиктовать его и используй "
+                "именно продиктованные цифры, не подменяя их другим номером."
+            )
+        return suffix
 
     def _managed_voice_profile(self, agent, *, request=None):
         model = agent.model_name or self.settings.llm_default_model
