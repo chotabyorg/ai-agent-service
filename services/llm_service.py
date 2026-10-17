@@ -455,8 +455,13 @@ class LLMService:
             system_prompt += "\n\n" + CONCISE_SPEECH
         caller_phone = getattr(runtime, "caller_phone", "") if runtime else ""
         if voice_profile is not None:
-            # A synthetic idle admission means the caller has gone quiet.
+            # The PBX already greets and introduces the salon; a second greeting
+            # and a trailing "how can I help" are exactly what callers notice.
             system_prompt += (
+                "\n\nЭто телефонный канал: приветствие и представление уже озвучены станцией. "
+                "Не здоровайся, не представляйся и не спрашивай «чем могу помочь». "
+                "Начинай сразу с ответа по существу. Прощайся одной короткой фразой, "
+                "без лишних добавлений после прощания."
                 "\n\nЕсли последняя реплика клиента — ровно «[silence]», значит он молчит: "
                 "коротко спроси, на связи ли он, и предложи помощь. Не произноси это служебное слово."
             )
