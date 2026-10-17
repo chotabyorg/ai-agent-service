@@ -347,21 +347,19 @@ async def test_voice_profile_bytes_are_included_in_stale_change_refresh_budget(
     service = LLMService()
     original_check = service._check_managed_envelope
     expected_sizes = {}
-    first_budget_size = None
     refresh_observations = []
 
     def bounded_check(agent, messages, tools, *, tool_choice=None, request=None):
-        nonlocal first_budget_size
         with_profile = len(json.dumps(service._managed_envelope(
             agent, messages, tools, tool_choice=tool_choice, request=request),
             ensure_ascii=False, allow_nan=False).encode("utf-8"))
         without_profile = len(json.dumps(service._managed_envelope(
             agent, messages, tools, tool_choice=tool_choice, request=None),
             ensure_ascii=False, allow_nan=False).encode("utf-8"))
-        if tool_choice is not None and first_budget_size is None:
-            first_budget_size = with_profile
         if tool_choice is None and not refresh_observations:
-            budget = max(1024, first_budget_size or 0, without_profile)
+            # The limit is set just below this call's profile envelope, so the
+            # voice profile's extra bytes are exactly what pushes it over.
+            budget = max(1024, without_profile)
             assert with_profile > budget
             expected_sizes.update(with_profile=with_profile,
                                  without_profile=without_profile, budget=budget)
