@@ -1,4 +1,8 @@
 """Validate preparation input and perform guarded customer lookup without dispatch."""
+import hashlib
+import json
+from collections import OrderedDict
+
 from jsonschema import Draft202012Validator, FormatChecker
 
 from schemas.business import BusinessAction, BusinessSafetyError, BusinessToolResult
@@ -8,10 +12,27 @@ PREPARATION_TOOLS = frozenset({'business_propose', 'booking_create'})
 SAFE_RULES = frozenset({'type', 'required', 'additionalProperties', 'oneOf', 'anyOf', 'allOf',
     'not', 'const', 'enum', 'minLength', 'maxLength', 'pattern', 'format', 'minItems', 'maxItems',
     'uniqueItems', 'minimum', 'maximum', 'exclusiveMinimum', 'exclusiveMaximum', 'multipleOf'})
+_PREPARATION_SCHEMA_CACHE: OrderedDict[str, "PreparationSchema"] = OrderedDict()
+_PREPARATION_SCHEMA_CACHE_LIMIT = 64
 
 
 class PreparationSchema:
+    def __new__(cls, schema):
+        # Advertised tool parameters are rebuilt every Voice turn; reuse the
+        # compiled validator when the canonical schema bytes match.
+        key = hashlib.sha256(json.dumps(schema, ensure_ascii=False, allow_nan=False,
+                                        sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+        cached = _PREPARATION_SCHEMA_CACHE.get(key)
+        if cached is not None:
+            _PREPARATION_SCHEMA_CACHE.move_to_end(key)
+            return cached
+        self = super().__new__(cls)
+        self._cache_key = key
+        return self
+
     def __init__(self, schema):
+        if getattr(self, 'validator', None) is not None:
+            return
         self.properties = set()
         pending = [schema]
         while pending:
@@ -27,6 +48,12 @@ class PreparationSchema:
                 pending.extend(value)
         Draft202012Validator.check_schema(schema)
         self.validator = Draft202012Validator(schema, format_checker=FormatChecker())
+        key = getattr(self, '_cache_key', None)
+        if key is not None:
+            _PREPARATION_SCHEMA_CACHE[key] = self
+            _PREPARATION_SCHEMA_CACHE.move_to_end(key)
+            while len(_PREPARATION_SCHEMA_CACHE) > _PREPARATION_SCHEMA_CACHE_LIMIT:
+                _PREPARATION_SCHEMA_CACHE.popitem(last=False)
 
     def feedback(self, arguments):
         error = next(self.validator.iter_errors(arguments), None)

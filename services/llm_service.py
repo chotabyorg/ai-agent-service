@@ -551,10 +551,22 @@ class LLMService:
             for step_index in range(self.MAX_TOOL_STEPS):
                 set_chat_failure_stage(ChatFailureStage.LLM_REQUEST)
                 try:
+                    voice_profile = (
+                        self._managed_voice_profile(agent, request=managed_request) if runtime else None
+                    )
                     if runtime:
                         runtime.check()
                         if runtime.business is not None:
-                            gate = await runtime.operation(runtime.business.execution_guard(allow_incomplete=True))
+                            # First Voice step has not dispatched tools yet; reuse the
+                            # gate loaded during PREPARE instead of another result_gate.
+                            reload_gate = not (
+                                step_index == 0
+                                and voice_profile is not None
+                                and not getattr(runtime, "tool_dispatch_attempted", False)
+                            )
+                            gate = await runtime.operation(
+                                runtime.business.execution_guard(
+                                    allow_incomplete=True, reload=reload_gate))
                             if gate is not None:
                                 if gate.halt_status:
                                     raise ManagedExecutionError(gate.error_code, processing_status=gate.halt_status)
@@ -562,7 +574,6 @@ class LLMService:
                         self._check_managed_envelope(agent, messages, openai_tools,
                                                      tool_choice=tool_choice, request=managed_request)
                     model_extra_body = self._managed_model_extra_body(agent, request=managed_request) if runtime else {}
-                    voice_profile = self._managed_voice_profile(agent, request=managed_request) if runtime else None
                     if voice_profile is not None:
                         import time
                         from core.voice_latency_diagnostics import VoiceTiming, emit_voice_timing

@@ -1,5 +1,7 @@
 """Renders owner-controlled business instructions; runtime policy is composed separately."""
 
+import hashlib
+import json
 from dataclasses import dataclass
 
 
@@ -32,12 +34,29 @@ class PromptBuilder:
         from services.prompt_composer import PromptComposer
         return PromptComposer(self).compose(agent, context)
 
+    _static_cache: dict[str, str] = {}
+
     def build_static(self, agent: object) -> str:
         """Only business instructions: safe to cache, no stale time or permissions."""
         config = getattr(agent, "prompt_config", None)
         if config is None:
             return getattr(agent, "system_prompt", None) or ""
-        return self._build_from_config(config, agent)
+        # Voice turns rebuild the same static layer every PREPARE; cache by
+        # canonical config bytes plus agent name.
+        payload = json.dumps(
+            {"name": getattr(agent, "name", ""), "config": config},
+            ensure_ascii=False, allow_nan=False, sort_keys=True, separators=(",", ":"),
+            default=str,
+        )
+        cache_key = hashlib.sha256(payload.encode()).hexdigest()
+        cached = self._static_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        result = self._build_from_config(config, agent)
+        if len(self._static_cache) >= 64:
+            self._static_cache.clear()
+        self._static_cache[cache_key] = result
+        return result
 
     def _build_from_config(self, config: dict, agent: object) -> str:
         company = config.get("company", {})

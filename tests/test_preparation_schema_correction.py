@@ -174,6 +174,15 @@ def test_feedback_has_only_fixed_rule_and_schema_owned_path_and_never_resolves_r
             PreparationSchema({'$ref': ref})
 
 
+def test_preparation_schema_reuses_compiled_validator_for_identical_parameters():
+    parameters = {'type': 'object', 'properties': {'actions': {'type': 'array'}},
+                  'required': ['actions'], 'additionalProperties': False}
+    first = PreparationSchema(parameters)
+    second = PreparationSchema(dict(parameters))
+    assert first is second
+    assert first.feedback({'actions': 'x'})['error']['rule'] == 'type'
+
+
 def test_customer_xor_remains_strict_and_feedback_does_not_coerce():
     from business_capabilities.registry import WIRE_REGISTRY
     schema = PreparationSchema(WIRE_REGISTRY['booking_create'].tool()['function']['parameters'])
