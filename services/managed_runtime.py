@@ -35,6 +35,7 @@ class ManagedRuntime:
         self.tool_dispatch_attempted = False
         self.business = None
         self.collector = None
+        self.caller_phone = ""
         self.started_stdio_count = 0
         self.managers = []
 

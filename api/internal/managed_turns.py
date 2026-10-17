@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import re
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -16,6 +17,15 @@ from services.managed_streaming import SentenceAccumulator
 from services.managed_turn_service import ManagedAgentNotFound, execute_managed_owned
 
 router = APIRouter()
+
+
+_CALLER_PHONE = re.compile(r"^\+375[0-9]{9}$")
+
+
+def caller_phone_header(request: Request) -> str:
+    """Validated caller ANI carried outside the bounded body/fingerprint."""
+    value = request.headers.get("X-Caller-Phone", "")
+    return value if _CALLER_PHONE.fullmatch(value) else ""
 
 
 def _request_schema(model=ManagedTurnRequest):
@@ -150,6 +160,7 @@ async def execute_managed_turn(request: Request):
     if grant is None:
         return boundary_error(404, "AGENT_NOT_FOUND")
     runtime = ManagedRuntime(get_settings().managed_ai_execution_seconds, request=value)
+    runtime.caller_phone = caller_phone_header(request)
     provider = request.app.dependency_overrides.get(get_db, get_db)
     factory = _business_dependency(request, get_business_session_factory)
     registry = _business_dependency(request, get_business_registry)
