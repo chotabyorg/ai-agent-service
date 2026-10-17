@@ -199,7 +199,9 @@ class PrivacyProxyLLMClient:
 class LLMService:
     """Generate responses using agent config, Redis history and MCP tools."""
 
-    MAX_TOOL_STEPS = 20
+    # Bounded tool loop: each step is one model round trip, so a smaller cap
+    # keeps a pathological turn from running for minutes.
+    MAX_TOOL_STEPS = 8
 
     def __init__(
         self,
