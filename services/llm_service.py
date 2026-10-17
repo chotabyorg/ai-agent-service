@@ -201,8 +201,8 @@ class LLMService:
 
     MAX_TOOL_STEPS = 20
     # Voice turns must not stall in a search loop: beyond this many calls of the
-    # same tool the model is told to answer with what it already has.
-    VOICE_TOOL_REPEAT_LIMIT = 2
+    # same search tool the model is told to answer with what it already has.
+    VOICE_SEARCH_REPEAT_LIMIT = 2
 
     def __init__(
         self,
@@ -811,6 +811,19 @@ class LLMService:
                         # parsing and cannot reach a later scripted completion.
                         if func_name not in tool_registry or runtime.business is None:
                             raise ManagedExecutionError("TOOL_SETUP_FAILED")
+                        used = tool_counts.get(func_name, 0)
+                        if (voice_profile is not None and func_name == "resource_search"
+                                and used >= self.VOICE_SEARCH_REPEAT_LIMIT):
+                            # A voice caller must not wait through a search loop.
+                            messages.append({
+                                "role": "tool", "tool_call_id": tool_call.id, "name": func_name,
+                                "content": json.dumps(
+                                    {"note": ("Данных достаточно: не вызывай этот инструмент снова, "
+                                              "ответь на основе уже полученного.")},
+                                    ensure_ascii=False),
+                            })
+                            continue
+                        tool_counts[func_name] = used + 1
                         func_args = parse_managed_tool_arguments(func_args_str)
                         from schemas.business import BusinessSafetyError
                         if voice_profile is not None:
@@ -903,23 +916,6 @@ class LLMService:
                         continue
 
                     executed_calls.add(call_signature)
-                    if voice_profile is not None:
-                        used = tool_counts.get(func_name, 0)
-                        if used >= self.VOICE_TOOL_REPEAT_LIMIT:
-                            messages.append(
-                                {
-                                    "role": "tool",
-                                    "tool_call_id": tool_call.id,
-                                    "name": func_name,
-                                    "content": json.dumps(
-                                        {"note": ("Данных достаточно: не вызывай этот инструмент снова, "
-                                                  "ответь на основе уже полученного.")},
-                                        ensure_ascii=False,
-                                    ),
-                                }
-                            )
-                            continue
-                        tool_counts[func_name] = used + 1
                     manager = tool_registry.get(func_name)
                     if manager is None:
                         tool_result_text = json.dumps(
