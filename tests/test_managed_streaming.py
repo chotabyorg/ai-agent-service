@@ -235,6 +235,37 @@ def test_accumulator_freezes_on_revision_and_bounds_input():
         acc.feed(None)
 
 
+def test_first_chunk_cuts_at_a_clause_boundary_before_the_sentence_ends():
+    acc = SentenceAccumulator(first_min_chars=4, first_max_chars=20)
+    assert acc.feed("Раз, два три четыре пять шесть") == ["Раз, "]
+    assert acc.emitted == "Раз, "
+    assert acc.feed("Раз, два три четыре пять шесть") == []
+
+
+def test_first_chunk_falls_back_to_a_word_boundary_without_punctuation():
+    acc = SentenceAccumulator(first_min_chars=4, first_max_chars=12)
+    assert acc.feed("один два три четыре пять") == ["один два "]
+    assert acc.feed("один два три четыре пять. Шесть") == ["три четыре пять. "]
+
+
+def test_first_chunk_waits_for_enough_text_or_a_boundary():
+    acc = SentenceAccumulator(first_min_chars=10, first_max_chars=40)
+    assert acc.feed("коротко") == []
+    # Long enough, but no clause mark and no word boundary inside the window.
+    assert SentenceAccumulator(first_min_chars=10, first_max_chars=14).feed("а" * 20) == []
+
+
+def test_default_first_chunk_keeps_short_completed_sentences_strict():
+    acc = SentenceAccumulator()
+    assert acc.feed("Коротко.") == []
+    assert acc.feed("Коротко. Да") == ["Коротко. "]
+
+
+def test_first_chunk_requires_ordered_bounds():
+    with pytest.raises(ValueError, match="Invalid streaming bounds"):
+        SentenceAccumulator(first_min_chars=40, first_max_chars=20)
+
+
 def test_streaming_request_contract_defaults_and_version_gate():
     from schemas.managed_turn import ManagedTurnRequest
 

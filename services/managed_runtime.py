@@ -36,6 +36,7 @@ class ManagedRuntime:
         self.business = None
         self.collector = None
         self.caller_phone = ""
+        self.knowledge_task = None
         self.started_stdio_count = 0
         self.managers = []
 

@@ -107,3 +107,38 @@ async def test_llm_knowledge_base_hook_fail_opens_on_unexpected_formatter_error(
     monkeypatch.setattr(service.settings, "internal_api_token", "service-token")
 
     assert await service._build_knowledge_base_message(agent=agent, query="Question") is None
+
+
+@pytest.mark.asyncio
+async def test_prefetch_skips_operation_scope_but_inline_uses_it(monkeypatch) -> None:
+    agent = SimpleNamespace(id=uuid4(), user_id=uuid4())
+    HookFakeKnowledgeBaseClient.contexts = []
+    HookFakeKnowledgeBaseClient.calls = []
+    monkeypatch.setattr(llm_service_module, "KnowledgeBaseClient", HookFakeKnowledgeBaseClient)
+
+    service = LLMService()
+    monkeypatch.setattr(service.settings, "knowledge_base_enabled", True)
+    monkeypatch.setattr(
+        service.settings, "knowledge_base_service_url", "http://knowledge-base-service:8000"
+    )
+    monkeypatch.setattr(service.settings, "knowledge_base_timeout_seconds", 2.0)
+    monkeypatch.setattr(service.settings, "knowledge_base_max_chars_per_chunk", 1000)
+    monkeypatch.setattr(service.settings, "knowledge_base_max_total_context_chars", 3000)
+    monkeypatch.setattr(service.settings, "internal_api_token", "service-token")
+
+    scopes: list[str] = []
+
+    class RecordingRuntime:
+        async def operation(self, awaitable):
+            scopes.append("operation")
+            return await awaitable
+
+    runtime = RecordingRuntime()
+    await service._build_knowledge_base_message(
+        agent=agent, query="q", runtime=runtime, use_operation=False
+    )
+    assert scopes == []
+    await service._build_knowledge_base_message(
+        agent=agent, query="q", runtime=runtime, use_operation=True
+    )
+    assert scopes == ["operation"]
