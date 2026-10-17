@@ -82,5 +82,6 @@ async def test_buffered_turn_stays_single_json_without_opt_in(
     result = (await execute(api_client, value)).json()
     assert result["status"] == "DRAFT_READY"
     assert result["draft_text"] == "Тихий ответ."
-    assert result["partial_final"] is False
+    # Deployed clients forbid unknown result fields; partial keys are SSE-only.
+    assert not {"partial_text", "partial_final"} & set(result)
     assert "stream" not in model.chat.completions.calls[0]

@@ -180,7 +180,8 @@ async def execute_managed_turn(request: Request):
             await disconnect
         except asyncio.CancelledError:
             pass
-    return JSONResponse(result.model_dump(mode="json"), headers={"Cache-Control": "no-store"})
+    return JSONResponse(result.model_dump(mode="json", exclude={"partial_text", "partial_final"}),
+                        headers={"Cache-Control": "no-store"})
 
 
 @router.post("/managed-turns/evidence", response_model=ManagedEvidenceResult,
