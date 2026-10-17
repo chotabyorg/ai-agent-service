@@ -200,6 +200,9 @@ class LLMService:
     """Generate responses using agent config, Redis history and MCP tools."""
 
     MAX_TOOL_STEPS = 20
+    # Voice turns must not stall in a search loop: beyond this many calls of the
+    # same search tool the model is told to answer with what it already has.
+    VOICE_SEARCH_REPEAT_LIMIT = 2
 
     def __init__(
         self,
@@ -467,14 +470,19 @@ class LLMService:
             system_prompt += (
                 "\n\nЕсли последняя реплика клиента — ровно «[silence]», значит он молчит: "
                 "коротко спроси, на связи ли он, и предложи помощь. Не произноси это служебное слово."
+                "\n\nЕсли для ответа нужна проверка или запись — выполни её сразу в этом же ответе "
+                "и сообщи результат или предложение. Не говори «я проверю» и не заканчивай ответ обещанием."
             )
         if voice_profile is not None and caller_phone:
-            # The caller's own number is the booking contact; do not make them
-            # dictate it (VAD/STT cut digits badly).
             system_prompt += (
-                "\n\nНомер, с которого звонит клиент: " + caller_phone
-                + ". Для записи используй этот номер: не проси клиента диктовать телефон "
-                "и подтверди, что записываешь на него."
+                "\n\nКлиент звонит с номера " + caller_phone
+                + ". Этот номер уже известен: никогда не проси продиктовать телефон и не переспрашивай "
+                "его — сразу используй этот номер для записи."
+            )
+        elif voice_profile is not None:
+            system_prompt += (
+                "\n\nТелефон для записи ещё неизвестен: коротко попроси продиктовать его и используй "
+                "именно продиктованные цифры, не подменяя их другим номером."
             )
         knowledge_overrides = (
             {"max_chars_per_chunk": 500, "max_total_context_chars": 1200}
@@ -581,6 +589,7 @@ class LLMService:
                     agent, messages, openai_tools, selected_indices, communication, simple_selection,
                     tool_choice=tool_choice, request=managed_request,
                 )
+            tool_counts: dict[str, int] = {}
             for step_index in range(self.MAX_TOOL_STEPS):
                 set_chat_failure_stage(ChatFailureStage.LLM_REQUEST)
                 try:
@@ -802,6 +811,19 @@ class LLMService:
                         # parsing and cannot reach a later scripted completion.
                         if func_name not in tool_registry or runtime.business is None:
                             raise ManagedExecutionError("TOOL_SETUP_FAILED")
+                        used = tool_counts.get(func_name, 0)
+                        if (voice_profile is not None and func_name == "resource_search"
+                                and used >= self.VOICE_SEARCH_REPEAT_LIMIT):
+                            # A voice caller must not wait through a search loop.
+                            messages.append({
+                                "role": "tool", "tool_call_id": tool_call.id, "name": func_name,
+                                "content": json.dumps(
+                                    {"note": ("Данных достаточно: не вызывай этот инструмент снова, "
+                                              "ответь на основе уже полученного.")},
+                                    ensure_ascii=False),
+                            })
+                            continue
+                        tool_counts[func_name] = used + 1
                         func_args = parse_managed_tool_arguments(func_args_str)
                         from schemas.business import BusinessSafetyError
                         if voice_profile is not None:
