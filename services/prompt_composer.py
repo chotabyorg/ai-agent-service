@@ -42,7 +42,7 @@ PLATFORM_POLICY = """<platform_policy>
 
 
 class PromptComposer:
-    """Platform → owner business → safe runtime view → channel/time → knowledge."""
+    """Platform → owner business → safe runtime view → knowledge → channel/time."""
 
     def __init__(self, business_builder: PromptBuilder | None = None) -> None:
         self.business_builder = business_builder or PromptBuilder()
