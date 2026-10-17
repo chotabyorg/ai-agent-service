@@ -51,14 +51,16 @@ class PromptComposer:
         self, agent: object, context: ChatContext, *,
         runtime_context: RuntimeCapabilityContext | None = None, knowledge_context: str | None = None,
     ) -> str:
+        # Static layers first, volatile last: provider prefix caching then reuses
+        # platform_policy + business + runtime across turns of the same call.
         sections = [
             PLATFORM_POLICY,
             "<business_prompt>\n" + self.business_builder.build_static(agent) + "\n</business_prompt>",
             self.runtime_section(runtime_context),
-            self._channel_and_time(agent, context),
         ]
         if knowledge_context:
             sections.append(self.knowledge_section(knowledge_context))
+        sections.append(self._channel_and_time(agent, context))
         return "\n\n".join(sections)
 
     @staticmethod
