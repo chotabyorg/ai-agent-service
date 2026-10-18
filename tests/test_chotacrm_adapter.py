@@ -110,11 +110,11 @@ async def test_proposal_tool_instructs_preparation_before_later_confirmation(db_
     assert 'one business action' in description
     assert 'same existing customer_ref' in description
     assert 'other combinations are unsupported' in description
-    assert 'if lookup returns none' in description
+    assert 'runtime checks the exact phone/email automatically' in description
     assert 'only after confirmation' in description
     assert 'never call customer_create first' in description
     booking_description = tools['booking_create']['description'].lower()
-    assert 'if lookup returns none' in booking_description
+    assert 'runtime checks supplied identity automatically' in booking_description
     assert 'only after confirmation' in booking_description
     assert 'never call customer_create first' in booking_description
 

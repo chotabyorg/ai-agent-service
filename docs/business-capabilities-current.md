@@ -41,6 +41,17 @@ capabilities are checked. Ambiguous identity never guesses or merges customers.
 Standalone customer/inquiry effects remain WRITE_SAFE; the model should use the
 booking aggregate when booking a new customer in the same Turn.
 
+The advertised booking tools accept supplied customer details directly; their
+guarded preflight performs the exact identity lookup without an extra model-driven
+lookup step. An existing match still requires an explicit `customer_ref` proposal;
+no frozen arguments are silently rewritten. A failed/invalid model-driven
+customer lookup returns a safe clarification rather than allowing a guessed
+`customer.create`. Once availability or booking preparation starts (including a
+booking in the same model tool-call batch), a separate `customer.create` receives
+`BOOKING_AGGREGATE_REQUIRED` before any plan is reserved. A standalone contact-save
+request retains its existing WRITE_SAFE policy. This is request-local guidance,
+not a second ledger, retry permission, or a change to confirmation authority.
+
 One confirmation may cover a booking.create plus deal.create bundle for the same
 existing customer reference. Other mixed proposals are rejected before reservation:
 reschedule/cancel/move effects invalidate their own preconditions, and new-customer

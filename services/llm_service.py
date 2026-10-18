@@ -752,6 +752,7 @@ class LLMService:
                 if runtime:
                     feedback = None
                     invalid_call = None
+                    booking_in_batch = False
                     # Preflight preparation members before dispatching ANY call
                     # in this completion, including an earlier WRITE_SAFE call.
                     for call in message.tool_calls:
@@ -765,6 +766,10 @@ class LLMService:
                         if feedback is not None:
                             invalid_call = call
                             break
+                        booking_in_batch |= name == 'booking_create' or (
+                            name == 'business_propose' and any(
+                                action['capability'] == 'booking.create'
+                                for action in arguments['actions']))
                     if invalid_call is not None:
                         if (correction_used or required_proposal_id is not None or len(message.tool_calls) != 1
                                 or getattr(invalid_call, "type", None) != "function"
@@ -786,6 +791,10 @@ class LLMService:
                         self._check_managed_envelope(agent, messages, openai_tools,
                                                      tool_choice=tool_choice, request=managed_request)
                         continue
+                    if booking_in_batch and runtime.business is not None:
+                        # Refuse a preceding customer_create in this same model
+                        # batch before it can consume the booking's sole plan.
+                        runtime.business._booking_workflow_started = True
                     seen_tool_ids.update(call.id for call in message.tool_calls
                         if isinstance(getattr(call, "id", None), str))
                 messages.append(self._assistant_message_to_dict(message, managed=runtime is not None))
@@ -973,13 +982,14 @@ class LLMService:
         if caller_phone:
             suffix += (
                 "\n\nКлиент звонит с номера " + caller_phone
-                + ". Этот номер уже известен: никогда не проси продиктовать телефон и не переспрашивай "
-                "его — сразу используй этот номер для записи."
+                + ". Используй его для записи, если клиент явно не указал другой контактный номер. "
+                "Не проси повторять уже известный номер."
             )
         else:
             suffix += (
-                "\n\nТелефон для записи ещё неизвестен: коротко попроси продиктовать его и используй "
-                "именно продиктованные цифры, не подменяя их другим номером."
+                "\n\nВходящий номер недоступен. Если клиент уже назвал контактный телефон в разговоре, "
+                "используй его без повторного вопроса. Если телефон ещё не указан и нужен для записи, "
+                "коротко попроси его назвать. Используй именно продиктованные цифры."
             )
         return suffix
 

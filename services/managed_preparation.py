@@ -131,7 +131,7 @@ def _safe_lookup_draft(category):
         return 'По этому контакту найдено несколько клиентов. Уточните, пожалуйста, другой контакт.'
     if category == 'CAPABILITY_DISABLED':
         return 'Не удалось проверить контакт для записи. Уточните, пожалуйста, контакт или попробуйте позже.'
-    return 'Не удалось проверить контакт. Пожалуйста, попробуйте позже или уточните другой контакт.'
+    return 'Не удалось проверить контакт. Попробуйте, пожалуйста, чуть позже.'
 
 
 def _observe_preparation(runtime, *, name, lookup_result='NOT_RUN', refusal='NONE',
@@ -189,6 +189,8 @@ async def prepare_booking_customer_reuse(runtime, name, arguments):
         raise
 
     booking = next((action for action in actions if action.capability == 'booking.create'), None)
+    if booking is not None:
+        runtime._booking_workflow_started = True
     customer = booking.arguments.get('customer') if booking is not None else None
     if customer is None:
         _observe_preparation(runtime, name=name)
