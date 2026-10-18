@@ -130,6 +130,8 @@ def _validated_preparation_actions(runtime, name, arguments):
 
 
 def _safe_lookup_draft(category):
+    if category == 'VALIDATION_ERROR':
+        return 'Не удалось проверить контакт. Продиктуйте, пожалуйста, номер с кодом страны.'
     if category == 'IDENTITY_CONFLICT':
         return 'Этот контакт уже связан с другим именем. Уточните, пожалуйста, какое имя указать для записи.'
     if category == 'AMBIGUOUS_IDENTITY':
@@ -296,6 +298,8 @@ async def prepare_booking_customer_reuse(runtime, name, arguments):
             refusal, draft = 'AMBIGUOUS_IDENTITY', _safe_lookup_draft('AMBIGUOUS_IDENTITY')
         elif error_code == 'IDENTITY_CONFLICT':
             refusal, draft = 'IDENTITY_CONFLICT', _safe_lookup_draft('IDENTITY_CONFLICT')
+        elif error_code == 'VALIDATION_ERROR':
+            refusal, draft = 'VALIDATION_ERROR', _safe_lookup_draft('VALIDATION_ERROR')
         else:
             refusal, draft = 'LOOKUP_UNAVAILABLE', _safe_lookup_draft('LOOKUP_UNAVAILABLE')
         _observe_preparation(runtime, name=name, lookup_result='ERROR', refusal=refusal,

@@ -12,6 +12,7 @@ from schemas.managed_turn import ManagedTurnRequest
 from services.voice_booking_tools import booking_tools
 from services.managed_preparation import _observe_lookup_failure
 from schemas.business import BusinessSafetyError
+from tests.test_chotacrm_managed_proposal_errors import install_managed_crm
 from tests.test_booking_workflow import tool
 from tests.test_business_runtime import later
 from tests.test_managed_turns import execute
@@ -110,3 +111,19 @@ async def test_hidden_generic_tool_cannot_dispatch(api_client, db_session, monke
     assert calls['execute'] == calls['facts'] == calls['lookup'] == 0
     async with db_session() as db:
         assert await db.scalar(select(BusinessPlan)) is None
+
+
+@pytest.mark.integration
+async def test_invalid_contact_requests_clarification_without_effects(api_client, db_session, monkeypatch):
+    value, arguments, _, calls, effect, model = await install_managed_crm(
+        api_client, db_session, monkeypatch, 200, {}, channel='VOICE',
+        lookup_response={'status': 'ERROR', 'error': {
+            'code': 'VALIDATION_ERROR', 'message': 'private-contact-sentinel', 'retry': 'NEVER'}})
+    model.chat.completions.queue(tool('booking_create', arguments, 'invalid-contact'))
+    result = (await execute(api_client, value)).json()
+    assert result['status'] == 'DRAFT_READY'
+    assert 'номер с кодом страны' in result['draft_text']
+    assert 'private-contact-sentinel' not in result['draft_text']
+    assert 'позже' not in result['draft_text']
+    assert calls['lookup'] == 1 and calls['facts'] == calls['execute'] == 0
+    assert effect.permit_requests == []
