@@ -26,7 +26,7 @@ def customer_reuse_arguments(name, arguments, payload):
         booking = expected['actions'][0]['arguments']
     else:
         raise ManagedExecutionError('INVALID_RESULT')
-    if 'customer' not in booking or 'customer_ref' in booking:
+    if 'customer' not in booking or booking.get('customer_ref') is not None:
         raise ManagedExecutionError('INVALID_RESULT')
     del booking['customer']
     booking['customer_ref'] = ref

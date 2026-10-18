@@ -27,12 +27,18 @@ async def fixture(api_client, db_session, monkeypatch, channel, tool):
 
 
 @pytest.mark.integration
+@pytest.mark.parametrize('null_reference', [False, True])
 @pytest.mark.parametrize('channel', ['VOICE', 'WEBSITE_WIDGET'])
 @pytest.mark.parametrize('tool', ['booking_create', 'business_propose'])
 async def test_existing_customer_is_prepared_in_same_turn_then_confirmed_once(
-        api_client, db_session, monkeypatch, channel, tool):
-    value, _, corrected, calls, effect, model, initial = await fixture(
+        api_client, db_session, monkeypatch, channel, tool, null_reference):
+    value, args, corrected, calls, effect, model, initial = await fixture(
         api_client, db_session, monkeypatch, channel, tool)
+    if null_reference:
+        # The advertised oneOf rejects both keys even when one is null.
+        # Preserve that contract: correct the schema before runtime lookup.
+        model.chat.completions.queue(preparation(
+            tool, preparation_arguments(tool, {**args, 'customer_ref': None}), 'bad-null'))
     model.chat.completions.queue(initial,
         preparation(tool, preparation_arguments(tool, corrected), 'explicit-reference'))
     response = await execute(api_client, value)
@@ -41,11 +47,12 @@ async def test_existing_customer_is_prepared_in_same_turn_then_confirmed_once(
     assert 'Подтверждаете' in result['draft_text']
     assert calls['lookup'] == 1 and calls['facts'] >= 1 and calls['execute'] == 0
     assert not effect.permit_requests
-    assert len(model.chat.completions.calls) == 2
-    continuation = model.chat.completions.calls[1]
+    assert len(model.chat.completions.calls) == 2 + int(null_reference)
+    continuation = model.chat.completions.calls[-1]
     assert 'tool_choice' not in continuation
     assert [t['function']['name'] for t in continuation['tools']] == [tool]
-    assert continuation['messages'][-1]['role'] == 'system'
+    assert any(m['role'] == 'system' and 'preparation is INCOMPLETE' in m['content']
+               for m in continuation['messages'])
     async with db_session() as db:
         plan = (await db.scalars(select(BusinessPlan))).one()
         assert plan.proposal_state == 'PREPARED'
