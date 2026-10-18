@@ -275,8 +275,10 @@ async def test_v2_natural_confirmation_uses_frozen_origin_outside_window_and_ret
         operation = await session.get(BusinessOperation, proposal.operations[0].id)
         frozen = (operation.request_payload, operation.request_fingerprint, operation.provider_idempotency_key,
                   operation.receipt_evidence, operation.receipt_id, operation.receipt_fingerprint)
-    restarted = await open_business_runtime(ManagedTurnRequest.model_validate_json(request.model_dump_json()),
-        original.grant, db_session, registry)
+    restarted = await open_business_runtime(
+        ManagedTurnRequest.model_validate_json(request.model_dump_json(exclude_unset=True)),
+        original.grant, db_session, registry,
+    )
     await decide(restarted, proposal, "CONFIRM")
     assert restarted.collector.snapshot() == refs and provider.posts == 1
     async with db_session() as session:
@@ -356,17 +358,26 @@ async def test_retained_turn_rejects_changed_window_identity_and_wire_version(db
     original, _, registry = await setup_semantic(db_session)
     request = bounded_later(original.request, "+")
     await open_business_runtime(request, original.grant, db_session, registry)
-    restarted = ManagedTurnRequest.model_validate_json(request.model_dump_json())
+    restarted = ManagedTurnRequest.model_validate_json(
+        request.model_dump_json(exclude_unset=True)
+    )
     assert request_fingerprint(request) == request_fingerprint(restarted)
     await open_business_runtime(restarted, original.grant, db_session, registry)
-    changed_window = request.model_dump(mode="json")
+    materialized_defaults = ManagedTurnRequest.model_validate_json(request.model_dump_json())
+    assert request_fingerprint(request) != request_fingerprint(materialized_defaults)
+    with pytest.raises(BusinessSafetyError, match="TURN_CONFLICT"):
+        await open_business_runtime(
+            materialized_defaults, original.grant, db_session, registry
+        )
+    wire = request.model_dump(mode="json", exclude_unset=True)
+    changed_window = copy.deepcopy(wire)
     changed_window["messages"].pop(0)
-    changed_identity = copy.deepcopy(request.model_dump(mode="json"))
+    changed_identity = copy.deepcopy(wire)
     changed_identity["messages"][0]["id"] = str(uuid4())
     for changed in (changed_window, changed_identity):
         with pytest.raises(BusinessSafetyError, match="TURN_CONFLICT"):
             await open_business_runtime(ManagedTurnRequest.model_validate(changed), original.grant, db_session, registry)
-    changed_version = original.request.model_dump(mode="json")
+    changed_version = original.request.model_dump(mode="json", exclude_unset=True)
     changed_version["contract_version"] = 2
     with pytest.raises(BusinessSafetyError, match="TURN_CONFLICT"):
         await open_business_runtime(ManagedTurnRequest.model_validate(changed_version), original.grant, db_session, registry)
