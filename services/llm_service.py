@@ -557,6 +557,19 @@ class LLMService:
                 if runtime and prompt_context is not None and prompt_context.pending is not None
                 else None
             )
+            presence_reply = False
+            if voice_profile is not None:
+                from services.voice_reply_style import replying_to_connection_check
+                presence_reply = replying_to_connection_check(managed_request)
+            if required_proposal_id is not None and presence_reply:
+                # Offer no CONFIRM choice for a bare answer to the connection
+                # check. The existing runtime still interprets UNRELATED and
+                # owns the pending proposal and all dispatch authority.
+                for tool in openai_tools:
+                    if tool['function']['name'] == 'business_decide_proposal':
+                        import copy
+                        tool['function']['parameters'] = copy.deepcopy(tool['function']['parameters'])
+                        tool['function']['parameters']['properties']['intent']['enum'] = ['UNRELATED']
             if required_proposal_id is not None and "business_decide_proposal" not in tool_registry:
                 raise ManagedExecutionError("INVALID_RESULT")
             tool_choice = ({"type": "function", "function": {"name": "business_decide_proposal"}}
@@ -737,7 +750,8 @@ class LLMService:
                         raise ManagedExecutionError("INVALID_RESULT")
                     decision_args = parse_managed_tool_arguments(getattr(function, "arguments", None))
                     if (set(decision_args) != {"proposal_id", "intent"}
-                            or decision_args["proposal_id"] != required_proposal_id):
+                            or decision_args["proposal_id"] != required_proposal_id
+                            or (presence_reply and decision_args['intent'] != 'UNRELATED')):
                         raise ManagedExecutionError("INVALID_RESULT")
                 if (selected is not None and selected.branch != "TOOL_CALLS") or (
                         selected is None and not getattr(message, "tool_calls", None)):
@@ -1009,9 +1023,6 @@ class LLMService:
 
             suffix += "\n\n" + CONCISE_SPEECH
         suffix += (
-            "\n\nЕсли последняя реплика клиента — ровно «[silence]», значит он молчит: "
-            "один раз коротко и по-человечески спроси, на связи ли он («Вы ещё на линии?»), "
-            "и продолжи по делу. Не повторяй один и тот же вопрос и не произноси служебное слово."
             "\n\nЕсли для ответа нужна проверка или запись — выполни её сразу в этом же ответе "
             "и сообщи результат или предложение. Не говори «я проверю» и не заканчивай ответ обещанием."
             "\n\nЗакрывая разговор, скажи одну короткую тёплую фразу прощания («Всего доброго!») "

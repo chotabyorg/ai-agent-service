@@ -14,6 +14,7 @@ from services.managed_http_cleanup import close_managed_helper, own_managed_http
 from services.managed_runtime import CHANNEL_PROMPT, privacy_id
 from services.managed_tools import ManagedExecutionError
 from services.prompt_builder import ChatContext
+from services.voice_reply_style import is_idle_input as _is_voice_idle_input
 
 
 class ManagedAgentNotFound(Exception):
@@ -182,8 +183,10 @@ async def execute_managed_owned(request, grant, runtime, db_provider, session_fa
             # lifetime. expire_on_commit=False retains the loaded agent values.
             await runtime.operation(db.commit())
             client = None
+            idle_input = profile is not None and _is_voice_idle_input(request)
             if profile is not None:
                 emit_voice_checkpoint(runtime, "SETUP")
+            if profile is not None and not idle_input:
                 client = _owned_client(service, key, request, runtime)
                 if isinstance(client, AsyncOpenAI):
                     runtime.model_warmup = asyncio.create_task(_warm_model_connection(client))
@@ -207,12 +210,22 @@ async def execute_managed_owned(request, grant, runtime, db_provider, session_fa
                 raise ManagedExecutionError(entry.error_code, processing_status=entry.halt_status)
             if entry is not None and entry.safe_draft is not None:
                 answer = entry.safe_draft
+            elif idle_input:
+                # A control question is one complete draft. Do not ask the model
+                # to append business speech while the caller starts answering it.
+                # Entry/final gates and teardown still apply; no tool is called.
+                from services.voice_reply_style import CONNECTION_CHECK
+                answer = CONNECTION_CHECK
             else:
                 if client is None:
                     client = _owned_client(service, key, request, runtime)
+                communication = [_communication(message) for message in request.messages]
+                if profile is not None:
+                    from services.voice_reply_style import past_idle_communication
+                    communication = past_idle_communication(request, communication)
                 answer = await service._execute_core(
                     db, agent=agent, llm_client=client, credentials_records=(),
-                    communication=[_communication(message) for message in request.messages],
+                    communication=communication,
                     chat_context=ChatContext(channel=CHANNEL_PROMPT[request.channel],
                                              external_client_id=f"{EXECUTION_NAMESPACE}:{request.conversation_id}"),
                     query=query, runtime=runtime,
