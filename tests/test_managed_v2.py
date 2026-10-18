@@ -12,11 +12,15 @@ from sqlalchemy import select
 import services.llm_service as llm_module
 from core.config import get_settings
 from core.managed_security import EXECUTION_NAMESPACE
-from models.business import BusinessOperation, BusinessPlan
+from models.business import BusinessOperation, BusinessPlan, BusinessTurnContext
 from schemas.business import BusinessSafetyError
 from schemas.managed_evidence import ManagedEvidenceRequest
 from schemas.managed_turn import MAX_REQUEST_BYTES, ManagedTurnRequest, ManagedTurnResult, OperationReference
-from services.business_repository import BusinessRepository, request_fingerprint
+from services.business_repository import (
+    BusinessRepository,
+    request_fingerprint,
+    request_fingerprint_matches,
+)
 from services.business_runtime import BusinessRuntime
 from services.managed_runtime import privacy_id
 from tests.fakes import build_llm_response
@@ -160,7 +164,7 @@ def test_v2_full_serialized_request_byte_boundary(delta):
             ManagedTurnRequest.model_validate(value)
 
 
-def test_v1_default_and_retained_fingerprint_vector_remain_unchanged():
+def test_v1_pre_stream_and_extension_fingerprint_vectors_remain_distinct():
     value = payload(conversation_id=str(UUID(int=1)), turn_id=str(UUID(int=2)), owner_id="Exact Café owner",
         integration_id=str(UUID(int=3)), agent_id=str(UUID(int=4)), channel="WEBSITE_WIDGET",
         messages=[dict(id=str(UUID(int=5)), sequence=1, actor="CUSTOMER", direction="INBOUND",
@@ -171,6 +175,9 @@ def test_v1_default_and_retained_fingerprint_vector_remain_unchanged():
     assert explicit.model_dump_json() == omitted.model_dump_json()
     assert explicit.window_first_sequence == 1 and explicit.selected_local_indices == [0]
     assert request_fingerprint(explicit) == request_fingerprint(omitted) == \
+        "0bc08928c202523069f4465c469b6207b6a065e8b97b4ef7f9a9ac23c93ddcee"
+    extended = ManagedTurnRequest.model_validate({**value, "stream_partials": False})
+    assert request_fingerprint(extended) == \
         "8fd6425840d08077bef77aece4e6a811ce20babeaa95d7d2b0f7172d7a0d1195"
     v2 = ManagedTurnRequest.model_validate({**value, "contract_version": 2})
     assert request_fingerprint(v2) != request_fingerprint(explicit)
@@ -185,6 +192,28 @@ def test_v1_default_and_retained_fingerprint_vector_remain_unchanged():
     old_window.pop("contract_version")
     with pytest.raises(ValidationError):
         ManagedTurnRequest.model_validate(old_window)
+
+
+def test_only_omitted_stream_fields_get_legacy_business_context_fallback():
+    base = payload(
+        conversation_id=str(UUID(int=1)), turn_id=str(UUID(int=2)), owner_id="Exact Café owner",
+        integration_id=str(UUID(int=3)), agent_id=str(UUID(int=4)), channel="WEBSITE_WIDGET",
+        messages=[dict(id=str(UUID(int=5)), sequence=1, actor="CUSTOMER", direction="INBOUND",
+            content_type="TEXT", text="Café 🌍")], selected_input_message_ids=[str(UUID(int=5))],
+    )
+    omitted = ManagedTurnRequest.model_validate(base)
+    old_extension_digest = "8fd6425840d08077bef77aece4e6a811ce20babeaa95d7d2b0f7172d7a0d1195"
+    assert request_fingerprint_matches(old_extension_digest, omitted)
+
+    changed_core = {**base, "messages": [{**base["messages"][0], "text": "changed"}]}
+    changed = ManagedTurnRequest.model_validate(changed_core)
+    assert not request_fingerprint_matches(old_extension_digest, changed)
+
+    explicit_default = ManagedTurnRequest.model_validate({**base, "stream_partials": False})
+    explicit_custom = ManagedTurnRequest.model_validate({**base, "max_partial_chars": 501})
+    assert not request_fingerprint_matches(request_fingerprint(omitted), explicit_default)
+    assert not request_fingerprint_matches(old_extension_digest, explicit_custom)
+    assert request_fingerprint(explicit_custom) != request_fingerprint(omitted)
 
 
 @pytest.mark.integration
@@ -341,6 +370,129 @@ async def test_retained_turn_rejects_changed_window_identity_and_wire_version(db
     changed_version["contract_version"] = 2
     with pytest.raises(BusinessSafetyError, match="TURN_CONFLICT"):
         await open_business_runtime(ManagedTurnRequest.model_validate(changed_version), original.grant, db_session, registry)
+
+
+@pytest.mark.asyncio
+async def test_existing_business_turn_context_replays_old_defaulted_hash_but_rejects_changed_core(
+    db_session, monkeypatch,
+):
+    from services import business_repository as business_repository_module
+
+    current_fingerprint = business_repository_module.request_fingerprint
+
+    def old_defaulted_fingerprint(request):
+        fields = request.model_dump(mode="json")
+        fields["stream_partials"] = False
+        fields["max_partial_chars"] = 2000
+        return current_fingerprint(ManagedTurnRequest.model_validate(fields))
+
+    # Insert the exact former AI representation from source history; do not
+    # mutate an immutable retained row to manufacture the compatibility case.
+    with monkeypatch.context() as legacy_insert:
+        legacy_insert.setattr(
+            business_repository_module, "request_fingerprint", old_defaulted_fingerprint
+        )
+        original, _, registry = await setup_semantic(db_session)
+    wire = original.request.model_dump(mode="json")
+    wire.pop("stream_partials")
+    wire.pop("max_partial_chars")
+    replay_request = ManagedTurnRequest.model_validate(wire)
+    extension_request = ManagedTurnRequest.model_validate({
+        **wire, "stream_partials": False, "max_partial_chars": 2000,
+    })
+    old_defaulted_hash = request_fingerprint(extension_request)
+    async with db_session() as session, session.begin():
+        context = await session.scalar(select(BusinessTurnContext).where(
+            BusinessTurnContext.turn_id == replay_request.turn_id
+        ))
+        assert context is not None
+        assert context.request_fingerprint == old_defaulted_hash
+
+    # The existing context uses the old AI full-default digest. The retained
+    # BusinessTurnContext matcher accepts that exact historical shape while
+    # the request itself uses the pre-stream wire representation.
+    await open_business_runtime(replay_request, original.grant, db_session, registry)
+
+    changed = replay_request.model_dump(mode="json")
+    changed.pop("stream_partials")
+    changed.pop("max_partial_chars")
+    changed["messages"][-1]["text"] += " changed"
+    with pytest.raises(BusinessSafetyError, match="TURN_CONFLICT"):
+        await open_business_runtime(
+            ManagedTurnRequest.model_validate(changed), original.grant, db_session, registry
+        )
+
+
+@pytest.mark.asyncio
+async def test_legacy_context_recovery_keeps_effect_permit_and_operation_reference(db_session, monkeypatch):
+    from schemas.conversation_effects import managed_request_fingerprint
+    from services import business_repository as business_repository_module
+
+    current_fingerprint = business_repository_module.request_fingerprint
+
+    def old_defaulted_fingerprint(request):
+        fields = request.model_dump(mode="json")
+        fields["stream_partials"] = False
+        fields["max_partial_chars"] = 2000
+        return current_fingerprint(ManagedTurnRequest.model_validate(fields))
+
+    # Seed the immutable Business context as an older AI release did, then
+    # exercise the normal omitted-fields wire request through effect acquisition.
+    with monkeypatch.context() as legacy_insert:
+        legacy_insert.setattr(
+            business_repository_module, "request_fingerprint", old_defaulted_fingerprint
+        )
+        runtime, provider, registry, _ = await setup_business(db_session)
+
+    provider.lose_next = True
+    result = await runtime.execute_plan(actions("18:00"))
+    assert result.halt_status == "UNKNOWN" and provider.posts == 1 and provider.lookups == 0
+    initial_ref = runtime.collector.snapshot()[0]
+    assert initial_ref.outcome == "UNKNOWN"
+    operation_id = UUID(initial_ref.operation_id)
+
+    async with db_session() as session:
+        operation = await session.get(BusinessOperation, operation_id)
+        retained_effect = (
+            operation.effect_request_turn_id,
+            operation.effect_request_fingerprint,
+            operation.effect_managed_request_fingerprint,
+            operation.effect_operation_fingerprint,
+            operation.effect_permit_id,
+        )
+    assert retained_effect[0] == runtime.request.turn_id
+    assert retained_effect[1] and retained_effect[3] and retained_effect[4]
+    assert retained_effect[2] == managed_request_fingerprint(runtime.request)
+    assert len(runtime.effect_port.permit_requests) == 1
+    assert runtime.effect_port.permit_requests[0].managed_request_fingerprint == retained_effect[2]
+
+    legacy_wire = runtime.request.model_dump(mode="json", exclude_unset=True)
+    assert "stream_partials" not in legacy_wire and "max_partial_chars" not in legacy_wire
+    reloaded = ManagedTurnRequest.model_validate_json(
+        json.dumps(legacy_wire, ensure_ascii=False)
+    )
+    restarted = await open_business_runtime(reloaded, runtime.grant, db_session, registry)
+    gate = await restarted.repository.result_gate(reloaded, runtime.grant)
+    assert gate.disposition == "UNKNOWN" and not gate.request_conflict
+    assert gate.references == [initial_ref]
+
+    reconciled = await restarted.reconcile(operation_id)
+    assert reconciled.operations[0].status == "SUCCEEDED"
+    assert provider.posts == 1 and provider.lookups == 1
+    assert restarted.collector.snapshot() == [initial_ref.model_copy(update={"outcome": "SUCCEEDED"})]
+    terminal_gate = await restarted.repository.result_gate(reloaded, runtime.grant)
+    assert terminal_gate.disposition == "ALL_SUCCEEDED" and not terminal_gate.request_conflict
+    assert terminal_gate.references == restarted.collector.snapshot()
+
+    async with db_session() as session:
+        operation = await session.get(BusinessOperation, operation_id)
+        assert (
+            operation.effect_request_turn_id,
+            operation.effect_request_fingerprint,
+            operation.effect_managed_request_fingerprint,
+            operation.effect_operation_fingerprint,
+            operation.effect_permit_id,
+        ) == retained_effect
 
 
 @pytest.mark.asyncio

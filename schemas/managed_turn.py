@@ -132,6 +132,43 @@ class ManagedTurnRequest(ManagedValue):
         return self
 
 
+STREAM_EXTENSION_FIELDS = ("stream_partials", "max_partial_chars")
+DEFAULT_STREAM_PARTIALS = False
+DEFAULT_MAX_PARTIAL_CHARS = 2000
+
+
+def canonical_managed_request_fields(request: ManagedTurnRequest) -> dict:
+    """Return the Conversation identity fields represented by this wire shape.
+
+    Older Conversation readers omitted both stream extension fields. Preserve
+    that pre-stream identity only when both were absent on the wire. Once either
+    field was supplied, include the complete extension pair using the validated
+    default for its missing counterpart. ``model_dump`` intentionally retains
+    the defaulted contract_version so an omitted v1 version remains canonical.
+    """
+    fields = request.model_dump(mode="json")
+    explicitly_set = request.model_fields_set
+    if not any(name in explicitly_set for name in STREAM_EXTENSION_FIELDS):
+        for name in STREAM_EXTENSION_FIELDS:
+            fields.pop(name)
+    else:
+        if "stream_partials" not in explicitly_set:
+            fields["stream_partials"] = DEFAULT_STREAM_PARTIALS
+        if "max_partial_chars" not in explicitly_set:
+            fields["max_partial_chars"] = DEFAULT_MAX_PARTIAL_CHARS
+    return fields
+
+
+def managed_request_fields_with_extensions(
+    request: ManagedTurnRequest, *, stream_partials: bool, max_partial_chars: int
+) -> dict:
+    """Build a complete extension-era identity for the legacy Business reader."""
+    fields = request.model_dump(mode="json")
+    fields["stream_partials"] = stream_partials
+    fields["max_partial_chars"] = max_partial_chars
+    return fields
+
+
 class OperationReference(ManagedValue):
     origin: Literal["AI_AGENT_SERVICE"]
     operation_id: Annotated[str, Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")]

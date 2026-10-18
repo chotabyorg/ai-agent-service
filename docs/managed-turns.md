@@ -140,8 +140,24 @@ opaque ASCII1..128,outcome:SUCCEEDED|FAILED|UNKNOWN|null}` values; it is not a l
 
 Each wire projection is immutable: request fingerprints include its version and
 exact Messages and remain fenced by the existing Business retained Turn context.
-v1 fingerprint bytes and retained evidence are unchanged; a v1 and v2 projection
-of the same Turn are not equivalent. No old Turn/evidence migration is performed.
+For the two stream extension fields, AI uses the request's validated
+`model_fields_set`: if both are absent, the canonical request omits both; if
+either is present, it includes the complete pair and pins a missing counterpart
+to `false` or `2000`. `contract_version` remains explicit in either digest,
+including when wire v1 omits it. Conversation's JSON-envelope digest and the
+Business ledger's namespace-newline-JSON digest keep their distinct envelopes.
+
+On existing `BusinessTurnContext` rows only, a request that omits both stream
+fields may also match the old AI digest that included `false/2000`; all remaining
+request fields must still match exactly. Explicit extension settings never use
+that fallback. Sidecar DTO hashes continue to cover their exact serialized shape
+and do not use the Business ledger fallback.
+
+Roll this reader out before Conversation begins writing extension fields
+explicitly. It accepts pre-stream and extension-era readers while new Business
+contexts store the canonical profile hash. This is a source-only compatibility
+change: no old Turn, Business context or evidence row is migrated or rewritten.
+A v1 and v2 projection of the same Turn remain distinct.
 `OperationReference` and the read-only `ManagedEvidenceRequest`/Result remain v1
 with their existing fields, limits and scope. The evidence endpoint may read refs
 for a v2 execution through the existing v1 identity request.

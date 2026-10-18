@@ -234,7 +234,9 @@ class Observe:
             await self.app(scope, receive, observe_send)
         finally:
             if managed and scope.get("managed_turn_request") is not None:
-                self.state.record("managed_projections", scope["managed_turn_request"].model_dump(mode="json"))
+                request = scope["managed_turn_request"]
+                self.state.record("managed_projections", request.model_dump(mode="json"))
+                self.state.record("managed_projection_fields_set", sorted(request.model_fields_set))
 
 
 def run():
