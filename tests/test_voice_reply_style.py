@@ -18,6 +18,29 @@ from tests.test_voice_latency import profile
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('latest', ['[silence]', 'да'])
+async def test_current_input_distinguishes_silence_from_reply_after_interrupted_question(
+        api_client, db_session, monkeypatch, model, latest):
+    agent, value = await setup(api_client, db_session, monkeypatch, channel='VOICE')
+    selected = profile(value, agent['model_name'], True)
+    monkeypatch.setattr(get_settings(), 'managed_voice_latency_profiles', [selected])
+    value['messages'][0]['text'] = '[silence]'
+    message = {**value['messages'][0], 'id': str(uuid4()), 'sequence': 2, 'text': latest}
+    value.update(messages=[value['messages'][0], message], input_first_sequence=2,
+                 input_last_sequence=2, context_last_sequence=2,
+                 selected_input_message_ids=[message['id']])
+    model.chat.completions.queue(build_llm_response(content='Продолжим запись.'))
+    result = (await execute(api_client, value)).json()
+    assert result['status'] == 'DRAFT_READY', result
+    prompt = model.chat.completions.calls[0]['messages'][0]['content']
+    assert ('Текущий вход — сигнал тишины.' in prompt) is (latest == '[silence]')
+    assert ('Клиент сейчас ответил; это не сигнал тишины.' in prompt) is (latest != '[silence]')
+    # The canonical window and selected input remain the same; no synthetic
+    # assistant delivery or confirmation is inserted to repair presentation.
+    assert value['messages'][0]['text'] == '[silence]' and message['text'] == latest
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize('scope', ['VOICE', 'TELEGRAM', 'WEBSITE_WIDGET', 'INSTAGRAM', 'WHATSAPP', 'other_agent', 'off'])
 async def test_style_is_opt_in_for_exact_voice_scope(api_client, db_session, monkeypatch, model, scope):
     agent, value = await setup(api_client, db_session, monkeypatch, channel='VOICE')

@@ -463,7 +463,7 @@ class LLMService:
             from core.voice_latency_diagnostics import emit_voice_checkpoint
             emit_voice_checkpoint(runtime, "CONTEXT")
         caller_phone = getattr(runtime, "caller_phone", "") if runtime else ""
-        system_prompt += self._voice_prompt_suffix(voice_profile, caller_phone)
+        system_prompt += self._voice_prompt_suffix(voice_profile, caller_phone, request=managed_request)
         knowledge_overrides = (
             {"max_chars_per_chunk": 500, "max_total_context_chars": 1200}
             if voice_profile is not None else {}
@@ -619,7 +619,14 @@ class LLMService:
                         temperature=agent.temperature,
                         max_tokens=self.settings.llm_max_tokens,
                         messages=messages,
-                        tools=openai_tools or None,
+                        # A read correction is a single, already-bounded schema
+                        # repair. Some Voice routes reject forced tool_choice;
+                        # remove distracting tools for that one completion instead.
+                        # Dispatch still checks the same tool, schema and fresh ID.
+                        tools=([tool for tool in openai_tools
+                                if tool['function']['name'] == preparation_correction]
+                               if runtime and preparation_correction in SCHEMA_VALIDATED_TOOLS - PREPARATION_TOOLS
+                               else openai_tools) or None,
                         parallel_tool_calls=self._managed_parallel_tool_calls(managed_request),
                         **({"tool_choice": tool_choice} if tool_choice is not None else {}),
                         **({"extra_body": model_extra_body} if model_extra_body else {}),
@@ -915,7 +922,8 @@ class LLMService:
                                 self.prompt_composer.compose(
                                     agent, chat_context, runtime_context=prompt_context)
                                 + self._voice_prompt_suffix(
-                                    voice_profile, getattr(runtime, "caller_phone", ""))
+                                    voice_profile, getattr(runtime, "caller_phone", ""),
+                                    request=managed_request)
                             )
                             self._check_managed_envelope(
                                 agent, messages, openai_tools, tool_choice=tool_choice,
@@ -991,7 +999,7 @@ class LLMService:
         raise ChatProcessingError("Maximum number of LLM tool steps reached.")
 
     @staticmethod
-    def _voice_prompt_suffix(voice_profile, caller_phone: str) -> str:
+    def _voice_prompt_suffix(voice_profile, caller_phone: str, *, request=None) -> str:
         """Voice-only task instructions, re-applied whenever the prompt is rebuilt."""
         if voice_profile is None:
             return ""
@@ -1009,6 +1017,9 @@ class LLMService:
             "\n\nЗакрывая разговор, скажи одну короткую тёплую фразу прощания («Всего доброго!») "
             "и больше ничего не добавляй — без вопросов и повторных благодарностей."
         )
+        if request is not None:
+            from services.voice_reply_style import dialogue_state
+            suffix += "\n\n" + dialogue_state(request)
         if caller_phone:
             suffix += (
                 "\n\nКлиент звонит с номера " + caller_phone
