@@ -538,8 +538,32 @@ class BusinessRuntime:
         if not self.semantic_confirmation or not self.effect_eligible:
             return {"pending": None}
         plan = await self.repository.pending_proposal(self.request, self.grant, self.registration)
-        return {"pending": None if plan is None else {
-            "proposal_id": str(plan.id), "summary": self._proposal_summary(plan), "confirmable": True}}
+        if plan is not None:
+            return {"pending": {
+                "proposal_id": str(plan.id), "summary": self._proposal_summary(plan), "confirmable": True}}
+        return await self._completed_booking_prompt_context()
+
+    async def _completed_booking_prompt_context(self):
+        """Project a validated receipt reference; current CRM state still needs a read."""
+        empty = {"pending": None}
+        if self.registration.adapter_id != 'chotacrm':
+            return empty
+        plan = await self.repository.latest_completed_booking(self.request, self.grant, self.registration)
+        if plan is None:
+            return empty
+        operation = plan.operations[0]
+        try:
+            from business_capabilities.runtime_tools import completed_booking_reply
+            receipt = SucceededReceipt.model_validate(operation.receipt_evidence)
+            _, digest = self.repository._evidence(receipt, operation.command)
+            if (digest != operation.receipt_fingerprint or receipt.receipt_id != operation.receipt_id
+                    or receipt.object_id != operation.object_id):
+                return empty
+            summary = completed_booking_reply(operation, receipt)
+        except Exception:
+            return empty
+        return {"pending": None, "recent_booking": {
+            "booking_ref": receipt.object_id, "historical_summary": summary}}
 
     async def _effect_eligibility(self, origin_turn_id):
         result = await self._eligibility_result(origin_turn_id)

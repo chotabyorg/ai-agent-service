@@ -748,6 +748,35 @@ class BusinessRepository:
             plan = await session.get(BusinessPlan, link.plan_id)
             return await self._snapshot(session, scope, plan, selection_kind=link.selection_kind)
 
+    async def latest_completed_booking(self, request, grant, registration):
+        """Return a historical lookup hint, without selecting or authorizing a plan."""
+        async with self._session() as session:
+            async with session.begin():
+                binding, scope = await self._authority(session, request, grant)
+                self._registration(binding, registration)
+                await self._turn(session, scope, request)
+                if binding.adapter_id != 'chotacrm' or 'booking.get' not in binding.enabled_capabilities:
+                    return None
+                plan = await self._latest_plan(session, scope.id)
+                if (plan is None or plan.proposal_state != 'CONFIRMED'
+                        or not plan.requires_confirmation or plan.confirmed_turn_id is None
+                        or plan.binding_id != binding.id or plan.connection_id != binding.connection_id
+                        or plan.authorization_generation != binding.authorization_generation
+                        or plan.context_generation != binding.context_generation
+                        or plan.catalog_revision != binding.catalog_revision
+                        or await self._unresolved(session, scope.id)):
+                    return None
+                confirmed = await session.get(BusinessTurnContext, (scope.id, plan.confirmed_turn_id))
+                if (confirmed is None or confirmed.authority_revision != request.authority_revision
+                        or confirmed.input_last_sequence >= request.input_first_sequence):
+                    return None
+                snapshot = await self._snapshot(session, scope, plan)
+                if (len(snapshot.operations) != 1 or snapshot.operations[0].status != 'SUCCEEDED'
+                        or snapshot.operations[0].command.capability not in {
+                            'booking.create', 'booking.reschedule', 'booking.cancel'}):
+                    return None
+                return snapshot
+
     async def lookup_plan(self, request, grant, plan_id):
         async with self._session() as session:
             scope = await self._scope_query(session, request, grant)
