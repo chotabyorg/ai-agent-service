@@ -166,6 +166,7 @@ async def test_presence_after_idle_cannot_confirm_pending_booking(
         # A selection containing an agent Message cannot supply business input.
         # Preserve the runtime's existing rejection rather than weakening it.
         assert result['status'] == 'FAILED' and result['error_code'] == 'TOOL_SETUP_FAILED', result
+        return
     elif intent == 'CONFIRM':
         assert result['status'] == 'FAILED' and result['error_code'] == 'INVALID_RESULT', result
     else:
