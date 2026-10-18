@@ -501,6 +501,11 @@ class LLMService:
                 # merely removed from model advertisement. Only code-owned
                 # business controls can enter the managed registry.
                 openai_tools = runtime.business.openai_tools() if runtime.business else []
+                from services.voice_booking_tools import booking_tools
+                voice_booking_only = bool(
+                    voice_profile is not None and voice_profile.concise_speech
+                    and getattr(getattr(runtime.business, 'registration', None), 'adapter_id', None) == 'chotacrm')
+                openai_tools = booking_tools(openai_tools, enabled=voice_booking_only)
                 tool_registry = {tool["function"]["name"]: None for tool in openai_tools}
             else:
                 for credentials_record in credentials_records:
@@ -886,7 +891,8 @@ class LLMService:
                             refreshed_context = await runtime.operation(
                                 runtime.business.prompt_context())
                             prompt_context = RuntimeCapabilityContext.model_validate(refreshed_context)
-                            openai_tools = [tool for tool in runtime.business.openai_tools()
+                            openai_tools = [tool for tool in booking_tools(
+                                                runtime.business.openai_tools(), enabled=voice_booking_only)
                                             if tool["function"]["name"] not in retired_voice_tools]
                             tool_registry = {
                                 tool["function"]["name"]: None for tool in openai_tools

@@ -130,6 +130,8 @@ def _validated_preparation_actions(runtime, name, arguments):
 
 
 def _safe_lookup_draft(category):
+    if category == 'VALIDATION_ERROR':
+        return 'Не удалось проверить контакт. Продиктуйте, пожалуйста, номер с кодом страны.'
     if category == 'IDENTITY_CONFLICT':
         return 'Этот контакт уже связан с другим именем. Уточните, пожалуйста, какое имя указать для записи.'
     if category == 'AMBIGUOUS_IDENTITY':
@@ -147,6 +149,24 @@ def _observe_preparation(runtime, *, name, lookup_result='NOT_RUN', refusal='NON
             lookup_source='BOOKING_PREFLIGHT', lookup_mode=lookup_mode,
             lookup_result=lookup_result,
         )
+    except Exception:
+        pass
+
+
+def _observe_lookup_failure(runtime, error):
+    """Keep the original finite failure category before safe caller wording."""
+    if isinstance(error, BusinessSafetyError):
+        refusal = 'AUTHORITY_BLOCKED' if error.processing_status == 'UNKNOWN' else error.code
+    elif isinstance(error, (TypeError, ValueError)):
+        refusal = 'LOOKUP_INVALID'
+    elif isinstance(error, TimeoutError):
+        refusal = 'PROVIDER_UNAVAILABLE'
+    else:
+        refusal = 'OTHER'
+    try:
+        runtime.observe_business_diagnostic(stage='LOOKUP', capability='customer.find',
+            refusal_category=refusal, lookup_source='BOOKING_PREFLIGHT',
+            lookup_mode='IDENTITY_ONLY', lookup_result='ERROR')
     except Exception:
         pass
 
@@ -224,6 +244,7 @@ async def prepare_booking_customer_reuse(runtime, name, arguments):
     except ManagedExecutionError:
         raise
     except BusinessSafetyError as error:
+        _observe_lookup_failure(runtime, error)
         try:
             retained = runtime.collector.snapshot()
         except Exception:
@@ -239,7 +260,8 @@ async def prepare_booking_customer_reuse(runtime, name, arguments):
         _observe_preparation(runtime, name=name, lookup_result='ERROR', refusal=refusal,
                              lookup_mode=lookup_mode)
         return BusinessToolResult(safe_draft=_safe_lookup_draft(refusal))
-    except Exception:
+    except Exception as error:
+        _observe_lookup_failure(runtime, error)
         try:
             retained = runtime.collector.snapshot()
         except Exception:
@@ -276,6 +298,8 @@ async def prepare_booking_customer_reuse(runtime, name, arguments):
             refusal, draft = 'AMBIGUOUS_IDENTITY', _safe_lookup_draft('AMBIGUOUS_IDENTITY')
         elif error_code == 'IDENTITY_CONFLICT':
             refusal, draft = 'IDENTITY_CONFLICT', _safe_lookup_draft('IDENTITY_CONFLICT')
+        elif error_code == 'VALIDATION_ERROR':
+            refusal, draft = 'VALIDATION_ERROR', _safe_lookup_draft('VALIDATION_ERROR')
         else:
             refusal, draft = 'LOOKUP_UNAVAILABLE', _safe_lookup_draft('LOOKUP_UNAVAILABLE')
         _observe_preparation(runtime, name=name, lookup_result='ERROR', refusal=refusal,
