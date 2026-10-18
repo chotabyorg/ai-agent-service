@@ -10,9 +10,10 @@ from schemas.business import BusinessAction, BusinessSafetyError, BusinessToolRe
 from services.managed_tools import ManagedExecutionError
 
 PREPARATION_TOOLS = frozenset({'business_propose', 'booking_create'})
+PROPOSAL_TOOLS = PREPARATION_TOOLS | frozenset({'booking_cancel', 'booking_reschedule'})
 # Read arguments use the same closed, advertised schema as proposal input.
 # This permits one correction before dispatch, never a retry of an effect.
-SCHEMA_VALIDATED_TOOLS = PREPARATION_TOOLS | frozenset(
+SCHEMA_VALIDATED_TOOLS = PROPOSAL_TOOLS | frozenset(
     capability.tool_name for capability in CAPABILITIES if capability.risk == Risk.READ)
 SAFE_RULES = frozenset({'type', 'required', 'additionalProperties', 'oneOf', 'anyOf', 'allOf',
     'not', 'const', 'enum', 'minLength', 'maxLength', 'pattern', 'format', 'minItems', 'maxItems',
@@ -74,9 +75,15 @@ class PreparationSchema:
                 path.append(str(part))
             else:
                 path.append('?')
+        return self._feedback('/' + '/'.join(path),
+            error.validator if error.validator in SAFE_RULES else 'schema')
+
+    def invalid_json_feedback(self):
+        return self._feedback('/', 'type')
+
+    def _feedback(self, path, rule):
         return {'status': 'ERROR', 'error': {
-            'code': 'TOOL_ARGUMENT_VALIDATION_FAILED', 'path': '/' + '/'.join(path),
-            'rule': error.validator if error.validator in SAFE_RULES else 'schema'},
+            'code': 'TOOL_ARGUMENT_VALIDATION_FAILED', 'path': path, 'rule': rule},
             # Code-owned schema only: never echo the malformed argument keys,
             # values or jsonschema exception text into correction feedback.
             'expected_parameters': self.validator.schema,

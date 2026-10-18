@@ -30,7 +30,7 @@ _SCHEMA_RULES = frozenset({"NOT_APPLICABLE", "schema", "type", "required", "addi
     "exclusiveMaximum", "multipleOf"})
 _SCHEMA_FIELDS = frozenset({"NOT_APPLICABLE", "ROOT", "OTHER", "query", "cursor", "limit",
     "actions", "arguments", "capability", "customer_ref", "customer", "identity", "display_name",
-    "offering_ref", "resource_ref", "start_at", "from", "to", "booking_ref", "kind", "value"})
+    "offering_ref", "resource_ref", "start_at", "from", "to", "booking_ref", "expected_revision", "kind", "value"})
 
 
 def refusal_category(value):

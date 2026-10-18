@@ -14,6 +14,7 @@ import httpx
 from openai import (
     APIConnectionError,
     APIError,
+    APIStatusError,
     APITimeoutError,
     AsyncOpenAI,
     AuthenticationError,
@@ -27,7 +28,7 @@ from services.managed_tools import (ManagedExecutionError, inspect_managed_tool_
                                     parse_managed_tool_arguments, _bounded_json)
 from services.managed_http_cleanup import close_managed_helper, own_managed_http
 from services.managed_reasoning import managed_reasoning_fields
-from services.managed_completion import select_managed_completion, observe_managed_completion
+from services.managed_completion import select_managed_completion, observe_managed_completion, observe_model_failure
 from services.completion_timing import CompletionTiming
 from services.managed_streaming import complete_with_partials
 from services.chat_diagnostics import ChatFailureStage, set_chat_failure_stage
@@ -558,6 +559,13 @@ class LLMService:
                 if runtime and prompt_context is not None and prompt_context.pending is not None
                 else None
             )
+            if runtime and required_proposal_id is None:
+                # Rejecting a pending proposal and cancelling a confirmed CRM
+                # booking are different actions. Do not offer a decision about
+                # a proposal that the current runtime does not have.
+                openai_tools = [tool for tool in openai_tools
+                               if tool['function']['name'] != 'business_decide_proposal']
+                tool_registry.pop('business_decide_proposal', None)
             presence_reply = False
             if voice_profile is not None:
                 from services.voice_reply_style import replying_to_connection_check
@@ -577,7 +585,7 @@ class LLMService:
                            if required_proposal_id is not None else None)
             preparation_schemas = {}
             if runtime:
-                from services.managed_preparation import PREPARATION_TOOLS, SCHEMA_VALIDATED_TOOLS, PreparationSchema
+                from services.managed_preparation import PROPOSAL_TOOLS, SCHEMA_VALIDATED_TOOLS, PreparationSchema
                 preparation_schemas = {tool["function"]["name"]: PreparationSchema(tool["function"]["parameters"])
                     for tool in openai_tools if tool["function"]["name"] in SCHEMA_VALIDATED_TOOLS}
             preparation_correction = None
@@ -592,6 +600,7 @@ class LLMService:
                 )
             voice_search_counts: dict[str, int] = {}
             retired_voice_tools: set[str] = set()
+            model_retry_used = False
             for step_index in range(self.MAX_TOOL_STEPS):
                 set_chat_failure_stage(ChatFailureStage.LLM_REQUEST)
                 try:
@@ -641,28 +650,47 @@ class LLMService:
                         # Dispatch still checks the same tool, schema and fresh ID.
                         tools=([tool for tool in openai_tools
                                 if tool['function']['name'] == preparation_correction]
-                               if runtime and (reuse_expectation is not None
-                                   or preparation_correction in SCHEMA_VALIDATED_TOOLS - PREPARATION_TOOLS)
+                               if runtime and preparation_correction is not None
                                else openai_tools) or None,
                         parallel_tool_calls=self._managed_parallel_tool_calls(managed_request),
                         **({"tool_choice": tool_choice} if tool_choice is not None else {}),
                         **({"extra_body": model_extra_body} if model_extra_body else {}),
                         extra_headers=self._build_extra_headers(),
                     )
-                    completion_timing = CompletionTiming() if runtime else None
-                    pending_response = complete_with_partials(
-                        llm_client.chat.completions.create,
-                        completion_kwargs,
-                        # A required preparation continuation cannot publish
-                        # prose before validation has seen the actual tool call.
-                        on_text=None if reuse_expectation is not None else partial_hook,
-                        timing=completion_timing,
-                    )
-                    response = (
-                        await runtime.operation(pending_response)
-                        if runtime
-                        else await pending_response
-                    )
+                    while True:
+                        completion_timing = CompletionTiming() if runtime else None
+                        pending_response = complete_with_partials(
+                            llm_client.chat.completions.create, completion_kwargs,
+                            # Required continuations cannot publish unvalidated prose.
+                            on_text=None if reuse_expectation is not None else partial_hook,
+                            timing=completion_timing,
+                        )
+                        try:
+                            response = (await runtime.operation(pending_response)
+                                        if runtime else await pending_response)
+                            break
+                        except APIError as exc:
+                            if runtime:
+                                observe_model_failure(exc, request=managed_request,
+                                    step=step_index + 1, timing=completion_timing)
+                            # One retry of this MODEL request per buffered text
+                            # turn. No tool replay, model switch, deadline reset
+                            # or retry after partial speech; 4xx remains closed.
+                            if (not runtime or managed_request.channel == 'VOICE'
+                                    or partial_hook is not None or model_retry_used
+                                    or not isinstance(exc, APIStatusError)
+                                    or exc.status_code not in {500, 502, 503, 504}):
+                                raise
+                            model_retry_used = True
+                            runtime.check()
+                            if runtime.business is not None:
+                                gate = await runtime.operation(
+                                    runtime.business.execution_guard(allow_incomplete=True))
+                                if gate is not None:
+                                    if gate.halt_status:
+                                        raise ManagedExecutionError(gate.error_code,
+                                            processing_status=gate.halt_status)
+                                    return gate.safe_draft
                     if completion_timing is not None:
                         completion_timing.complete()
                     if voice_profile is not None:
@@ -798,7 +826,17 @@ class LLMService:
                             continue
                         if name not in preparation_schemas:
                             raise ManagedExecutionError("TOOL_SETUP_FAILED")
-                        arguments = parse_managed_tool_arguments(call.function.arguments)
+                        try:
+                            arguments = parse_managed_tool_arguments(call.function.arguments)
+                        except ManagedExecutionError as exc:
+                            # A malformed model response has not dispatched an
+                            # action. Use the same single, guarded correction as
+                            # schema errors; resource/context bounds still fail.
+                            if exc.code != 'TOOL_SETUP_FAILED':
+                                raise
+                            feedback = preparation_schemas[name].invalid_json_feedback()
+                            invalid_call = call
+                            break
                         if reuse_expectation is not None and arguments != reuse_expectation:
                             raise ManagedExecutionError('INVALID_RESULT')
                         feedback = preparation_schemas[name].feedback(arguments)
@@ -810,7 +848,7 @@ class LLMService:
                                 action['capability'] == 'booking.create'
                                 for action in arguments['actions']))
                     if invalid_call is not None:
-                        correction_budget = ('PREPARATION' if invalid_call.function.name in PREPARATION_TOOLS else 'READ')
+                        correction_budget = ('PREPARATION' if invalid_call.function.name in PROPOSAL_TOOLS else 'READ')
                         if runtime.business is not None:
                             runtime.business.observe_business_diagnostic(
                                 stage="TOOL_INPUT", capability=invalid_call.function.name,
@@ -835,8 +873,7 @@ class LLMService:
                         # Some Voice routes reject forced tool_choice in streams.
                         # The next completion is still checked above for exactly
                         # one corrected call to this same tool with a fresh ID.
-                        tool_choice = ({"type": "function", "function": {"name": preparation_correction}}
-                                       if preparation_correction in PREPARATION_TOOLS else None)
+                        tool_choice = None
                         messages.append(self._assistant_message_to_dict(message, managed=True))
                         messages.append({"role": "tool", "tool_call_id": invalid_call.id,
                             "name": preparation_correction, "content": json.dumps(feedback, ensure_ascii=False)})
