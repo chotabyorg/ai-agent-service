@@ -558,9 +558,9 @@ class LLMService:
                            if required_proposal_id is not None else None)
             preparation_schemas = {}
             if runtime:
-                from services.managed_preparation import PREPARATION_TOOLS, PreparationSchema
+                from services.managed_preparation import PREPARATION_TOOLS, SCHEMA_VALIDATED_TOOLS, PreparationSchema
                 preparation_schemas = {tool["function"]["name"]: PreparationSchema(tool["function"]["parameters"])
-                    for tool in openai_tools if tool["function"]["name"] in PREPARATION_TOOLS}
+                    for tool in openai_tools if tool["function"]["name"] in SCHEMA_VALIDATED_TOOLS}
             preparation_correction = None
             correction_used = False
             seen_tool_ids = set()
@@ -758,7 +758,7 @@ class LLMService:
                     # in this completion, including an earlier WRITE_SAFE call.
                     for call in message.tool_calls:
                         name = getattr(getattr(call, "function", None), "name", None)
-                        if name not in PREPARATION_TOOLS:
+                        if name not in SCHEMA_VALIDATED_TOOLS:
                             continue
                         if name not in preparation_schemas:
                             raise ManagedExecutionError("TOOL_SETUP_FAILED")
@@ -784,7 +784,14 @@ class LLMService:
                             raise ManagedExecutionError("TOOL_SETUP_FAILED")
                         preparation_correction = invalid_call.function.name
                         correction_used = True
-                        tool_choice = {"type": "function", "function": {"name": preparation_correction}}
+                        # Some Voice routes reject forced tool_choice in streams.
+                        # The next completion is still checked above for exactly
+                        # one corrected call to this same tool with a fresh ID.
+                        tool_choice = ({"type": "function", "function": {"name": preparation_correction}}
+                                       if preparation_correction in PREPARATION_TOOLS else None)
+                        runtime.business.observe_business_diagnostic(
+                            stage="TOOL_INPUT", capability=preparation_correction,
+                            refusal_category="VALIDATION_ERROR")
                         messages.append(self._assistant_message_to_dict(message, managed=True))
                         messages.append({"role": "tool", "tool_call_id": invalid_call.id,
                             "name": preparation_correction, "content": json.dumps(feedback, ensure_ascii=False)})
@@ -880,12 +887,12 @@ class LLMService:
                             if required_proposal_id is not None:
                                 raise ManagedExecutionError("INVALID_RESULT")
                             tool_choice = None
-                            from services.managed_preparation import PREPARATION_TOOLS, PreparationSchema
+                            from services.managed_preparation import SCHEMA_VALIDATED_TOOLS, PreparationSchema
                             preparation_schemas = {
                                 tool["function"]["name"]: PreparationSchema(
                                     tool["function"]["parameters"])
                                 for tool in openai_tools
-                                if tool["function"]["name"] in PREPARATION_TOOLS
+                                if tool["function"]["name"] in SCHEMA_VALIDATED_TOOLS
                             }
                             messages[0]["content"] = (
                                 self.prompt_composer.compose(

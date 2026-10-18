@@ -5,10 +5,15 @@ from collections import OrderedDict
 
 from jsonschema import Draft202012Validator, FormatChecker
 
+from business_capabilities.registry import CAPABILITIES, Risk
 from schemas.business import BusinessAction, BusinessSafetyError, BusinessToolResult
 from services.managed_tools import ManagedExecutionError
 
 PREPARATION_TOOLS = frozenset({'business_propose', 'booking_create'})
+# Read arguments use the same closed, advertised schema as proposal input.
+# This permits one correction before dispatch, never a retry of an effect.
+SCHEMA_VALIDATED_TOOLS = PREPARATION_TOOLS | frozenset(
+    capability.tool_name for capability in CAPABILITIES if capability.risk == Risk.READ)
 SAFE_RULES = frozenset({'type', 'required', 'additionalProperties', 'oneOf', 'anyOf', 'allOf',
     'not', 'const', 'enum', 'minLength', 'maxLength', 'pattern', 'format', 'minItems', 'maxItems',
     'uniqueItems', 'minimum', 'maximum', 'exclusiveMinimum', 'exclusiveMaximum', 'multipleOf'})
