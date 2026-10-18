@@ -580,6 +580,8 @@ class LLMService:
                 preparation_schemas = {tool["function"]["name"]: PreparationSchema(tool["function"]["parameters"])
                     for tool in openai_tools if tool["function"]["name"] in SCHEMA_VALIDATED_TOOLS}
             preparation_correction = None
+            reuse_expectation = None
+            reuse_continuation_used = False
             correction_budgets_used = set()
             seen_tool_ids = set()
             if runtime:
@@ -638,7 +640,8 @@ class LLMService:
                         # Dispatch still checks the same tool, schema and fresh ID.
                         tools=([tool for tool in openai_tools
                                 if tool['function']['name'] == preparation_correction]
-                               if runtime and preparation_correction in SCHEMA_VALIDATED_TOOLS - PREPARATION_TOOLS
+                               if runtime and (reuse_expectation is not None
+                                   or preparation_correction in SCHEMA_VALIDATED_TOOLS - PREPARATION_TOOLS)
                                else openai_tools) or None,
                         parallel_tool_calls=self._managed_parallel_tool_calls(managed_request),
                         **({"tool_choice": tool_choice} if tool_choice is not None else {}),
@@ -648,7 +651,9 @@ class LLMService:
                     pending_response = complete_with_partials(
                         llm_client.chat.completions.create,
                         completion_kwargs,
-                        on_text=partial_hook,
+                        # A required preparation continuation cannot publish
+                        # prose before validation has seen the actual tool call.
+                        on_text=None if reuse_expectation is not None else partial_hook,
                     )
                     response = (
                         await runtime.operation(pending_response)
@@ -789,6 +794,8 @@ class LLMService:
                         if name not in preparation_schemas:
                             raise ManagedExecutionError("TOOL_SETUP_FAILED")
                         arguments = parse_managed_tool_arguments(call.function.arguments)
+                        if reuse_expectation is not None and arguments != reuse_expectation:
+                            raise ManagedExecutionError('INVALID_RESULT')
                         feedback = preparation_schemas[name].feedback(arguments)
                         if feedback is not None:
                             invalid_call = call
@@ -883,10 +890,32 @@ class LLMService:
                             # prose is never permission or a completion receipt.
                             return business_result.safe_draft
                         _bounded_json(business_result.tool_payload)
+                        from services.preparation_continuation import (
+                            customer_reuse_arguments, customer_reuse_instruction,
+                        )
+                        next_reuse = customer_reuse_arguments(
+                            func_name, func_args, business_result.tool_payload)
+                        if next_reuse is not None:
+                            if reuse_continuation_used or len(message.tool_calls) != 1:
+                                raise ManagedExecutionError('INVALID_RESULT')
+                            # This is preparation only, not an execution retry.
+                            # Runtime guards and frozen proposal creation still
+                            # run normally for the explicit next model tool call.
+                            reuse_expectation = next_reuse
+                            reuse_continuation_used = True
+                            preparation_correction = func_name
+                            # Current Voice providers can reject named forced
+                            # choices even without streaming. Advertise only
+                            # this tool; validation still requires its one call.
+                        else:
+                            reuse_expectation = None
                         tool_result_text = json.dumps(business_result.tool_payload,
                             ensure_ascii=False, allow_nan=False)
                         messages.append({"role": "tool", "tool_call_id": tool_call.id,
                                          "name": func_name, "content": tool_result_text})
+                        if next_reuse is not None:
+                            messages.append({'role': 'system', 'content':
+                                customer_reuse_instruction(func_name, next_reuse)})
                         if voice_profile is not None and func_name == "resource_search":
                             # Count the actual search, including its cursor, not
                             # the tool name: a broader query or next page is progress.
