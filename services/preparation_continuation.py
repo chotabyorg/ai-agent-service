@@ -1,5 +1,6 @@
 """Validate a model-authored continuation of a side-effect-free preparation."""
 from copy import deepcopy
+import json
 
 from services.managed_tools import ManagedExecutionError
 
@@ -30,3 +31,13 @@ def customer_reuse_arguments(name, arguments, payload):
     del booking['customer']
     booking['customer_ref'] = ref
     return expected
+
+
+def customer_reuse_instruction(name, expected):
+    return (
+        'The previous booking preparation is INCOMPLETE. No proposal exists yet. '
+        f'Your next response must be exactly one {name} tool call with these arguments: '
+        + json.dumps(expected, ensure_ascii=False, allow_nan=False)
+        + '. This prepares a proposal only; it does not execute a booking. '
+        'Do not write prose, ask for confirmation, call another tool, or change any other field.'
+    )

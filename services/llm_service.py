@@ -640,7 +640,8 @@ class LLMService:
                         # Dispatch still checks the same tool, schema and fresh ID.
                         tools=([tool for tool in openai_tools
                                 if tool['function']['name'] == preparation_correction]
-                               if runtime and preparation_correction in SCHEMA_VALIDATED_TOOLS - PREPARATION_TOOLS
+                               if runtime and (reuse_expectation is not None
+                                   or preparation_correction in SCHEMA_VALIDATED_TOOLS - PREPARATION_TOOLS)
                                else openai_tools) or None,
                         parallel_tool_calls=self._managed_parallel_tool_calls(managed_request),
                         **({"tool_choice": tool_choice} if tool_choice is not None else {}),
@@ -889,7 +890,9 @@ class LLMService:
                             # prose is never permission or a completion receipt.
                             return business_result.safe_draft
                         _bounded_json(business_result.tool_payload)
-                        from services.preparation_continuation import customer_reuse_arguments
+                        from services.preparation_continuation import (
+                            customer_reuse_arguments, customer_reuse_instruction,
+                        )
                         next_reuse = customer_reuse_arguments(
                             func_name, func_args, business_result.tool_payload)
                         if next_reuse is not None:
@@ -901,13 +904,18 @@ class LLMService:
                             reuse_expectation = next_reuse
                             reuse_continuation_used = True
                             preparation_correction = func_name
-                            tool_choice = {'type': 'function', 'function': {'name': func_name}}
+                            # Current Voice providers can reject named forced
+                            # choices even without streaming. Advertise only
+                            # this tool; validation still requires its one call.
                         else:
                             reuse_expectation = None
                         tool_result_text = json.dumps(business_result.tool_payload,
                             ensure_ascii=False, allow_nan=False)
                         messages.append({"role": "tool", "tool_call_id": tool_call.id,
                                          "name": func_name, "content": tool_result_text})
+                        if next_reuse is not None:
+                            messages.append({'role': 'system', 'content':
+                                customer_reuse_instruction(func_name, next_reuse)})
                         if voice_profile is not None and func_name == "resource_search":
                             # Count the actual search, including its cursor, not
                             # the tool name: a broader query or next page is progress.

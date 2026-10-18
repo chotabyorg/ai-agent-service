@@ -42,7 +42,10 @@ async def test_existing_customer_is_prepared_in_same_turn_then_confirmed_once(
     assert calls['lookup'] == 1 and calls['facts'] >= 1 and calls['execute'] == 0
     assert not effect.permit_requests
     assert len(model.chat.completions.calls) == 2
-    assert model.chat.completions.calls[1]['tool_choice']['function']['name'] == tool
+    continuation = model.chat.completions.calls[1]
+    assert 'tool_choice' not in continuation
+    assert [t['function']['name'] for t in continuation['tools']] == [tool]
+    assert continuation['messages'][-1]['role'] == 'system'
     async with db_session() as db:
         plan = (await db.scalars(select(BusinessPlan))).one()
         assert plan.proposal_state == 'PREPARED'
