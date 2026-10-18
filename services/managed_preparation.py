@@ -151,6 +151,24 @@ def _observe_preparation(runtime, *, name, lookup_result='NOT_RUN', refusal='NON
         pass
 
 
+def _observe_lookup_failure(runtime, error):
+    """Keep the original finite failure category before safe caller wording."""
+    if isinstance(error, BusinessSafetyError):
+        refusal = 'AUTHORITY_BLOCKED' if error.processing_status == 'UNKNOWN' else error.code
+    elif isinstance(error, (TypeError, ValueError)):
+        refusal = 'LOOKUP_INVALID'
+    elif isinstance(error, TimeoutError):
+        refusal = 'PROVIDER_UNAVAILABLE'
+    else:
+        refusal = 'OTHER'
+    try:
+        runtime.observe_business_diagnostic(stage='LOOKUP', capability='customer.find',
+            refusal_category=refusal, lookup_source='BOOKING_PREFLIGHT',
+            lookup_mode='IDENTITY_ONLY', lookup_result='ERROR')
+    except Exception:
+        pass
+
+
 async def _preflight_guard(runtime):
     try:
         return await runtime.execution_guard(allow_incomplete=True)
@@ -224,6 +242,7 @@ async def prepare_booking_customer_reuse(runtime, name, arguments):
     except ManagedExecutionError:
         raise
     except BusinessSafetyError as error:
+        _observe_lookup_failure(runtime, error)
         try:
             retained = runtime.collector.snapshot()
         except Exception:
@@ -239,7 +258,8 @@ async def prepare_booking_customer_reuse(runtime, name, arguments):
         _observe_preparation(runtime, name=name, lookup_result='ERROR', refusal=refusal,
                              lookup_mode=lookup_mode)
         return BusinessToolResult(safe_draft=_safe_lookup_draft(refusal))
-    except Exception:
+    except Exception as error:
+        _observe_lookup_failure(runtime, error)
         try:
             retained = runtime.collector.snapshot()
         except Exception:
