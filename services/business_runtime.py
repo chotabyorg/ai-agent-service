@@ -101,7 +101,8 @@ class BusinessRuntime:
     def observe_business_diagnostic(self, *, stage, capability, refusal_category="NONE",
                                     lookup_source="NOT_APPLICABLE", lookup_mode="NOT_APPLICABLE",
                                     lookup_result="NOT_RUN", proposal_present=None,
-                                    operation_present=None):
+                                    operation_present=None, schema_rule="NOT_APPLICABLE",
+                                    schema_field="NOT_APPLICABLE"):
         """Emit a bounded observation using only closed runtime categories."""
         try:
             if getattr(self, "_business_diagnostic_observations", 0) >= 16:
@@ -111,7 +112,8 @@ class BusinessRuntime:
             if type(turn_id) is not UUID:
                 return
             from core.managed_business_diagnostics import (
-                ManagedBusinessDiagnostic, refusal_category as normalize_refusal,
+                ManagedBusinessDiagnostic, _SCHEMA_FIELDS, _SCHEMA_RULES,
+                refusal_category as normalize_refusal,
             )
             previous = getattr(self, "_last_business_diagnostic", None)
             if previous is not None and stage in {"PROPOSAL", "TERMINAL"}:
@@ -132,6 +134,8 @@ class BusinessRuntime:
                 operation_present = bool(collector.snapshot()) if collector is not None else False
             diagnostic = ManagedBusinessDiagnostic(
                 turn_id=turn_id, stage=stage, capability=capability,
+                schema_rule=schema_rule if type(schema_rule) is str and schema_rule in _SCHEMA_RULES else "schema",
+                schema_field=schema_field if type(schema_field) is str and schema_field in _SCHEMA_FIELDS else "OTHER",
                 refusal_category=normalize_refusal(refusal_category), lookup_source=lookup_source,
                 lookup_mode=lookup_mode, lookup_result=lookup_result,
                 proposal_present=proposal_present, operation_present=operation_present,

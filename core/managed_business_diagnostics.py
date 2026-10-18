@@ -24,6 +24,13 @@ _LOOKUP_SOURCES = frozenset({"NOT_APPLICABLE", "MODEL", "BOOKING_PREFLIGHT"})
 _LOOKUP_MODES = frozenset({"NOT_APPLICABLE", "IDENTITY_ONLY", "NAME_FILTERED"})
 _LOOKUP_RESULTS = frozenset({"NOT_RUN", "NONE", "SINGLE", "AMBIGUOUS", "ERROR"})
 _FINAL_OUTCOMES = frozenset({"NOT_FINAL", "DRAFT_READY", "FAILED", "UNKNOWN"})
+_SCHEMA_RULES = frozenset({"NOT_APPLICABLE", "schema", "type", "required", "additionalProperties",
+    "oneOf", "anyOf", "allOf", "not", "const", "enum", "minLength", "maxLength", "pattern",
+    "format", "minItems", "maxItems", "uniqueItems", "minimum", "maximum", "exclusiveMinimum",
+    "exclusiveMaximum", "multipleOf"})
+_SCHEMA_FIELDS = frozenset({"NOT_APPLICABLE", "ROOT", "OTHER", "query", "cursor", "limit",
+    "actions", "arguments", "capability", "customer_ref", "customer", "identity", "display_name",
+    "offering_ref", "resource_ref", "start_at", "from", "to", "booking_ref", "kind", "value"})
 
 
 def refusal_category(value):
@@ -42,6 +49,8 @@ class ManagedBusinessDiagnostic:
     proposal_present: bool
     operation_present: bool
     final_outcome: str = "NOT_FINAL"
+    schema_rule: str = "NOT_APPLICABLE"
+    schema_field: str = "NOT_APPLICABLE"
 
 
 def emit_business_diagnostic(diagnostic: ManagedBusinessDiagnostic) -> None:
@@ -72,6 +81,7 @@ def _trusted_business_record(record):
             ("refusal_category", _REFUSALS), ("lookup_source", _LOOKUP_SOURCES),
             ("lookup_mode", _LOOKUP_MODES), ("lookup_result", _LOOKUP_RESULTS),
             ("final_outcome", _FINAL_OUTCOMES),
+            ("schema_rule", _SCHEMA_RULES), ("schema_field", _SCHEMA_FIELDS),
         ):
             item = getattr(value, field)
             if type(item) is not str or item not in allowed:
@@ -86,6 +96,7 @@ def _trusted_business_record(record):
             "proposal_present": value.proposal_present,
             "operation_present": value.operation_present,
             "final_outcome": value.final_outcome,
+            "schema_rule": value.schema_rule, "schema_field": value.schema_field,
         }
     except Exception:
         return None
