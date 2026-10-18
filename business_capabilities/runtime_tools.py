@@ -237,8 +237,13 @@ async def _call_capability_impl(runtime, name, arguments):
         return None
     if capability.id not in runtime.binding.enabled_capabilities:
         raise BusinessSafetyError('CAPABILITY_DISABLED')
-    action = BusinessAction(capability=capability.id,
-        arguments=runtime.registration.capability(capability.id).normalize(arguments))
+    try:
+        action = BusinessAction(capability=capability.id,
+            arguments=runtime.registration.capability(capability.id).normalize(arguments))
+    except (TypeError, ValueError):
+        runtime.observe_business_diagnostic(stage='TOOL_INPUT', capability=capability.id,
+            refusal_category='VALIDATION_ERROR')
+        raise
     if capability.id == 'booking.check_availability':
         runtime._booking_workflow_started = True
     if capability.id == 'customer.create' and getattr(runtime, '_booking_workflow_started', False):
@@ -276,7 +281,17 @@ async def _call_capability_impl(runtime, name, arguments):
     try:
         result = await runtime._adapter_call('read', runtime.scope, action)
     except BusinessRuntimeError as error:
+        runtime.observe_business_diagnostic(stage='TOOL_READ', capability=capability.id,
+            refusal_category=_REFUSAL_BY_ERROR.get(error.code, 'OTHER'))
         result = failure(error.code)
+    except BusinessSafetyError as error:
+        runtime.observe_business_diagnostic(stage='TOOL_READ', capability=capability.id,
+            refusal_category='CAPABILITY_DISABLED' if error.code == 'CAPABILITY_DISABLED' else 'AUTHORITY_BLOCKED')
+        raise
+    except (TypeError, ValueError):
+        runtime.observe_business_diagnostic(stage='TOOL_READ', capability=capability.id,
+            refusal_category='LOOKUP_INVALID')
+        raise
     gate = await runtime.execution_guard(allow_incomplete=True)
     return gate or BusinessToolResult(tool_payload=result)
 

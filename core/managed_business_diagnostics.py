@@ -4,18 +4,21 @@ from dataclasses import dataclass
 import logging
 from uuid import UUID
 
+from business_capabilities.registry import CAPABILITIES
 
 _IDENTITY = object()
-_STAGES = frozenset({"PREPARATION", "LOOKUP", "PROPOSAL", "TERMINAL"})
+_STAGES = frozenset({"PREPARATION", "LOOKUP", "PROPOSAL", "TERMINAL", "TOOL_INPUT", "TOOL_READ", "TOOL_GUARD"})
 _CAPABILITIES = frozenset({
     "booking.create", "booking_create", "business_propose",
     "customer.find", "customer_find", "NOT_APPLICABLE",
-})
+}) | frozenset(value for capability in CAPABILITIES for value in (capability.id, capability.tool_name))
 _REFUSALS = frozenset({
     "NONE", "IDENTITY_CONFLICT", "AMBIGUOUS_IDENTITY", "LOOKUP_UNAVAILABLE",
     "LOOKUP_INVALID", "CAPABILITY_DISABLED", "AUTHORITY_BLOCKED", "OTHER",
     "BOOKING_CONFLICT", "STATE_CONFLICT", "NOT_FOUND", "PERMISSION_DENIED",
     "PROVIDER_UNAVAILABLE", "VALIDATION_ERROR", "STALE_CUSTOMER_CONTEXT",
+    "ACTION_INVALID", "BINDING_UNAVAILABLE", "EFFECT_AUTHORITY_UNAVAILABLE",
+    "FACTS_INVALID", "PLAN_DENIED", "REQUEST_CONFLICT", "RESULT_GATE_UNAVAILABLE",
 })
 _LOOKUP_SOURCES = frozenset({"NOT_APPLICABLE", "MODEL", "BOOKING_PREFLIGHT"})
 _LOOKUP_MODES = frozenset({"NOT_APPLICABLE", "IDENTITY_ONLY", "NAME_FILTERED"})

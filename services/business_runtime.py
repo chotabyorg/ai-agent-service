@@ -686,6 +686,8 @@ class BusinessRuntime:
                 return await self.propose_plan(arguments["actions"])
             return await self.execute_plan(arguments["actions"])
         except BusinessSafetyError as error:
+            self.observe_business_diagnostic(stage="TOOL_GUARD", capability=name,
+                                             refusal_category=error.code)
             return BusinessToolResult(halt_status=error.processing_status,
                                       error_code="TOOL_EXECUTION_UNKNOWN" if error.processing_status == "UNKNOWN" else "TOOL_SETUP_FAILED")
         except (ValueError, TypeError):
