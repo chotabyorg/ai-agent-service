@@ -114,7 +114,7 @@ async def execute_managed_owned(request, grant, runtime, db_provider, session_fa
                                 partial_hook=None):
     """All DB/runtime/resource work and strict LIFO teardown run in this task."""
     from schemas.business import BusinessSafetyError
-    from core.voice_latency_diagnostics import emit_voice_checkpoint
+    from core.voice_latency_diagnostics import emit_voice_checkpoint, emit_text_checkpoint
     from services.business_repository import BusinessRepository
     from services.business_runtime import BusinessRuntime, CommittedReferenceCollector
 
@@ -186,6 +186,7 @@ async def execute_managed_owned(request, grant, runtime, db_provider, session_fa
             idle_input = profile is not None and _is_voice_idle_input(request)
             if profile is not None:
                 emit_voice_checkpoint(runtime, "SETUP")
+            emit_text_checkpoint(runtime, "SETUP")
             if profile is not None and not idle_input:
                 client = _owned_client(service, key, request, runtime)
                 if isinstance(client, AsyncOpenAI):
@@ -206,6 +207,7 @@ async def execute_managed_owned(request, grant, runtime, db_provider, session_fa
                 entry = runtime.business.completed_confirmation_replay()
             if profile is not None:
                 emit_voice_checkpoint(runtime, "BUSINESS")
+            emit_text_checkpoint(runtime, "BUSINESS")
             if entry is not None and entry.halt_status:
                 raise ManagedExecutionError(entry.error_code, processing_status=entry.halt_status)
             if entry is not None and entry.safe_draft is not None:
