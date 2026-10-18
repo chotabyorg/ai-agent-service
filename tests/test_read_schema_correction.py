@@ -5,9 +5,11 @@ import httpx
 import pytest
 from sqlalchemy import select
 
-from models.business import BusinessOperation
+from models.business import BusinessOperation, BusinessPlan
+from schemas.managed_turn import ManagedTurnRequest
 from tests.fakes import build_llm_response
 from tests.test_booking_workflow import tool
+from tests.test_business_runtime import later
 from tests.test_managed_turns import execute
 from tests.test_voice_search_progress import install as install_search
 
@@ -67,5 +69,50 @@ async def test_read_correction_is_bounded_and_cannot_become_an_effect(
     assert result['status'] == 'FAILED', result
     assert len(model.chat.completions.calls) == 2
     assert searches == [] and calls['execute'] == 0
+    async with db_session() as db:
+        assert await db.scalar(select(BusinessOperation)) is None
+
+
+@pytest.mark.integration
+async def test_corrected_search_keeps_the_booking_preparation_correction_then_confirms(
+        api_client, db_session, monkeypatch):
+    value, arguments, calls, model, searches = await install(api_client, db_session, monkeypatch)
+    model.chat.completions.queue(
+        tool('resource_search', {'cursor': None}, 'bad-read'),
+        tool('resource_search', {}, 'correct-read'),
+        tool('booking_create', {**arguments, 'customer_ref': ''}, 'bad-preparation'),
+        tool('booking_create', arguments, 'correct-preparation'))
+    result = (await execute(api_client, value)).json()
+    assert result['status'] == 'DRAFT_READY', result
+    assert len(searches) == 1 and calls['execute'] == 0
+    assert len(model.chat.completions.calls) == 4
+    async with db_session() as db:
+        plan = await db.scalar(select(BusinessPlan))
+        assert plan.proposal_state == 'PREPARED'
+        proposal_id = str(plan.id)
+    confirmation = later(ManagedTurnRequest.model_validate(value), 'Да, подтверждаю')
+    model.chat.completions.queue(tool('business_decide_proposal',
+        {'proposal_id': proposal_id, 'intent': 'CONFIRM'}, 'confirm'))
+    completed = (await execute(api_client, confirmation.model_dump(mode='json', exclude_unset=True))).json()
+    assert completed['status'] == 'DRAFT_READY', completed
+    assert [ref['outcome'] for ref in completed['operation_refs']] == ['SUCCEEDED']
+    async with db_session() as db:
+        operation = await db.scalar(select(BusinessOperation))
+        assert operation.status == 'SUCCEEDED' and operation.attempt_count == 1
+    assert calls['execute'] == 1
+
+
+@pytest.mark.integration
+async def test_read_budget_is_shared_across_read_tools(api_client, db_session, monkeypatch):
+    value, _, calls, model, searches = await install(api_client, db_session, monkeypatch)
+    model.chat.completions.queue(
+        tool('resource_search', {'cursor': None}, 'bad-read'),
+        tool('resource_search', {}, 'correct-read'),
+        tool('booking_check_availability', {}, 'another-bad-read'),
+        build_llm_response(content='never used'))
+    result = (await execute(api_client, value)).json()
+    assert result['status'] == 'FAILED', result
+    assert len(model.chat.completions.calls) == 3
+    assert len(searches) == 1 and calls['execute'] == 0
     async with db_session() as db:
         assert await db.scalar(select(BusinessOperation)) is None

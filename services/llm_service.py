@@ -562,7 +562,7 @@ class LLMService:
                 preparation_schemas = {tool["function"]["name"]: PreparationSchema(tool["function"]["parameters"])
                     for tool in openai_tools if tool["function"]["name"] in SCHEMA_VALIDATED_TOOLS}
             preparation_correction = None
-            correction_used = False
+            correction_budgets_used = set()
             seen_tool_ids = set()
             if runtime:
                 messages = self._budget_managed_messages(
@@ -772,7 +772,14 @@ class LLMService:
                                 action['capability'] == 'booking.create'
                                 for action in arguments['actions']))
                     if invalid_call is not None:
-                        if (correction_used or required_proposal_id is not None or len(message.tool_calls) != 1
+                        correction_budget = ('PREPARATION' if invalid_call.function.name in PREPARATION_TOOLS else 'READ')
+                        if runtime.business is not None:
+                            runtime.business.observe_business_diagnostic(
+                                stage="TOOL_INPUT", capability=invalid_call.function.name,
+                                refusal_category="VALIDATION_ERROR",
+                                schema_rule=feedback['error']['rule'],
+                                schema_field=feedback['error']['path'].rsplit('/', 1)[-1] or 'ROOT')
+                        if (correction_budget in correction_budgets_used or required_proposal_id is not None or len(message.tool_calls) != 1
                                 or getattr(invalid_call, "type", None) != "function"
                                 or not isinstance(getattr(invalid_call, "id", None), str) or not invalid_call.id
                                 or runtime.tool_dispatch_attempted or runtime.business is None):
@@ -783,15 +790,15 @@ class LLMService:
                         if gate is not None or runtime.business.collector.snapshot():
                             raise ManagedExecutionError("TOOL_SETUP_FAILED")
                         preparation_correction = invalid_call.function.name
-                        correction_used = True
+                        # A corrected read must not consume the existing booking
+                        # preparation's single correction. Each category remains
+                        # bounded once per turn, before any effect dispatch.
+                        correction_budgets_used.add(correction_budget)
                         # Some Voice routes reject forced tool_choice in streams.
                         # The next completion is still checked above for exactly
                         # one corrected call to this same tool with a fresh ID.
                         tool_choice = ({"type": "function", "function": {"name": preparation_correction}}
                                        if preparation_correction in PREPARATION_TOOLS else None)
-                        runtime.business.observe_business_diagnostic(
-                            stage="TOOL_INPUT", capability=preparation_correction,
-                            refusal_category="VALIDATION_ERROR")
                         messages.append(self._assistant_message_to_dict(message, managed=True))
                         messages.append({"role": "tool", "tool_call_id": invalid_call.id,
                             "name": preparation_correction, "content": json.dumps(feedback, ensure_ascii=False)})
@@ -819,6 +826,10 @@ class LLMService:
                         # Hidden, disabled, custom and raw names stop before
                         # parsing and cannot reach a later scripted completion.
                         if func_name not in tool_registry or runtime.business is None:
+                            if runtime.business is not None:
+                                runtime.business.observe_business_diagnostic(
+                                    stage="TOOL_GUARD", capability="NOT_APPLICABLE",
+                                    refusal_category="CAPABILITY_DISABLED")
                             raise ManagedExecutionError("TOOL_SETUP_FAILED")
                         func_args = parse_managed_tool_arguments(func_args_str)
                         from schemas.business import BusinessSafetyError
