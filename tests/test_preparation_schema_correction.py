@@ -44,8 +44,8 @@ async def test_stringified_actions_are_corrected_once_before_real_proposal_prepa
     assert plan.proposal_state == 'PREPARED' and plan.operations[0].status == 'RESERVED'
     assert 'Подтверждаете' in draft and provider['posts'] == 0
     assert len(model.chat.completions.calls) == 2
-    assert model.chat.completions.calls[1]['tool_choice'] == {
-        'type': 'function', 'function': {'name': name}}
+    assert 'tool_choice' not in model.chat.completions.calls[1]
+    assert [t['function']['name'] for t in model.chat.completions.calls[1]['tools']] == [name]
 
 
 @pytest.mark.asyncio
@@ -232,4 +232,5 @@ async def test_empty_customer_ref_with_inline_customer_after_reads_requires_fres
         assert seen == ['catalog_search', 'booking_check_availability', 'business_propose']
     assert provider['posts'] == 0 and len(model.chat.completions.calls) == 4
     assert 'tool_choice' not in model.chat.completions.calls[2]
-    assert model.chat.completions.calls[3]['tool_choice']['function']['name'] == 'business_propose'
+    assert 'tool_choice' not in model.chat.completions.calls[3]
+    assert [t['function']['name'] for t in model.chat.completions.calls[3]['tools']] == ['business_propose']

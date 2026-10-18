@@ -6,7 +6,7 @@ from uuid import UUID
 
 
 _IDENTITY = object()
-_BRANCHES = frozenset({"FINAL", "TOOL_CALLS", "INVALID_SHAPE"})
+_BRANCHES = frozenset({"FINAL", "TOOL_CALLS", "INVALID_SHAPE", "MODEL_FAILURE"})
 _FINISHES = frozenset({"STOP", "TOOL_CALLS", "LENGTH", "CONTENT_FILTER",
                        "FUNCTION_CALL", "MISSING", "OTHER"})
 _CONTENT = frozenset({"TEXT", "MISSING", "EMPTY", "WHITESPACE",
@@ -28,6 +28,7 @@ class CompletionDiagnostic:
     reasoning_tokens: int | None = None
     model_ms: int | None = None
     first_delta_ms: int | None = None
+    http_status: int | None = None
 
 
 def emit_completion_diagnostic(diagnostic: CompletionDiagnostic) -> None:
@@ -68,6 +69,10 @@ def _trusted_completion_record(record):
             if type(item) is not int or not 0 <= item <= 2147483647:
                 return None
             fields[field] = item
+        if value.http_status is not None:
+            if type(value.http_status) is not int or not 100 <= value.http_status <= 599:
+                return None
+            fields['http_status'] = value.http_status
     except Exception:
         return None
     template = "managed_completion_observed " + " ".join(name + "=%s" for name in fields)

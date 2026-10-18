@@ -78,7 +78,7 @@ async def test_selected_voice_direct_booking_confirms_and_replays_once(api_clien
     assert result['status'] == 'DRAFT_READY' and 'Подтверждаете' in result['draft_text']
     names = [t['function']['name'] for t in model.chat.completions.calls[0]['tools']]
     assert 'business_propose' not in names and 'booking_create' in names
-    assert 'business_decide_proposal' in names
+    assert 'business_decide_proposal' not in names
     assert calls['execute'] == 0
     async with db_session() as db:
         proposal = await db.scalar(select(BusinessPlan))
@@ -91,6 +91,8 @@ async def test_selected_voice_direct_booking_confirms_and_replays_once(api_clien
     confirmed = (await execute(api_client, payload)).json()
     assert [ref['outcome'] for ref in confirmed['operation_refs']] == ['SUCCEEDED']
     assert model.chat.completions.calls[-1]['tool_choice']['function']['name'] == 'business_decide_proposal'
+    assert 'business_decide_proposal' in {t['function']['name']
+        for t in model.chat.completions.calls[-1]['tools']}
     assert (await execute(api_client, payload)).json()['operation_refs'] == confirmed['operation_refs']
     async with db_session() as db:
         operation = await db.scalar(select(BusinessOperation))

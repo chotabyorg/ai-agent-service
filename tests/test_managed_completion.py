@@ -299,7 +299,8 @@ def diagnostic(**changes):
 @pytest.mark.parametrize("changes", [{"step": True}, {"step": 0}, {"step": 21}, {"turn_id": SECRET},
     {"branch": "FINAL_" + SECRET}, {"finish": "STOP_" + SECRET}, {"visible_content": SECRET},
     {"prompt_tokens": True}, {"reasoning_tokens": -1}, {"total_tokens": 2147483648},
-    {"model_ms": True}, {"first_delta_ms": -1}, {"model_ms": 2147483648}])
+    {"model_ms": True}, {"first_delta_ms": -1}, {"model_ms": 2147483648},
+    {"http_status": True}, {"http_status": 99}, {"http_status": 600}, {"http_status": SECRET}])
 def test_identity_is_not_enough_for_invalid_dto(caplog, changes):
     mark = managed_logging.set(True)
     try:
