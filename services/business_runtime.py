@@ -69,6 +69,7 @@ class BusinessRuntime:
         if self.scope is not None:
             await self.repository.recover_attempts(request, grant)
         self.last_gate = None
+        self._booking_workflow_started = False
         self._business_diagnostics_used = False
         self._business_diagnostics_terminal = False
         self._last_business_diagnostic = None

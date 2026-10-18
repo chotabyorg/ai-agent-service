@@ -54,9 +54,10 @@ def canonical_tools(runtime, controls):
     propose = next(t for t in controls if t['function']['name'] == 'business_propose')
     propose['function']['description'] = (
         'Prepare and persist a proposal BEFORE asking the customer to confirm. '
-        'Before proposing booking.create from supplied customer details, look up the exact phone/email with customer_find and no name filter. '
-        'For one active match with the same name, make a separate proposal call using its customer_ref; clarify name conflicts or ambiguity. '
-        'If lookup returns NONE, include supplied customer details with booking.create so CRM records both together only after confirmation. '
+        'For booking.create, pass supplied customer details directly: runtime checks the exact phone/email automatically. '
+        'Do not add a separate customer_find solely for this preflight. '
+        'If runtime returns CUSTOMER_REUSE_REQUIRED, make a separate proposal call using its customer_ref; clarify conflicts or ambiguity. '
+        'CRM records a new customer and booking together only after confirmation. '
         'Never call customer_create first or rename or duplicate a customer. '
         'Propose one business action, or booking.create plus deal.create for the SAME EXISTING customer_ref. '
         'Other combinations are unsupported. Present the returned frozen business summary, '
@@ -89,6 +90,13 @@ def _lookup_refusal_category(result):
     data = payload.get('data')
     if payload.get('status') == 'AMBIGUOUS' or (isinstance(data, dict) and data.get('match') == 'AMBIGUOUS'):
         return 'AMBIGUOUS_IDENTITY'
+    if not isinstance(data, dict) or not isinstance(data.get('candidates'), list):
+        return 'LOOKUP_INVALID'
+    count = len(data['candidates'])
+    if payload.get('status') != 'OK' or not (
+            data.get('match') == 'NONE' and count == 0
+            or data.get('match') == 'SINGLE' and count == 1):
+        return 'LOOKUP_INVALID'
     return 'NONE'
 
 
@@ -179,6 +187,14 @@ async def call_capability(runtime, name, arguments, *, lookup_source='MODEL'):
             raise
         refusal = _lookup_refusal_category(result)
         _observe_model_customer_lookup(runtime, normalized_arguments, result=result, refusal=refusal)
+        if refusal in {'LOOKUP_UNAVAILABLE', 'LOOKUP_INVALID', 'AMBIGUOUS_IDENTITY', 'IDENTITY_CONFLICT'}:
+            from services.managed_preparation import _preflight_feedback_guard, _safe_lookup_draft
+            # A failed lookup is not NONE. Stop the model before it improvises a
+            # customer.create and strands the following booking behind that write.
+            gate = await _preflight_feedback_guard(runtime)
+            if gate is not None:
+                return gate
+            return BusinessToolResult(safe_draft=_safe_lookup_draft(refusal))
         return result
     try:
         result = await _call_capability_impl(runtime, name, arguments)
@@ -223,6 +239,21 @@ async def _call_capability_impl(runtime, name, arguments):
         raise BusinessSafetyError('CAPABILITY_DISABLED')
     action = BusinessAction(capability=capability.id,
         arguments=runtime.registration.capability(capability.id).normalize(arguments))
+    if capability.id == 'booking.check_availability':
+        runtime._booking_workflow_started = True
+    if capability.id == 'customer.create' and getattr(runtime, '_booking_workflow_started', False):
+        from services.managed_preparation import _preflight_feedback_guard
+        # A separate safe write would consume this turn's one immutable plan.
+        # Redirect before reserving anything, while preserving retained effects.
+        gate = await _preflight_feedback_guard(runtime)
+        if gate is not None:
+            return gate
+        return BusinessToolResult(tool_payload={
+            'status': 'BOOKING_AGGREGATE_REQUIRED',
+            'instruction': 'No customer was created. Continue booking_create or business_propose '
+                           'with customer details (or a verified customer_ref). '
+                           'Do not call customer_create as a booking prerequisite.',
+        })
     if capability.risk != Risk.READ:
         try:
             return await runtime.execute_plan([action])

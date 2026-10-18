@@ -257,9 +257,11 @@ async def test_fact_refusal_with_newly_retained_success_ref_remains_unknown(
 
 async def install_managed_crm(api_client, db_session, monkeypatch, response_status, response_body,
                               *, recover_after_first=False, lookup_response=None,
-                              enabled_capabilities=None, allow_execute=False):
+                              enabled_capabilities=None, allow_execute=False,
+                              channel="WEBSITE_WIDGET"):
     agent = await create_agent(api_client, db_session_factory=db_session)
     value = payload(agent["id"])
+    value["channel"] = channel
     owner_id = UUID(agent["user_id"])
     configure(monkeypatch, value, owner_id)
 
@@ -291,6 +293,14 @@ async def install_managed_crm(api_client, db_session, monkeypatch, response_stat
             calls["lookup_arguments"].append(json.loads(request.content)["arguments"])
             body = lookup_response or {"status": "OK", "data": {"match": "NONE", "candidates": []}}
             return httpx.Response(200, json=body)
+        if request.url.path.endswith("/execute/booking.check_availability"):
+            arguments = json.loads(request.content)["arguments"]
+            start = datetime.fromisoformat(arguments["start_at"].replace("Z", "+00:00"))
+            return httpx.Response(200, json={"status": "OK", "data": {
+                "available": True, "start_at": start.isoformat(),
+                "end_at": (start + timedelta(hours=1)).isoformat(),
+                "checked_at": datetime.now(timezone.utc).isoformat(), "reservation": False,
+            }})
         if "/facts/" in request.url.path:
             calls["facts"] += 1
             fact_arguments = json.loads(request.content)["arguments"]
@@ -339,7 +349,7 @@ async def install_managed_crm(api_client, db_session, monkeypatch, response_stat
                     "status": "OK", "operation_ref": "synthetic_receipt",
                     "operation_id": body["operation"]["id"], "effect": "APPLIED",
                     "data": {
-                        "ref": "booking_test", "customer_ref": action["customer_ref"],
+                        "ref": "booking_test", "customer_ref": action.get("customer_ref", "customer_new"),
                         "offering_ref": action["offering_ref"], "resource_ref": action["resource_ref"],
                         "offering_name": "Окрашивание", "resource_name": "Анна",
                         "timezone": "Europe/Minsk", "start_at": start.isoformat(),
