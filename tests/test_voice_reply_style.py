@@ -20,6 +20,10 @@ from tests.test_chotacrm_adapter import crm_settings  # noqa: F401
 
 @pytest.mark.parametrize('last_agent,reply,expected', [
     (None, 'Да, да, да.', True),
+    (None, 'Да, я ещё на линии.', True),
+    (None, 'Да, я еще на линии.', True),
+    (None, 'Слушаю.', True),
+    (None, 'Да, да, я на месте.', True),
     ('Вы ещё на линии?', 'Я здесь.', True),
     ('Записать вас завтра в 13:00? Подтверждаете?', 'да', False),
     (None, 'Да, подтверждаю запись.', False),
@@ -37,6 +41,41 @@ def test_presence_hint_does_not_consume_later_business_answers(last_agent, reply
     value.update(messages=messages, input_first_sequence=len(messages), input_last_sequence=len(messages),
                  context_last_sequence=len(messages), selected_input_message_ids=[messages[-1]['id']])
     assert replying_to_connection_check(ManagedTurnRequest.model_validate(value)) is expected
+
+
+@pytest.mark.parametrize('first,older_reply,business_question,expected', [
+    (1, False, False, True),
+    (1, True, False, True),
+    (3, True, False, True),
+    (1, False, True, False),
+    (1, True, True, False),
+])
+def test_presence_classifies_latest_reply_in_a_coalesced_selection(
+        first, older_reply, business_question, expected):
+    from services.voice_reply_style import replying_to_connection_check, past_idle_communication
+    from tests.test_managed_turns import payload
+
+    value = payload(channel='VOICE')
+    messages = [{**value['messages'][0], 'text': '[silence]'}]
+    history = ([('CUSTOMER', 'Да, я слышу вас.')] if older_reply else [])
+    if business_question:
+        history += [('AGENT', 'Записать вас завтра в 13:00? Подтверждаете?')]
+    history += [('CUSTOMER', 'Да, я ещё на линии.')]
+    for actor, text in history:
+        messages.append({**messages[0], 'id': str(uuid4()), 'sequence': len(messages) + 1,
+                         'actor': actor, 'text': text})
+    value.update(messages=messages, input_first_sequence=first, input_last_sequence=len(messages),
+                 context_last_sequence=len(messages), selected_input_message_ids=[m['id'] for m in messages[first - 1:]])
+    request = ManagedTurnRequest.model_validate(value)
+    assert replying_to_connection_check(request) is expected
+    raw = request.model_dump_json()
+    communication = [{'role': 'user' if m.actor == 'CUSTOMER' else 'assistant', 'content': m.text}
+                     for m in request.messages]
+    projected = past_idle_communication(request, communication)
+    assert projected[0]['content'].startswith('[Past voice control event:')
+    assert projected[1:] == communication[1:]
+    assert communication[0]['content'] == '[silence]'
+    assert request.model_dump_json() == raw
 
 
 @pytest.mark.asyncio
@@ -74,8 +113,9 @@ async def test_current_input_distinguishes_silence_from_reply_after_interrupted_
 @pytest.mark.asyncio
 @pytest.mark.parametrize('delivered', [False, True])
 @pytest.mark.parametrize('intent', ['CONFIRM', 'UNRELATED'])
+@pytest.mark.parametrize('coalesced', [False, True])
 async def test_presence_after_idle_cannot_confirm_pending_booking(
-        db_session, crm_settings, monkeypatch, model, delivered, intent):
+        db_session, crm_settings, monkeypatch, model, delivered, intent, coalesced):
     from models.business import BusinessPlan
     from services.business_runtime import BusinessRuntime
     from services.managed_runtime import ManagedRuntime
@@ -103,9 +143,10 @@ async def test_presence_after_idle_cannot_confirm_pending_booking(
     for actor, text in [('CUSTOMER', '[silence]')] + ([('AGENT', 'Вы ещё на линии?')] if delivered else []) + [('CUSTOMER', 'да да да')]:
         messages.append({**value['messages'][0], 'id': str(uuid4()), 'sequence': len(messages) + 1,
                          'actor': actor, 'text': text})
+    first = len(value['messages']) + 1 if coalesced else len(messages)
     value.update(turn_id=str(uuid4()), messages=messages, input_revision=2,
-                 input_first_sequence=len(messages), input_last_sequence=len(messages),
-                 context_last_sequence=len(messages), selected_input_message_ids=[messages[-1]['id']])
+                 input_first_sequence=first, input_last_sequence=len(messages),
+                 context_last_sequence=len(messages), selected_input_message_ids=[m['id'] for m in messages[first - 1:]])
     call = build_tool_call('presence', 'business_decide_proposal',
                           json.dumps({'proposal_id': proposal_id, 'intent': intent}))
     call.type = 'function'
@@ -121,7 +162,11 @@ async def test_presence_after_idle_cannot_confirm_pending_booking(
     async with db_session() as db:
         from uuid import UUID
         assert (await db.get(BusinessPlan, UUID(proposal_id))).proposal_state == 'PREPARED'
-    if intent == 'CONFIRM':
+    if coalesced and delivered:
+        # A selection containing an agent Message cannot supply business input.
+        # Preserve the runtime's existing rejection rather than weakening it.
+        assert result['status'] == 'FAILED' and result['error_code'] == 'TOOL_SETUP_FAILED', result
+    elif intent == 'CONFIRM':
         assert result['status'] == 'FAILED' and result['error_code'] == 'INVALID_RESULT', result
     else:
         assert result['status'] == 'DRAFT_READY', (result['error_code'], len(model.chat.completions.calls))
