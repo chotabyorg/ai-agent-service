@@ -15,6 +15,28 @@ from tests.fakes import build_llm_response, build_tool_call
 from tests.test_managed_business_fakes import install_business, plan_arguments
 from tests.test_managed_turns import configure, execute, model, setup  # noqa: F401
 from tests.test_voice_latency import profile
+from tests.test_chotacrm_adapter import crm_settings  # noqa: F401
+
+
+@pytest.mark.parametrize('last_agent,reply,expected', [
+    (None, 'Да, да, да.', True),
+    ('Вы ещё на линии?', 'Я здесь.', True),
+    ('Записать вас завтра в 13:00? Подтверждаете?', 'да', False),
+    (None, 'Да, подтверждаю запись.', False),
+    (None, 'Нет, отмените запись.', False),
+])
+def test_presence_hint_does_not_consume_later_business_answers(last_agent, reply, expected):
+    from services.voice_reply_style import replying_to_connection_check
+    from tests.test_managed_turns import payload
+
+    value = payload(channel='VOICE')
+    messages = [{**value['messages'][0], 'text': '[silence]'}]
+    for actor, text in ([('AGENT', last_agent)] if last_agent else []) + [('CUSTOMER', reply)]:
+        messages.append({**value['messages'][0], 'id': str(uuid4()), 'sequence': len(messages) + 1,
+                         'actor': actor, 'text': text})
+    value.update(messages=messages, input_first_sequence=len(messages), input_last_sequence=len(messages),
+                 context_last_sequence=len(messages), selected_input_message_ids=[messages[-1]['id']])
+    assert replying_to_connection_check(ManagedTurnRequest.model_validate(value)) is expected
 
 
 @pytest.mark.asyncio
@@ -32,12 +54,80 @@ async def test_current_input_distinguishes_silence_from_reply_after_interrupted_
     model.chat.completions.queue(build_llm_response(content='Продолжим запись.'))
     result = (await execute(api_client, value)).json()
     assert result['status'] == 'DRAFT_READY', result
+    if latest == '[silence]':
+        assert result['draft_text'] == 'Вы ещё на линии?'
+        assert result['operation_refs'] == []
+        assert model.chat.completions.calls == []
+        return
     prompt = model.chat.completions.calls[0]['messages'][0]['content']
     assert ('Текущий вход — сигнал тишины.' in prompt) is (latest == '[silence]')
     assert ('Клиент сейчас ответил; это не сигнал тишины.' in prompt) is (latest != '[silence]')
     # The canonical window and selected input remain the same; no synthetic
     # assistant delivery or confirmation is inserted to repair presentation.
     assert value['messages'][0]['text'] == '[silence]' and message['text'] == latest
+    history = model.chat.completions.calls[0]['messages'][1:]
+    assert history[-1] == {'role': 'user', 'content': latest}
+    assert history[0]['content'].startswith('[Past voice control event:')
+    assert 'Если последняя реплика клиента' not in prompt
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('delivered', [False, True])
+@pytest.mark.parametrize('intent', ['CONFIRM', 'UNRELATED'])
+async def test_presence_after_idle_cannot_confirm_pending_booking(
+        db_session, crm_settings, monkeypatch, model, delivered, intent):
+    from models.business import BusinessPlan
+    from services.business_runtime import BusinessRuntime
+    from services.managed_runtime import ManagedRuntime
+    from services.managed_turn_service import execute_managed_owned
+    from tests.business_effect_helpers import FakeConversationEffectPort
+    import tests.test_chotacrm_adapter as crm_fixture
+    from tests.test_business_runtime import make_request
+
+    monkeypatch.setattr(crm_fixture, 'make_request', lambda agent: make_request(agent, channel='VOICE'))
+    original, registry, provider, args = await crm_fixture.setup(db_session, crm_settings)
+    prepared = await original.call_tool('booking_create', args)
+    proposal_id = prepared.tool_payload['proposal_id']
+    value = original.request.model_dump(mode='json')
+    monkeypatch.setattr(get_settings(), 'managed_voice_latency_profiles', [profile(value, 'test')])
+    monkeypatch.setattr(LLMService, '_get_agent_api_key', lambda *_: 'synthetic')
+    monkeypatch.setattr(LLMService, '_create_llm_client', lambda *_args, **_kwargs: model)
+    original_open = BusinessRuntime.open.__func__
+
+    async def open_with_authority(cls, *args, **kwargs):
+        kwargs.setdefault('effect_port', FakeConversationEffectPort())
+        return await original_open(cls, *args, **kwargs)
+
+    monkeypatch.setattr(BusinessRuntime, 'open', classmethod(open_with_authority))
+    messages = list(value['messages'])
+    for actor, text in [('CUSTOMER', '[silence]')] + ([('AGENT', 'Вы ещё на линии?')] if delivered else []) + [('CUSTOMER', 'да да да')]:
+        messages.append({**value['messages'][0], 'id': str(uuid4()), 'sequence': len(messages) + 1,
+                         'actor': actor, 'text': text})
+    value.update(turn_id=str(uuid4()), messages=messages, input_revision=2,
+                 input_first_sequence=len(messages), input_last_sequence=len(messages),
+                 context_last_sequence=len(messages), selected_input_message_ids=[messages[-1]['id']])
+    call = build_tool_call('presence', 'business_decide_proposal',
+                          json.dumps({'proposal_id': proposal_id, 'intent': intent}))
+    call.type = 'function'
+    model.chat.completions.queue(build_llm_response(tool_calls=[call]),
+        build_llm_response(content='Я вас слышу. Подтвердите предложенную запись, пожалуйста.'))
+    async def db_provider():
+        async with db_session() as db:
+            yield db
+
+    result = (await execute_managed_owned(ManagedTurnRequest.model_validate(value), original.grant,
+        ManagedRuntime(20, request=ManagedTurnRequest.model_validate(value)), db_provider, db_session, registry)).model_dump()
+    assert provider['posts'] == 0
+    async with db_session() as db:
+        from uuid import UUID
+        assert (await db.get(BusinessPlan, UUID(proposal_id))).proposal_state == 'PREPARED'
+    if intent == 'CONFIRM':
+        assert result['status'] == 'FAILED' and result['error_code'] == 'INVALID_RESULT', result
+    else:
+        assert result['status'] == 'DRAFT_READY', (result['error_code'], len(model.chat.completions.calls))
+    decision_tool = next(t for t in model.chat.completions.calls[0]['tools']
+                         if t['function']['name'] == 'business_decide_proposal')
+    assert decision_tool['function']['parameters']['properties']['intent']['enum'] == ['UNRELATED']
 
 
 @pytest.mark.asyncio

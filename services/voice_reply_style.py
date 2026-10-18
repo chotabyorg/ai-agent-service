@@ -1,5 +1,53 @@
 """Opt-in spoken presentation, with no execution or confirmation authority."""
 
+import re
+
+
+CONNECTION_CHECK = 'Вы ещё на линии?'
+
+
+def is_idle_input(request):
+    """Recognize only a standalone current Voice control marker."""
+    selected = request.selected_messages
+    return (getattr(request.channel, 'value', request.channel) == 'VOICE'
+            and len(selected) == 1 and selected[0].actor == 'CUSTOMER'
+            and selected[0].text == '[silence]')
+
+
+def replying_to_connection_check(request):
+    """A bare presence reply after our control question is not business consent.
+
+    The question can be absent from canonical history after interrupted playback.
+    Never treat an older idle event behind a business question as this situation.
+    """
+    if not request.simple_selection:
+        return False
+    text = re.sub(r'[^\w\s]', ' ', request.selected_messages[0].text.casefold())
+    words = text.split()
+    if not words or len(words) > 8 or any(word not in {
+            'да', 'ага', 'угу', 'алло', 'я', 'здесь', 'тут', 'на', 'линии',
+            'слышу', 'вас', 'yes', 'hello', 'here'} for word in words):
+        return False
+    previous = request.messages[:request.selected_local_indices[0]]
+    if previous and previous[-1].actor == 'AGENT' and previous[-1].text == CONNECTION_CHECK:
+        previous = previous[:-1]
+    return bool(previous and previous[-1].actor == 'CUSTOMER'
+                and previous[-1].text == '[silence]')
+
+
+def past_idle_communication(request, communication):
+    """Label historical control input without changing canonical selection.
+
+    Preserve every position and other message verbatim. The request, request
+    identity and delivery facts are never edited or inferred here.
+    """
+    selected = set(request.selected_local_indices)
+    return [({'role': 'user', 'content': '[Past voice control event: caller was silent then; '
+               'this is not the current customer reply.]'}
+             if index not in selected and message.actor == 'CUSTOMER' and message.text == '[silence]'
+             else item)
+            for index, (message, item) in enumerate(zip(request.messages, communication, strict=True))]
+
 CONCISE_SPEECH = """<voice_reply_style>
 Ответ прозвучит по телефону. Обычно отвечай одним-двумя короткими предложениями,
 ориентир — до 25 слов. Сразу давай полезный ответ без вступления и повторного приветствия.
