@@ -28,6 +28,7 @@ from services.managed_tools import (ManagedExecutionError, inspect_managed_tool_
 from services.managed_http_cleanup import close_managed_helper, own_managed_http
 from services.managed_reasoning import managed_reasoning_fields
 from services.managed_completion import select_managed_completion, observe_managed_completion
+from services.completion_timing import CompletionTiming
 from services.managed_streaming import complete_with_partials
 from services.chat_diagnostics import ChatFailureStage, set_chat_failure_stage
 from services.agent_service import AgentService
@@ -648,18 +649,22 @@ class LLMService:
                         **({"extra_body": model_extra_body} if model_extra_body else {}),
                         extra_headers=self._build_extra_headers(),
                     )
+                    completion_timing = CompletionTiming() if runtime else None
                     pending_response = complete_with_partials(
                         llm_client.chat.completions.create,
                         completion_kwargs,
                         # A required preparation continuation cannot publish
                         # prose before validation has seen the actual tool call.
                         on_text=None if reuse_expectation is not None else partial_hook,
+                        timing=completion_timing,
                     )
                     response = (
                         await runtime.operation(pending_response)
                         if runtime
                         else await pending_response
                     )
+                    if completion_timing is not None:
+                        completion_timing.complete()
                     if voice_profile is not None:
                         elapsed_ms = round((time.monotonic() - model_started) * 1000)
                         emit_voice_timing(VoiceTiming(runtime.request.turn_id, step_index + 1, "MODEL",
@@ -727,7 +732,7 @@ class LLMService:
                 if runtime:
                     selected = select_managed_completion(response, self._strip_thinking_tags)
                     observe_managed_completion(response, selected,
-                        request=runtime.request, step=step_index + 1)
+                        request=runtime.request, step=step_index + 1, timing=completion_timing)
                     message = selected.message
                 else:
                     message = response.choices[0].message

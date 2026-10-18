@@ -18,6 +18,7 @@ from core.managed_security import managed_logging, install_managed_log_boundary
 import services.managed_completion as completion
 from services.business_runtime import BusinessRuntime
 from services.llm_service import LLMService, _to_namespace
+from services.completion_timing import CompletionTiming
 from schemas.managed_turn import ManagedTurnRequest
 from tests.fakes import build_llm_response, build_tool_call
 from tests.test_managed_business_evidence import evidence, retained_rows
@@ -152,6 +153,8 @@ async def test_real_sdk_and_proxy_storage_observation(api_client, db_session, mo
     record = observed(caplog)[0]
     assert (record.prompt_tokens, record.completion_tokens, record.total_tokens, record.reasoning_tokens) == (5, 7, 12, 3)
     assert record.turn_id == value["turn_id"] and record.step == 1
+    assert type(record.model_ms) is int and record.model_ms >= 0
+    assert 'first_delta_ms' not in record.__dict__  # Buffered completion has no token clock.
     assert_private(caplog)
 
 
@@ -185,6 +188,27 @@ def test_hostile_usage_is_not_inspected_and_first_choice_policy_stays(caplog):
     finally:
         managed_logging.reset(mark)
     assert selected.answer == "first" and observed(caplog)[0].finish == "OTHER"
+
+
+@pytest.mark.parametrize('bad', [None, True, -1, 2147483648, 1.5, float('nan'), SECRET])
+def test_only_finite_local_timings_reach_the_log(caplog, bad):
+    reply = build_llm_response(content='valid')
+    # Provider fields with the same names do not supply local measurements.
+    reply.model_ms = SECRET
+    reply.first_delta_ms = SECRET
+    timing = CompletionTiming(model_ms=1200, first_delta_ms=bad)
+    selected = completion.select_managed_completion(reply, str.strip)
+    mark = managed_logging.set(True)
+    try:
+        with caplog.at_level(logging.INFO):
+            completion.observe_managed_completion(reply, selected,
+                request=ManagedTurnRequest.model_validate(payload()), step=1, timing=timing)
+    finally:
+        managed_logging.reset(mark)
+    record = observed(caplog)[0]
+    assert record.model_ms == 1200 and 'first_delta_ms' not in record.__dict__
+    assert selected.answer == 'valid'
+    assert_private(caplog)
 
 
 @pytest.mark.integration
@@ -274,7 +298,8 @@ def diagnostic(**changes):
 
 @pytest.mark.parametrize("changes", [{"step": True}, {"step": 0}, {"step": 21}, {"turn_id": SECRET},
     {"branch": "FINAL_" + SECRET}, {"finish": "STOP_" + SECRET}, {"visible_content": SECRET},
-    {"prompt_tokens": True}, {"reasoning_tokens": -1}, {"total_tokens": 2147483648}])
+    {"prompt_tokens": True}, {"reasoning_tokens": -1}, {"total_tokens": 2147483648},
+    {"model_ms": True}, {"first_delta_ms": -1}, {"model_ms": 2147483648}])
 def test_identity_is_not_enough_for_invalid_dto(caplog, changes):
     mark = managed_logging.set(True)
     try:

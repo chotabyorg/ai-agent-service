@@ -9,6 +9,7 @@ from openai.types.completion_usage import CompletionTokensDetails, CompletionUsa
 
 from core.managed_completion_diagnostics import CompletionDiagnostic, emit_completion_diagnostic
 from schemas.managed_turn import ManagedTurnRequest
+from services.completion_timing import CompletionTiming
 
 
 _MISSING = object()
@@ -60,7 +61,7 @@ def select_managed_completion(response, clean_text):
     return SelectedCompletion(message, "FINAL", state, answer)
 
 
-def observe_managed_completion(response, selected, *, request, step):
+def observe_managed_completion(response, selected, *, request, step, timing=None):
     try:
         if type(request) is not ManagedTurnRequest:
             return
@@ -77,6 +78,11 @@ def observe_managed_completion(response, selected, *, request, step):
         value = _field(details, "reasoning_tokens", CompletionTokensDetails)
         if type(value) is int and 0 <= value <= 2147483647:
             counts["reasoning_tokens"] = value
+        if type(timing) is CompletionTiming:
+            for name in ('model_ms', 'first_delta_ms'):
+                value = getattr(timing, name)
+                if type(value) is int and 0 <= value <= 2147483647:
+                    counts[name] = value
         emit_completion_diagnostic(CompletionDiagnostic(turn_id=request.turn_id, step=step,
             branch=selected.branch, finish=category,
             visible_content=selected.visible_content, **counts))

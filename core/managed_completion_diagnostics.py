@@ -12,6 +12,7 @@ _FINISHES = frozenset({"STOP", "TOOL_CALLS", "LENGTH", "CONTENT_FILTER",
 _CONTENT = frozenset({"TEXT", "MISSING", "EMPTY", "WHITESPACE",
                      "STRIPPED_EMPTY", "INVALID_TYPE", "NOT_INSPECTED"})
 _COUNTS = ("prompt_tokens", "completion_tokens", "total_tokens", "reasoning_tokens")
+_METRICS = _COUNTS + ("model_ms", "first_delta_ms")
 
 
 @dataclass(frozen=True, slots=True)
@@ -25,6 +26,8 @@ class CompletionDiagnostic:
     completion_tokens: int | None = None
     total_tokens: int | None = None
     reasoning_tokens: int | None = None
+    model_ms: int | None = None
+    first_delta_ms: int | None = None
 
 
 def emit_completion_diagnostic(diagnostic: CompletionDiagnostic) -> None:
@@ -58,7 +61,7 @@ def _trusted_completion_record(record):
         fields = {"turn_id": str(value.turn_id), "step": value.step,
                   "branch": value.branch, "finish": value.finish,
                   "visible_content": value.visible_content}
-        for field in _COUNTS:
+        for field in _METRICS:
             item = getattr(value, field)
             if item is None:
                 continue

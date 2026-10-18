@@ -16,6 +16,11 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from types import SimpleNamespace
 from typing import Any
 
+from openai.types.chat.chat_completion_chunk import ChatCompletionChunk
+from openai.types.completion_usage import CompletionTokensDetails, CompletionUsage
+
+from services.completion_timing import CompletionTiming
+
 # Bounded assembly; mirrors the managed result budget without importing it.
 MAX_STREAM_CHARS = 8000
 MAX_STREAM_CHUNKS = 4096
@@ -43,6 +48,32 @@ def _choice(item: Any) -> Any:
     if not isinstance(choices, list) or not choices:
         raise ValueError("Streaming completion chunk has no choices")
     return choices[0]
+
+
+def _metadata_field(value: Any, name: str) -> Any:
+    # Optional accounting metadata cannot execute arbitrary accessors or affect
+    # result validation. Copy only fields stored by the supported client shapes.
+    if type(value) is dict:
+        return value.get(name)
+    if type(value) in (SimpleNamespace, ChatCompletionChunk, CompletionUsage, CompletionTokensDetails):
+        return object.__getattribute__(value, '__dict__').get(name)
+    return None
+
+
+def _usage(item: Any) -> SimpleNamespace | None:
+    usage = _metadata_field(item, 'usage')
+    if type(usage) not in (dict, SimpleNamespace, CompletionUsage):
+        return None
+    counts = {}
+    for name in ('prompt_tokens', 'completion_tokens', 'total_tokens'):
+        value = _metadata_field(usage, name)
+        if type(value) is int and 0 <= value <= 2147483647:
+            counts[name] = value
+    details = _metadata_field(usage, 'completion_tokens_details')
+    reasoning = _metadata_field(details, 'reasoning_tokens')
+    if type(reasoning) is int and 0 <= reasoning <= 2147483647:
+        counts['completion_tokens_details'] = SimpleNamespace(reasoning_tokens=reasoning)
+    return SimpleNamespace(**counts)
 
 
 def _parse_sse_line(line: str) -> Any | None:
@@ -232,6 +263,7 @@ async def complete_with_partials(
     request_kwargs: dict[str, Any],
     *,
     on_text: Callable[[str], Awaitable[None]] | None = None,
+    timing: CompletionTiming | None = None,
 ) -> Any:
     """Buffered completion by default; streams only when on_text is set.
 
@@ -241,7 +273,7 @@ async def complete_with_partials(
     """
     if on_text is None:
         return await create(**request_kwargs)
-    return await stream_completion(create, request_kwargs, on_text=on_text)
+    return await stream_completion(create, request_kwargs, on_text=on_text, timing=timing)
 
 
 async def stream_completion(
@@ -251,6 +283,7 @@ async def stream_completion(
     on_text: Callable[[str], Awaitable[None]],
     max_chars: int = MAX_STREAM_CHARS,
     max_chunks: int = MAX_STREAM_CHUNKS,
+    timing: CompletionTiming | None = None,
 ) -> Any:
     """Assemble one completion while forwarding cumulative text partials.
 
@@ -276,10 +309,20 @@ async def stream_completion(
     tools: dict[int, dict[str, Any]] = {}
     finish_reason: Any = None
     seen = 0
+    usage = None
     async for item in _chunks(result):
         seen += 1
         if seen > max_chunks:
             raise StreamLimitExceeded("Streaming completion exceeded chunk bound")
+        accounting = _usage(item)
+        if accounting is not None:
+            if vars(accounting):
+                usage = accounting
+            # OpenAI-compatible accounting frames may have no choice. OpenRouter
+            # repeats the terminal choice instead; both remain one completion.
+            choices = _get(item, 'choices')
+            if type(choices) is list and not choices and _get(item, 'error') is None:
+                continue
         choice = _choice(item)
         reason = _get(choice, "finish_reason")
         if reason is not None:
@@ -291,6 +334,11 @@ async def stream_completion(
             continue
         for part in _delta_tool_calls(delta):
             tooling = True
+            function = _get(part, 'function')
+            if timing is not None and any(isinstance(value, str) and value for value in (
+                _get(part, 'id'), _get(function, 'name'), _get(function, 'arguments')
+            )):
+                timing.first_delta()
             _merge_tool_call(tools, part)
         if tooling:
             continue
@@ -301,6 +349,8 @@ async def stream_completion(
         if text_len > max_chars:
             raise StreamLimitExceeded("Streaming completion exceeded text bound")
         text_parts.append(piece)
+        if timing is not None:
+            timing.first_delta()
         await on_text("".join(text_parts))
     full_text = "".join(text_parts)
     assembled_calls = [_tool_namespace(tools[index]) for index in sorted(tools)] or None
@@ -313,5 +363,6 @@ async def stream_completion(
                     tool_calls=assembled_calls,
                 ),
             )
-        ]
+        ],
+        usage=usage,
     )
