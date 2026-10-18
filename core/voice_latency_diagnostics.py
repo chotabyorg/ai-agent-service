@@ -8,6 +8,7 @@ from business_capabilities.registry import WIRE_REGISTRY
 
 
 _IDENTITY = object()
+_TEXT_IDENTITY = object()
 _PHASES = frozenset({"MODEL", "TOOL", "PREPARE", "SETUP", "BUSINESS", "CONTEXT", "KNOWLEDGE"})
 _TOOLS = frozenset(WIRE_REGISTRY) | {
     "business_propose", "business_decide_proposal", "business_confirm",
@@ -25,12 +26,21 @@ class VoiceTiming:
 
 
 def emit_voice_timing(value):
+    _emit_timing(value, _IDENTITY, 'voice_phase_timing')
+
+
+def emit_text_timing(value):
+    """Use the same finite fields for buffered managed-text stages."""
+    _emit_timing(value, _TEXT_IDENTITY, 'managed_text_phase_timing')
+
+
+def _emit_timing(value, identity, event):
     try:
         from core.managed_security import managed_logging
         if not managed_logging.get() or not getattr(logging.Logger.makeRecord, "_managed_boundary", False):
             return
-        logging.getLogger("uvicorn.error").info("voice_phase_timing", extra={
-            "_voice_timing_identity": _IDENTITY, "_voice_timing": value})
+        logging.getLogger("uvicorn.error").info(event, extra={
+            "_voice_timing_identity": identity, "_voice_timing": value})
     except Exception:
         pass
 
@@ -42,8 +52,21 @@ def emit_voice_checkpoint(runtime, phase):
                                       max(0, round((time.monotonic() - started) * 1000))))
 
 
+def emit_text_checkpoint(runtime, phase):
+    """Cumulative text setup checkpoints, measured from the owned-task start."""
+    request = getattr(runtime, 'request', None)
+    channel = getattr(request, 'channel', None)
+    if request is None or getattr(channel, 'value', channel) == 'VOICE':
+        return
+    started = getattr(runtime, 'voice_started_at', None)
+    if started is not None:
+        emit_text_timing(VoiceTiming(request.turn_id, 0, phase,
+            max(0, round((time.monotonic() - started) * 1000))))
+
+
 def _trusted_voice_timing_record(record):
-    if record.__dict__.get("_voice_timing_identity") is not _IDENTITY:
+    identity = record.__dict__.get("_voice_timing_identity")
+    if identity is not _IDENTITY and identity is not _TEXT_IDENTITY:
         return None
     value = record.__dict__.get("_voice_timing")
     if type(value) is not VoiceTiming:
@@ -62,8 +85,9 @@ def _trusted_voice_timing_record(record):
               "phase": value.phase, "elapsed_ms": value.elapsed_ms}
     if value.tool is not None:
         fields["tool"] = value.tool
+    event = 'voice_phase_timing' if identity is _IDENTITY else 'managed_text_phase_timing'
     safe = logging.LogRecord("uvicorn.error", logging.INFO, "", 0,
-        "voice_phase_timing " + " ".join(key + "=%s" for key in fields), tuple(fields.values()), None)
-    safe.event = "voice_phase_timing"
+        event + " " + " ".join(key + "=%s" for key in fields), tuple(fields.values()), None)
+    safe.event = event
     safe.__dict__.update(fields)
     return safe

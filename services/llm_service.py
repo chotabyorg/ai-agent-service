@@ -450,6 +450,11 @@ class LLMService:
     ) -> str:
         """Shared prompt/KB/model/tools/normalization; adapters own persistence."""
         managed_request = runtime.request if runtime else None
+        if runtime:
+            import time
+            from core.voice_latency_diagnostics import (
+                VoiceTiming, emit_text_checkpoint, emit_text_timing,
+            )
         prompt_context = None
         if runtime and runtime.business is not None:
             project = getattr(runtime.business, "prompt_context", None)
@@ -464,6 +469,8 @@ class LLMService:
         if voice_profile is not None:
             from core.voice_latency_diagnostics import emit_voice_checkpoint
             emit_voice_checkpoint(runtime, "CONTEXT")
+        if runtime:
+            emit_text_checkpoint(runtime, "CONTEXT")
         caller_phone = getattr(runtime, "caller_phone", "") if runtime else ""
         system_prompt += self._voice_prompt_suffix(voice_profile, caller_phone, request=managed_request)
         knowledge_overrides = (
@@ -483,6 +490,8 @@ class LLMService:
             )
         if voice_profile is not None:
             emit_voice_checkpoint(runtime, "KNOWLEDGE")
+        if runtime:
+            emit_text_checkpoint(runtime, "KNOWLEDGE")
 
         messages: list[dict[str, object]] = [
             {"role": "system", "content": system_prompt},
@@ -627,6 +636,8 @@ class LLMService:
                         self._check_managed_envelope(agent, messages, openai_tools,
                                                      tool_choice=tool_choice, request=managed_request)
                     model_extra_body = self._managed_model_extra_body(agent, request=managed_request) if runtime else {}
+                    if runtime and step_index == 0:
+                        emit_text_checkpoint(runtime, "PREPARE")
                     if voice_profile is not None:
                         import time
                         from core.voice_latency_diagnostics import VoiceTiming, emit_voice_timing
@@ -908,8 +919,7 @@ class LLMService:
                             raise ManagedExecutionError("TOOL_SETUP_FAILED")
                         func_args = parse_managed_tool_arguments(func_args_str)
                         from schemas.business import BusinessSafetyError
-                        if voice_profile is not None:
-                            tool_started = time.monotonic()
+                        tool_started = time.monotonic()
                         try:
                             business_result = await runtime.operation(
                                 runtime.business.call_tool(func_name, func_args))
@@ -920,6 +930,9 @@ class LLMService:
                         finally:
                             if voice_profile is not None:
                                 emit_voice_timing(VoiceTiming(runtime.request.turn_id, step_index + 1, "TOOL",
+                                    round((time.monotonic() - tool_started) * 1000), func_name))
+                            elif getattr(runtime.request.channel, 'value', runtime.request.channel) != 'VOICE':
+                                emit_text_timing(VoiceTiming(runtime.request.turn_id, step_index + 1, "TOOL",
                                     round((time.monotonic() - tool_started) * 1000), func_name))
                         if business_result.halt_status:
                             raise ManagedExecutionError(business_result.error_code,

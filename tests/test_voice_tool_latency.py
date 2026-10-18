@@ -162,6 +162,11 @@ async def test_managed_activation_is_exact_voice_only_and_cleanup_owned(
         if channel == "VOICE" else [])
     elapsed = [r.elapsed_ms for r in timings[:5]]
     assert elapsed == sorted(elapsed)
+    text_timings = [r for r in caplog.records if getattr(r, 'event', None) == 'managed_text_phase_timing']
+    assert [r.phase for r in text_timings] == (
+        ['SETUP', 'BUSINESS', 'CONTEXT', 'KNOWLEDGE', 'PREPARE', 'TOOL']
+        if channel != 'VOICE' else [])
+    assert [r.elapsed_ms for r in text_timings[:5]] == sorted(r.elapsed_ms for r in text_timings[:5])
 
 
 @pytest.mark.asyncio
@@ -199,12 +204,13 @@ async def test_model_connection_warmup_reuses_one_owned_pool_connection():
     {"phase": "secret"}, {"turn_id": "secret"}, {"step": True}, {"step": 21},
     {"elapsed_ms": -1}, {"elapsed_ms": True}, {"tool": "secret"}, {"phase": "TOOL"},
 ])
-def test_invalid_timing_cannot_escape_logging_boundary(caplog, changes):
+@pytest.mark.parametrize('emitter', ['emit_voice_timing', 'emit_text_timing'])
+def test_invalid_timing_cannot_escape_logging_boundary(caplog, changes, emitter):
     value = diagnostic.VoiceTiming(**{"turn_id": uuid4(), "step": 1, "phase": "MODEL", "elapsed_ms": 10, **changes})
     mark = managed_logging.set(True)
     try:
         with caplog.at_level(logging.INFO):
-            diagnostic.emit_voice_timing(value)
+            getattr(diagnostic, emitter)(value)
     finally:
         managed_logging.reset(mark)
     assert caplog.records[-1].getMessage() == "Managed execution diagnostic"
