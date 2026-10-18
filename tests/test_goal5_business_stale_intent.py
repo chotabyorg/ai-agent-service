@@ -258,6 +258,7 @@ async def test_semantic_change_refreshes_model_tools_and_requires_fresh_confirma
     next_tools = {tool["function"]["name"]
                   for tool in model.chat.completions.calls[1]["tools"]}
     assert "business_propose" in next_tools
+    assert "business_decide_proposal" not in next_tools
     assert "tool_choice" not in model.chat.completions.calls[1]
 
     fresh_plan = await stale.repository.selected_plan(stale.request, stale.grant)

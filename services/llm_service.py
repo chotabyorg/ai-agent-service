@@ -995,6 +995,9 @@ class LLMService:
                             )
                             if required_proposal_id is not None:
                                 raise ManagedExecutionError("INVALID_RESULT")
+                            openai_tools = [tool for tool in openai_tools
+                                           if tool['function']['name'] != 'business_decide_proposal']
+                            tool_registry.pop('business_decide_proposal', None)
                             tool_choice = None
                             from services.managed_preparation import SCHEMA_VALIDATED_TOOLS, PreparationSchema
                             preparation_schemas = {
