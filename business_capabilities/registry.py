@@ -35,7 +35,7 @@ CAPABILITIES = (
     Capability('customer.get_context', 'customer_get_context', 'CUSTOMERS', Risk.READ, s.CustomerContext, 'Get permitted customer context; customer-facing conversations can read safe bookings only.'),
     Capability('customer.add_note', 'customer_add_note', 'CUSTOMERS', Risk.WRITE_SAFE, s.CustomerNote, 'Record a relevant customer note.'),
     Capability('inquiry.capture', 'inquiry_capture', 'INQUIRIES', Risk.WRITE_SAFE, s.InquiryCapture, 'Record the customer interest or request.'),
-    Capability('resource.search', 'resource_search', 'BOOKINGS', Risk.READ, s.ResourceSearch, 'Find active specialists or resources.'),
+    Capability('resource.search', 'resource_search', 'BOOKINGS', Risk.READ, s.ResourceSearch, 'Find active specialists or resources by their name, not the service name. If the customer has no specialist preference, omit query to browse. Use returned refs for availability or booking preparation; do not repeat an unchanged search.'),
     Capability('booking.check_availability', 'booking_check_availability', 'BOOKINGS', Risk.READ, s.Availability, 'Check an appointment interval. Advisory only; creates no reservation.'),
     Capability('booking.search', 'booking_search', 'BOOKINGS', Risk.READ, s.BookingSearch, 'Find this customer appointments within a bounded time period.'),
     Capability('booking.get', 'booking_get', 'BOOKINGS', Risk.READ, s.BookingGet, 'Get current appointment details and revision.'),
@@ -93,6 +93,11 @@ def tool_schema(model):
             'Use a short distinctive word, not the full customer sentence. '
             'Omit or use an empty string to browse; if no matches, broaden the query.'
         )
+        if model is s.ResourceSearch:
+            result['properties']['query']['description'] += (
+                ' This is the specialist/resource name, not a service or profession. '
+                'When no specialist is requested, omit query to browse.'
+            )
     if issubclass(model, s.Availability) or model is s.BookingReschedule:
         result['properties']['start_at']['description'] = (
             'The customer-requested appointment start as an ISO 8601 instant. '

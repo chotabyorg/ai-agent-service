@@ -569,7 +569,8 @@ class LLMService:
                     agent, messages, openai_tools, selected_indices, communication, simple_selection,
                     tool_choice=tool_choice, request=managed_request,
                 )
-            tool_counts: dict[str, int] = {}
+            voice_search_counts: dict[str, int] = {}
+            retired_voice_tools: set[str] = set()
             for step_index in range(self.MAX_TOOL_STEPS):
                 set_chat_failure_stage(ChatFailureStage.LLM_REQUEST)
                 try:
@@ -812,19 +813,6 @@ class LLMService:
                         # parsing and cannot reach a later scripted completion.
                         if func_name not in tool_registry or runtime.business is None:
                             raise ManagedExecutionError("TOOL_SETUP_FAILED")
-                        used = tool_counts.get(func_name, 0)
-                        if (voice_profile is not None and func_name == "resource_search"
-                                and used >= self.VOICE_SEARCH_REPEAT_LIMIT):
-                            # A voice caller must not wait through a search loop.
-                            messages.append({
-                                "role": "tool", "tool_call_id": tool_call.id, "name": func_name,
-                                "content": json.dumps(
-                                    {"note": ("Данных достаточно: не вызывай этот инструмент снова, "
-                                              "ответь на основе уже полученного.")},
-                                    ensure_ascii=False),
-                            })
-                            continue
-                        tool_counts[func_name] = used + 1
                         func_args = parse_managed_tool_arguments(func_args_str)
                         from schemas.business import BusinessSafetyError
                         if voice_profile is not None:
@@ -855,6 +843,23 @@ class LLMService:
                             ensure_ascii=False, allow_nan=False)
                         messages.append({"role": "tool", "tool_call_id": tool_call.id,
                                          "name": func_name, "content": tool_result_text})
+                        if voice_profile is not None and func_name == "resource_search":
+                            # Count the actual search, including its cursor, not
+                            # the tool name: a broader query or next page is progress.
+                            # Validate/normalize only AFTER the ordinary guarded read.
+                            from business_capabilities.registry import normalize_arguments
+                            signature = json.dumps(normalize_arguments("resource.search", func_args),
+                                                   sort_keys=True, ensure_ascii=False)
+                            voice_search_counts[signature] = voice_search_counts.get(signature, 0) + 1
+                            if voice_search_counts[signature] >= self.VOICE_SEARCH_REPEAT_LIMIT:
+                                # Keep both real results in context, but stop advertising
+                                # this read for this turn. A noncompliant extra call fails
+                                # the ordinary hidden-tool check instead of burning 20
+                                # model round trips on an invented "enough data" response.
+                                retired_voice_tools.add(func_name)
+                                tool_registry.pop(func_name)
+                                openai_tools = [tool for tool in openai_tools
+                                                if tool["function"]["name"] not in retired_voice_tools]
                         if (func_name == "business_decide_proposal"
                                 and business_result.tool_payload.get("status") == "STALE_PROPOSAL_RETIRED"):
                             # The old proposal is now a nonconfirmable tombstone.
@@ -863,7 +868,8 @@ class LLMService:
                             refreshed_context = await runtime.operation(
                                 runtime.business.prompt_context())
                             prompt_context = RuntimeCapabilityContext.model_validate(refreshed_context)
-                            openai_tools = runtime.business.openai_tools()
+                            openai_tools = [tool for tool in runtime.business.openai_tools()
+                                            if tool["function"]["name"] not in retired_voice_tools]
                             tool_registry = {
                                 tool["function"]["name"]: None for tool in openai_tools
                             }
