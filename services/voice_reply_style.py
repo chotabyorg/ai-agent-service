@@ -28,3 +28,24 @@ PHONE.value передавай с начальным плюсом и цифра�
 результат действия и нужное уточнение; не сокращай сведения, необходимые для согласия.
 Проверки, инструменты, разрешения, подтверждения и правила платформы остаются обязательными.
 </voice_reply_style>"""
+
+
+def dialogue_state(request):
+    """Derive a presentation hint from current input, never from old silence.
+
+    A question can be heard in a partial that the caller interrupts before a
+    final assistant Message exists. Do not infer a new connection check from
+    the old silence marker in that canonical window.
+    """
+    selected = request.selected_messages
+    latest = next((message for message in reversed(selected)
+                   if message.actor == 'CUSTOMER'), None)
+    if latest is not None and latest.text == '[silence]':
+        return ('Текущий вход — сигнал тишины. Один раз проверь связь. '
+                'Не отменяй и не подтверждай запись из-за тишины.')
+    return ('Клиент сейчас ответил; это не сигнал тишины. Не спрашивай «Вы на линии?» '
+            'и не повторяй проверку связи из истории. Если ответ — «да» после проверки связи, '
+            'продолжи незавершённый запрос клиента с уже названными данными. '
+            'После технического сбоя восстанови ход записи по истории и проверь факты инструментами. '
+            'Ответ о присутствии на линии сам по себе не означает согласия на бизнес-действие: '
+            'сохраняй обязательное подтверждение подготовленного предложения.')

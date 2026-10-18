@@ -44,10 +44,15 @@ async def test_resource_search_corrects_invalid_shape_after_catalog_read(
     assert len(searches) == 1 and calls['execute'] == 0
     correction = model.chat.completions.calls[2]
     assert correction.get('tool_choice') is None
+    assert [item['function']['name'] for item in correction['tools']] == ['resource_search']
     feedback = next(m for m in correction['messages'] if m.get('tool_call_id') == 'invalid')
     payload = json.loads(feedback['content'])
     assert payload['error']['code'] == 'TOOL_ARGUMENT_VALIDATION_FAILED'
+    expected = payload['expected_parameters']
+    assert set(expected['properties']) == {'query', 'limit', 'cursor'}
+    assert expected['additionalProperties'] is False
     assert 'private-sentinel' not in feedback['content']
+    assert len(model.chat.completions.calls[-1]['tools']) > 1
     assert any(m.get('tool_call_id') == 'corrected' and json.loads(m['content'])['data']['items'][0]['name'] == 'Анна'
                for m in model.chat.completions.calls[-1]['messages'])
 

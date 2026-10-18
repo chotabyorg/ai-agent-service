@@ -77,8 +77,13 @@ class PreparationSchema:
         return {'status': 'ERROR', 'error': {
             'code': 'TOOL_ARGUMENT_VALIDATION_FAILED', 'path': '/' + '/'.join(path),
             'rule': error.validator if error.validator in SAFE_RULES else 'schema'},
+            # Code-owned schema only: never echo the malformed argument keys,
+            # values or jsonschema exception text into correction feedback.
+            'expected_parameters': self.validator.schema,
             'correction': 'No runtime action was executed. Return exactly one corrected call to the same tool, '
-                          'using its advertised schema and a new tool-call ID.'}
+                          'using expected_parameters and a new tool-call ID. Remove fields not declared '
+                          'in properties; do not nest the parameters inside an arguments object. '
+                          'Omit optional fields you do not need, including cursor on the first page.'}
 
 
 def _validated_preparation_actions(runtime, name, arguments):
