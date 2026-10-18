@@ -536,6 +536,11 @@ class BusinessRuntime:
         result = None if continuation else await self._eligibility_result(origin_turn_id)
         self.effect_eligible = continuation or bool(result and result.eligible)
         if not self.semantic_confirmation or not self.effect_eligible:
+            if candidate is None:
+                # Historical read hints cannot authorize an effect. Keep them
+                # available when there is no proposal, even if effect authority
+                # is unavailable; every eventual write retains its own gate.
+                return await self._completed_booking_prompt_context()
             return {"pending": None}
         plan = await self.repository.pending_proposal(self.request, self.grant, self.registration)
         if plan is not None:

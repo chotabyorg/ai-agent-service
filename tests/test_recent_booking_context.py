@@ -82,7 +82,8 @@ async def test_projection_excludes_foreign_stale_or_unproven_receipts(db_session
 
 
 @pytest.mark.asyncio
-async def test_new_pending_proposal_takes_precedence_over_historical_hint(db_session, crm_settings):
+@pytest.mark.parametrize('eligible', [True, False])
+async def test_new_pending_proposal_takes_precedence_over_historical_hint(db_session, crm_settings, eligible):
     original, current, registry, provider = await completed(db_session, crm_settings)
     await current.prompt_context()
     # Preparing another own action does not let the prior booking masquerade as
@@ -91,9 +92,28 @@ async def test_new_pending_proposal_takes_precedence_over_historical_hint(db_ses
     proposed = await current.call_tool('booking_create', dict(previous.operations[0].command.arguments))
     assert proposed.halt_status is None
     next_turn = await open_business_runtime(later(current.request, 'да'), current.grant, db_session, registry)
+    next_turn.effect_port.eligible = eligible
     context = await next_turn.prompt_context()
-    assert context['pending'] is not None and 'recent_booking' not in context
+    assert (context['pending'] is not None) == eligible
+    assert 'recent_booking' not in context
     assert provider['posts'] == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('unavailable', [False, True])
+async def test_historical_hint_does_not_require_or_grant_effect_authority(
+        db_session, crm_settings, unavailable):
+    _, current, _, provider = await completed(db_session, crm_settings)
+    current.effect_port.eligible = False
+    if unavailable:
+        async def fail_eligibility(request):
+            raise RuntimeError('unavailable')
+        current.effect_port.eligibility = fail_eligibility
+    context = await current.prompt_context()
+    assert context['recent_booking']['booking_ref'] == 'booking_test'
+    assert context['pending'] is None and not current.effect_eligible
+    assert provider['posts'] == 1 and not current.collector.snapshot()
+    assert await current.repository.selected_plan(current.request, current.grant) is None
 
 
 def test_hint_is_escaped_bounded_and_has_no_revision_or_authority_fields():
