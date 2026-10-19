@@ -28,6 +28,7 @@ async def completed(factory, settings):
 
 @pytest.mark.asyncio
 async def test_projection_reuses_only_validated_historical_booking_reference(db_session, crm_settings):
+    """Project current facts for the own reference without permitting an effect."""
     _, current, _, provider = await completed(db_session, crm_settings)
     context = await current.prompt_context()
     assert context['pending'] is None
@@ -38,7 +39,8 @@ async def test_projection_reuses_only_validated_historical_booking_reference(db_
     assert not current.collector.snapshot() and provider['posts'] == 1
     assert await current.repository.selected_plan(current.request, current.grant) is None
     rendered = PromptComposer.runtime_section(RuntimeCapabilityContext.model_validate(context))
-    assert 'booking_get' in rendered and 'свежую revision' in rendered
+    assert 'booking_get' in rendered and context['current_booking']['revision'] == '1'
+    assert 'для выполнения нужно отдельное согласие' in rendered
     assert 'customer_test' not in rendered and '+375' not in rendered
     async with db_session() as db:
         operations = (await db.scalars(select(BusinessOperation))).all()
