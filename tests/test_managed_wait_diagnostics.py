@@ -149,6 +149,17 @@ async def test_real_runtime_deadline_and_cancel_are_not_replaced(caplog):
     assert runtime.active_scope is None
 
 
+async def test_adapter_local_timeout_is_typed_and_does_not_extend_request(caplog):
+    runtime = ManagedRuntime(10, request=SimpleNamespace(turn_id=uuid4()))
+    deadline = runtime.deadline
+    with pytest.raises(TimeoutError):
+        with diagnostics.observe_managed_wait(runtime, 'BUSINESS_FACTS_ADAPTER', step=1):
+            with anyio.fail_after(.01):
+                await runtime.operation(asyncio.Event().wait())
+    assert [row.state for row in observations(caplog)] == ['START', 'TIMEOUT']
+    assert runtime.deadline == deadline and runtime.active_scope is None
+
+
 @pytest.mark.parametrize('changes', [
     {'turn_id': SECRET}, {'step': True}, {'step': 21}, {'attempt': 0}, {'attempt': 3},
     {'phase': SECRET}, {'state': SECRET}, {'elapsed_ms': -1}, {'elapsed_ms': True},

@@ -410,6 +410,16 @@ class BusinessRuntime:
             return await self._facts(actions, allow_disabled=allow_disabled)
         return resolve
 
+    def _business_wait(self, phase):
+        """Bounded per-phase ordinals; observe the existing task and deadline."""
+        steps = getattr(self, '_business_wait_steps', None)
+        if steps is None:
+            steps = self._business_wait_steps = {}
+        step = steps.get(phase, 0) + 1
+        steps[phase] = step
+        execution = getattr(self, 'execution', None) if step <= 20 else None
+        return observe_managed_wait(execution, phase, step=step)
+
     def openai_tools(self):
         if self.registration is None or self.binding is None:
             return []
@@ -837,7 +847,8 @@ class BusinessRuntime:
                 raise BusinessSafetyError("CAPABILITY_DISABLED")
             normalized.append(BusinessAction(capability=action.capability,
                                              arguments=capability.normalize(action.arguments)))
-        facts = await self._adapter_call("resolve_facts", self.scope, tuple(normalized))
+        with self._business_wait('BUSINESS_FACTS_ADAPTER'):
+            facts = await self._adapter_call("resolve_facts", self.scope, tuple(normalized))
         if not isinstance(facts, MaterialFacts):
             raise BusinessSafetyError("FACTS_INVALID")
         return facts
@@ -953,9 +964,10 @@ class BusinessRuntime:
                 return self._halt(any(op.status in {"SUCCEEDED", "DISPATCHING", "UNKNOWN"} for op in plan.operations))
             actions = [BusinessAction(capability=op.command.capability, arguments=op.command.arguments)
                        for op in plan.operations]
-            acquisition = await self.repository.prepare_effect_acquisition(
-                self.request, self.grant, plan.id, operation.id, self.registration,
-                self.facts_resolver(actions))
+            with self._business_wait('BUSINESS_EFFECT_ACQUIRE'):
+                acquisition = await self.repository.prepare_effect_acquisition(
+                    self.request, self.grant, plan.id, operation.id, self.registration,
+                    self.facts_resolver(actions))
             self.collector.observe_committed(acquisition.plan.references)
             plan = acquisition.plan
             candidate = next(op for op in plan.operations if op.id == identity)
@@ -972,10 +984,11 @@ class BusinessRuntime:
             permit_id = acquisition.permit_id
             if permit_id is None:
                 try:
-                    permit = await self.effect_port.permit(effect_request)
-                    if (not isinstance(permit, ExternalEffectPermitResult)
-                            or permit.request_fingerprint != sidecar_fingerprint(effect_request)):
-                        raise ValueError
+                    with self._business_wait('BUSINESS_EFFECT_PERMIT'):
+                        permit = await self.effect_port.permit(effect_request)
+                        if (not isinstance(permit, ExternalEffectPermitResult)
+                                or permit.request_fingerprint != sidecar_fingerprint(effect_request)):
+                            raise ValueError
                 except Exception as error:
                     from services.conversation_effects import DefinitiveEffectDenial
                     if isinstance(error, DefinitiveEffectDenial):
@@ -989,8 +1002,9 @@ class BusinessRuntime:
                     raise BusinessSafetyError("EFFECT_ACQUISITION_UNKNOWN",
                                               processing_status="UNKNOWN") from None
                 permit_id = permit.permit_id
-                plan = await self.repository.bind_effect_permit(
-                    self.request, self.grant, plan.id, operation.id, effect_request, permit_id)
+                with self._business_wait('BUSINESS_EFFECT_BIND'):
+                    plan = await self.repository.bind_effect_permit(
+                        self.request, self.grant, plan.id, operation.id, effect_request, permit_id)
                 self.collector.observe_committed(plan.references)
                 candidate = next(op for op in plan.operations if op.id == identity)
                 if candidate.status == "SUCCEEDED":
@@ -998,9 +1012,10 @@ class BusinessRuntime:
                 if candidate.status != "RESERVED":
                     return self._halt(any(op.status in {"SUCCEEDED", "DISPATCHING", "UNKNOWN"}
                                           for op in plan.operations))
-            decision = await self.repository.claim_dispatch(self.request, self.grant, plan.id, operation.id,
-                                                            self.registration, self.facts_resolver(actions),
-                                                            effect_request=effect_request)
+            with self._business_wait('BUSINESS_DISPATCH_CLAIM'):
+                decision = await self.repository.claim_dispatch(self.request, self.grant, plan.id, operation.id,
+                                                                self.registration, self.facts_resolver(actions),
+                                                                effect_request=effect_request)
             self.collector.observe_committed(decision.plan.references)
             plan = decision.plan
             candidate = next(op for op in plan.operations if op.id == identity)
@@ -1028,7 +1043,8 @@ class BusinessRuntime:
         if self.execution is not None:
             self.execution.tool_dispatch_attempted = True
         try:
-            receipt = await self._adapter_call("execute", token.dispatch)
+            with self._business_wait('BUSINESS_PROVIDER_EXECUTE'):
+                receipt = await self._adapter_call("execute", token.dispatch)
             if isinstance(receipt, AttemptRejected):
                 if receipt.binding != token.command.receipt_binding() or receipt.attempt != token.dispatch.attempt:
                     raise BusinessSafetyError("RECEIPT_CONFLICT", processing_status="UNKNOWN")
@@ -1039,7 +1055,8 @@ class BusinessRuntime:
                 return plan
             if not isinstance(receipt, (SucceededReceipt, DefinitiveNoEffect)):
                 raise BusinessSafetyError("PROVIDER_UNKNOWN", processing_status="UNKNOWN")
-            plan = await self.repository.finalize(self.request, self.grant, token, receipt)
+            with self._business_wait('BUSINESS_RECEIPT_FINALIZE'):
+                plan = await self.repository.finalize(self.request, self.grant, token, receipt)
             self.collector.observe_committed(plan.references)
             return plan
         except BaseException as error:
@@ -1069,8 +1086,9 @@ class BusinessRuntime:
             raise BusinessSafetyError("PLAN_DENIED")
         await self._ensure_effect_eligibility(plan.origin_turn_id)
         actions = [BusinessAction(capability=op.command.capability, arguments=op.command.arguments) for op in plan.operations]
-        plan = await self.repository.confirm_plan(self.request, self.grant, plan.id, self.registration,
-                                                   self.facts_resolver(actions), semantic=semantic)
+        with self._business_wait('BUSINESS_CONFIRM_REPOSITORY'):
+            plan = await self.repository.confirm_plan(self.request, self.grant, plan.id, self.registration,
+                                                       self.facts_resolver(actions), semantic=semantic)
         self.collector.observe_committed(plan.references)
         result = await self._execute_frozen(plan)
         if (not semantic or self.registration.adapter_id != "chotacrm"
