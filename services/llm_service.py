@@ -592,6 +592,7 @@ class LLMService:
                 raise ManagedExecutionError("INVALID_RESULT")
             tool_choice = ({"type": "function", "function": {"name": "business_decide_proposal"}}
                            if required_proposal_id is not None else None)
+            pending_format_message = None
             if required_proposal_id is not None and managed_request.channel == 'VOICE':
                 # Some Voice providers fail even buffered named tool_choice.
                 # Offer only the required semantic tool. The strict decision
@@ -839,7 +840,7 @@ class LLMService:
                         # only this tool. Discard their prose; request its format
                         # once more, without interpreting it as caller consent.
                         # The next loop rechecks deadline and execution authority.
-                        messages.append({'role': 'system', 'content': (
+                        pending_format_message = {'role': 'system', 'content': (
                             'A pending proposal still requires a semantic decision. '
                             'Return exactly one business_decide_proposal call, using '
                             'the current pending proposal_id and the actual selected '
@@ -848,7 +849,8 @@ class LLMService:
                             'a different question or unclear acceptance. Follow the '
                             'advertised intent schema. Prior assistant prose is not '
                             'customer consent or proof of any completed action. '
-                            'Do not return ordinary prose or claim success.')})
+                            'Do not return ordinary prose or claim success.')}
+                        messages.append(pending_format_message)
                         self._check_managed_envelope(agent, messages, openai_tools,
                                                      tool_choice=tool_choice, request=managed_request)
                         continue
@@ -1005,6 +1007,11 @@ class LLMService:
                         required_proposal_id = None
                         preparation_correction = None
                         tool_choice = None
+                        if pending_format_message is not None:
+                            # The runtime processed the reply. Remove only our
+                            # repair hint before continuing without this tool.
+                            messages = [m for m in messages if m is not pending_format_message]
+                            pending_format_message = None
                         if business_result.safe_draft is not None:
                             # Proposals are bounded frozen public fields. Model
                             # prose is never permission or a completion receipt.
