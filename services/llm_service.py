@@ -696,7 +696,10 @@ class LLMService:
                             # publish unvalidated prose before runtime admission.
                             on_text=(tracked_partial if partial_hook is not None
                                      and reuse_expectation is None
-                                     and required_proposal_id is None else None),
+                                     and required_proposal_id is None
+                                     and not (runtime and runtime.business is not None
+                                         and getattr(runtime.business, 'buffer_cancellation_continuation', False) is True)
+                                     else None),
                             timing=completion_timing,
                         )
                         try:
@@ -849,6 +852,8 @@ class LLMService:
                             'a different question or unclear acceptance. Follow the '
                             'advertised intent schema. Prior assistant prose is not '
                             'customer consent or proof of any completed action. '
+                            'Accepting a proposed booking cancellation is CONFIRM; '
+                            'REJECT refuses that proposal and does not cancel the booking. '
                             'Do not return ordinary prose or claim success.')}
                         messages.append(pending_format_message)
                         self._check_managed_envelope(agent, messages, openai_tools,

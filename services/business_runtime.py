@@ -81,6 +81,7 @@ class BusinessRuntime:
         self._business_diagnostic_observations = 0
         self.business_scope_seen = self.scope is not None
         self._proposal_decision = None
+        self._retired_cancel_intent = None
         self.effect_eligible = False
         self.effect_origin_turn_id = None
         self._prompt_context_prepared = False
@@ -241,6 +242,11 @@ class BusinessRuntime:
 
     final_result_guard = guard_result
 
+    @property
+    def buffer_cancellation_continuation(self):
+        """A retired cancellation proposal is not a booking-effect receipt."""
+        return getattr(self, '_retired_cancel_intent', None) == 'CHANGE'
+
     def _original_acquisition(self, gate):
         if (gate.selection_kind not in {"OWN", "CONFIRM"} or gate.plan is None
                 or gate.request_conflict):
@@ -256,6 +262,12 @@ class BusinessRuntime:
         if gate.disposition == "NO_PLAN" and self.collector.snapshot():
             return self._halt(True)
         if gate.disposition in {"NO_PLAN", "ALL_SUCCEEDED"}:
+            if final_answer and self.buffer_cancellation_continuation:
+                # CHANGE may still prepare a replacement through ordinary tools.
+                # If it finishes with prose instead, do not let that prose claim
+                # that retiring the old proposal cancelled the CRM appointment.
+                return BusinessToolResult(safe_draft='Отмену записи не выполняю. '
+                    'Уточните, пожалуйста, что вы хотите изменить.')
             return None
         if gate.disposition == "AWAITING_CONFIRMATION":
             try:
@@ -756,8 +768,19 @@ class BusinessRuntime:
                         raise BusinessSafetyError("PLAN_DENIED")
                     await self._ensure_effect_eligibility(pending.origin_turn_id)
                     await self.repository.cancel_proposal(self.request, self.grant, proposal_id, self.registration)
-                    return BusinessToolResult(tool_payload={"status": "CANCELLED", "intent": arguments["intent"],
-                                                            "new_confirmation_required": arguments["intent"] == "CHANGE"})
+                    payload = {"status": "CANCELLED", "intent": arguments["intent"],
+                               "new_confirmation_required": arguments["intent"] == "CHANGE"}
+                    if (self.registration.adapter_id == 'chotacrm' and len(pending.operations) == 1
+                            and pending.operations[0].command.capability == 'booking.cancel'):
+                        self._retired_cancel_intent = arguments['intent']
+                        payload.update(cancelled_object='PROPOSAL_ONLY', booking_effect='NOT_EXECUTED')
+                        gate = await self.execution_guard(allow_incomplete=True)
+                        if gate is not None:
+                            return gate
+                        if arguments['intent'] == 'REJECT':
+                            return BusinessToolResult(tool_payload=payload,
+                                safe_draft='Отмену записи не выполняю.')
+                    return BusinessToolResult(tool_payload=payload)
                 # Unrelated text grants no effect or selected operation refs.
                 pending = await self.repository.pending_proposal(self.request, self.grant, self.registration)
                 if pending is None or pending.id != proposal_id:

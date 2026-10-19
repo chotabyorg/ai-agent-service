@@ -23,6 +23,8 @@ REPAIR_TEXT = (
     'a different question or unclear acceptance. Follow the '
     'advertised intent schema. Prior assistant prose is not '
     'customer consent or proof of any completed action. '
+    'Accepting a proposed booking cancellation is CONFIRM; '
+    'REJECT refuses that proposal and does not cancel the booking. '
     'Do not return ordinary prose or claim success.'
 )
 
