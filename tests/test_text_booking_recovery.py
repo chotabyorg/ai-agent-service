@@ -42,9 +42,10 @@ async def test_text_retries_only_failed_model_request_without_replaying_read(
 @pytest.mark.integration
 @pytest.mark.parametrize('channel,status,expected_calls', [
     ('WEBSITE_WIDGET', 400, 1), ('WEBSITE_WIDGET', 401, 1),
-    ('WEBSITE_WIDGET', 429, 1), ('VOICE', 502, 1), ('WEBSITE_WIDGET', 502, 2)])
-async def test_model_retry_is_once_and_not_for_voice_or_client_errors(
+    ('WEBSITE_WIDGET', 429, 2), ('VOICE', 502, 2), ('WEBSITE_WIDGET', 502, 2)])
+async def test_model_retry_is_once_and_not_for_permanent_client_errors(
         api_client, db_session, monkeypatch, channel, status, expected_calls):
+    """Bound transient recovery globally while preserving permanent refusals."""
     value, _, _, calls, _, model = await install_managed_crm(
         api_client, db_session, monkeypatch, 200, {}, channel=channel)
     model.chat.completions.queue(failure(status), failure(status), build_llm_response(content='never used'))
