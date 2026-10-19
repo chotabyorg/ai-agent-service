@@ -27,6 +27,15 @@ recomputes both values; the canonical bytes and retained-catalog acceptance
 policy stay the same. Live bindings, configuration generations, provider facts,
 permissions, permits and receipts are still checked on every existing path.
 
+Managed wait diagnostics separately observe binding synchronization, context
+opening, attempt recovery and startup ledger selection. Each ordinary guarded
+READ observes its pre-guard, authority transaction, adapter call and post-guard.
+Only closed phase names, turn ID, bounded ordinal, state and elapsed/remaining
+milliseconds are emitted. Observations keep the existing order and cancellation
+scope; they do not add retries, extend deadlines or reuse provider facts. READ
+ordinals stop emitting after twenty calls in one runtime. Adapter time includes
+its own transport/protocol work, so it is not a pure network-duration measure.
+
 ## Capabilities and product policy
 
 The eighteen canonical actions use provider-neutral underscore tool names (for

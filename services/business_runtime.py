@@ -64,12 +64,15 @@ class BusinessRuntime:
         self.effect_port = effect_port
         self.collector = collector if collector is not None else CommittedReferenceCollector()
         from business_capabilities.connections import sync_business_binding
-        await sync_business_binding(request, grant, session_factory, registry)
-        context = await self.repository.open_context(request, grant, registry)
+        with observe_managed_wait(execution, 'BUSINESS_BINDING_SYNC', step=1):
+            await sync_business_binding(request, grant, session_factory, registry)
+        with observe_managed_wait(execution, 'BUSINESS_OPEN_CONTEXT', step=1):
+            context = await self.repository.open_context(request, grant, registry)
         self.scope, self.binding, self.registration = context if context else (None, None, None)
         # Explicit same-scope normalization, never a new provider command.
         if self.scope is not None:
-            await self.repository.recover_attempts(request, grant)
+            with observe_managed_wait(execution, 'BUSINESS_RECOVER_ATTEMPTS', step=1):
+                await self.repository.recover_attempts(request, grant)
         self.last_gate = None
         self._booking_workflow_started = False
         self._business_diagnostics_used = False
@@ -89,15 +92,20 @@ class BusinessRuntime:
         self._stale_split_change_request_fingerprint = None
         self.recovery_mode = False
         self.recovery_plan_id = None
-        await self.collect_refs()
+        with observe_managed_wait(execution, 'BUSINESS_COLLECT_REFS', step=1):
+            await self.collect_refs()
         if self.scope is not None:
-            await self.repository.invalidate_stale_proposal(request, grant)
-            recovery = await self.repository.select_unresolved_recovery(request, grant)
+            with observe_managed_wait(execution, 'BUSINESS_INVALIDATE_PROPOSAL', step=1):
+                await self.repository.invalidate_stale_proposal(request, grant)
+            with observe_managed_wait(execution, 'BUSINESS_SELECT_RECOVERY', step=1):
+                recovery = await self.repository.select_unresolved_recovery(request, grant)
             if recovery is not None and recovery.selection_kind == "RECOVERY":
                 self.recovery_mode = True
                 self.recovery_plan_id = recovery.id
-                await self.repository.close_recovery_acquisition(request, grant)
-                await self.collect_refs()
+                with observe_managed_wait(execution, 'BUSINESS_CLOSE_RECOVERY', step=1):
+                    await self.repository.close_recovery_acquisition(request, grant)
+                with observe_managed_wait(execution, 'BUSINESS_COLLECT_REFS', step=2):
+                    await self.collect_refs()
         return self
 
     def observe_business_diagnostic(self, *, stage, capability, refusal_category="NONE",
