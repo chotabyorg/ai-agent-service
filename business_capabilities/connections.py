@@ -18,6 +18,7 @@ async def validate_connection_authority(session, binding):
 
 
 async def lock_agent_connection(session, agent_id, *, shared=False):
+    """Lock active/pending connection config, sharing only for explicit readers."""
     return await session.scalar(select(BusinessConnection).where(
         BusinessConnection.agent_id == agent_id,
         or_(BusinessConnection.active.is_(True), BusinessConnection.pending_action.is_not(None)))

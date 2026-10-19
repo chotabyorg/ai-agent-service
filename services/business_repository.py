@@ -239,6 +239,7 @@ class BusinessRepository:
             **values, conversation_id=value.conversation_id))
 
     async def _authority(self, session, value, grant, *, create_scope=False, shared_config_locks=False):
+        """Reload complete-scope authority while excluding config writers."""
         # Only read authorization opts into compatible config-reader locks.
         # Scope creation and all existing write/admission callers stay exclusive.
         if shared_config_locks and create_scope:

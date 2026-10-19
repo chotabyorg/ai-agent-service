@@ -53,6 +53,7 @@ async def test_long_config_lock_fails_closed_before_provider_read(db_session, cr
     original = runtime.registration.adapter.read
 
     async def observe(*args, **kwargs):
+        """Record reads to prove a held writer prevents provider I/O."""
         """Record attempted CRM reads without changing their behavior."""
         reads.append(True)
         return await original(*args, **kwargs)
@@ -108,6 +109,7 @@ async def test_config_reader_locks_are_released_before_provider_io(db_session, c
     reads = []
 
     async def observe(*args, **kwargs):
+        """Acquire writer locks at the provider boundary after guards close."""
         async with db_session() as writer:
             async with writer.begin():
                 for entity in (AgentTemplate, BusinessConnection, BusinessBinding):
