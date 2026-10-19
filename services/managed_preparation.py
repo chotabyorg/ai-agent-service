@@ -2,6 +2,7 @@
 import hashlib
 import json
 from collections import OrderedDict
+import unicodedata
 
 from jsonschema import Draft202012Validator, FormatChecker
 
@@ -20,6 +21,12 @@ SAFE_RULES = frozenset({'type', 'required', 'additionalProperties', 'oneOf', 'an
     'uniqueItems', 'minimum', 'maximum', 'exclusiveMinimum', 'exclusiveMaximum', 'multipleOf'})
 _PREPARATION_SCHEMA_CACHE: OrderedDict[str, "PreparationSchema"] = OrderedDict()
 _PREPARATION_SCHEMA_CACHE_LIMIT = 64
+
+
+def _customer_name_key(value):
+    # Russian ё/е spellings compare equally without rewriting stored names,
+    # customer identity arguments, references or confirmation material.
+    return unicodedata.normalize('NFC', value).casefold().replace('ё', 'е')
 
 
 class PreparationSchema:
@@ -360,7 +367,7 @@ async def prepare_booking_customer_reuse(runtime, name, arguments):
         _observe_preparation(runtime, name=name, lookup_result='SINGLE',
                              refusal='IDENTITY_CONFLICT', lookup_mode=lookup_mode)
         return BusinessToolResult(safe_draft='Этот контакт связан с архивной записью. Уточните, пожалуйста, другой контакт.')
-    if candidate.display_name.casefold() != customer['display_name'].casefold():
+    if _customer_name_key(candidate.display_name) != _customer_name_key(customer['display_name']):
         _observe_preparation(runtime, name=name, lookup_result='SINGLE',
                              refusal='IDENTITY_CONFLICT', lookup_mode=lookup_mode)
         return BusinessToolResult(safe_draft=_safe_lookup_draft('IDENTITY_CONFLICT'))

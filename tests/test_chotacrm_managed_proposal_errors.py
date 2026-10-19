@@ -51,15 +51,20 @@ def preparation_arguments(tool_name, booking_arguments):
 
 @pytest.mark.integration
 @pytest.mark.parametrize("tool_name", ["booking_create", "business_propose"])
-@pytest.mark.parametrize("candidate_name", ["Влад", "вЛаД"])
+@pytest.mark.parametrize("customer_name,candidate_name", [
+    ("Влад", "Влад"), ("Влад", "вЛаД"),
+    ("Артем", "Артём"), ("Артём", "Артем"),
+    ("Артем", "АРТЁМ"), ("Артём", "Арте\u0308м"),
+])
 async def test_existing_customer_requires_explicit_reference_then_confirms_once(
-    api_client, db_session, monkeypatch, tool_name, candidate_name,
+    api_client, db_session, monkeypatch, tool_name, customer_name, candidate_name,
 ):
     value, arguments, registry, calls, effect_port, _ = await install_managed_crm(
         api_client, db_session, monkeypatch, 200, {},
         lookup_response=existing_customer_lookup(name=candidate_name),
         allow_execute=True,
     )
+    arguments["customer"]["display_name"] = customer_name
     request = ManagedTurnRequest.model_validate(value)
     grant = next(grant for grant in get_settings().managed_principals[0].grants
                  if grant.scope() == (value["owner_id"], UUID(value["integration_id"]),
@@ -113,16 +118,22 @@ async def test_existing_customer_requires_explicit_reference_then_confirms_once(
 
 @pytest.mark.integration
 @pytest.mark.parametrize("tool_name", ["booking_create", "business_propose"])
-@pytest.mark.parametrize("lookup", [
-    existing_customer_lookup(name="Different Customer"),
-    {"status": "AMBIGUOUS", "data": {"match": "AMBIGUOUS", "candidates": []}},
+@pytest.mark.parametrize("customer_name,lookup", [
+    ("Влад", existing_customer_lookup(name="Different Customer")),
+    ("Артем", existing_customer_lookup(name="Антон")),
+    ("Артем", existing_customer_lookup(name="Артём Иванов")),
+    ("Артем", existing_customer_lookup(name="Aртем")),
+    ("Артем", existing_customer_lookup(name="Артём", archived=True)),
+    ("Jose", existing_customer_lookup(name="José")),
+    ("Влад", {"status": "AMBIGUOUS", "data": {"match": "AMBIGUOUS", "candidates": []}}),
 ])
 async def test_conflicting_or_ambiguous_customer_returns_private_safe_clarification(
-    api_client, db_session, monkeypatch, tool_name, lookup,
+    api_client, db_session, monkeypatch, tool_name, customer_name, lookup,
 ):
     value, arguments, registry, calls, effect_port, _model = await install_managed_crm(
         api_client, db_session, monkeypatch, 200, {}, lookup_response=lookup,
     )
+    arguments["customer"]["display_name"] = customer_name
     request = ManagedTurnRequest.model_validate(value)
     grant = next(grant for grant in get_settings().managed_principals[0].grants
                  if grant.scope() == (value["owner_id"], UUID(value["integration_id"]),
