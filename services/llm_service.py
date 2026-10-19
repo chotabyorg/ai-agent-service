@@ -14,7 +14,6 @@ import httpx
 from openai import (
     APIConnectionError,
     APIError,
-    APIStatusError,
     APITimeoutError,
     AsyncOpenAI,
     AuthenticationError,
@@ -610,6 +609,14 @@ class LLMService:
             voice_search_counts: dict[str, int] = {}
             retired_voice_tools: set[str] = set()
             model_retry_used = False
+            partial_attempted = False
+
+            async def tracked_partial(text):
+                """A possibly published partial prevents every later model retry."""
+                nonlocal partial_attempted
+                partial_attempted = True
+                await partial_hook(text)
+
             for step_index in range(self.MAX_TOOL_STEPS):
                 set_chat_failure_stage(ChatFailureStage.LLM_REQUEST)
                 try:
@@ -673,7 +680,8 @@ class LLMService:
                         pending_response = complete_with_partials(
                             llm_client.chat.completions.create, completion_kwargs,
                             # Required continuations cannot publish unvalidated prose.
-                            on_text=None if reuse_expectation is not None else partial_hook,
+                            on_text=(tracked_partial if partial_hook is not None
+                                     and reuse_expectation is None else None),
                             timing=completion_timing,
                         )
                         try:
@@ -684,15 +692,18 @@ class LLMService:
                             if runtime:
                                 observe_model_failure(exc, request=managed_request,
                                     step=step_index + 1, timing=completion_timing)
-                            # One retry of this MODEL request per buffered text
-                            # turn. No tool replay, model switch, deadline reset
-                            # or retry after partial speech; 4xx remains closed.
-                            if (not runtime or managed_request.channel == 'VOICE'
-                                    or partial_hook is not None or model_retry_used
-                                    or not isinstance(exc, APIStatusError)
-                                    or exc.status_code not in {500, 502, 503, 504}):
+                            # One MODEL retry per turn, only before any partial
+                            # callback. Tools, request facts, model and deadline
+                            # remain unchanged; unknown/client failures stay closed.
+                            if not runtime or partial_attempted or model_retry_used:
+                                raise
+                            from services.model_retry import model_retry_delay
+                            delay = model_retry_delay(exc)
+                            if delay is None:
                                 raise
                             model_retry_used = True
+                            runtime.check()
+                            await runtime.operation(asyncio.sleep(delay))
                             runtime.check()
                             if runtime.business is not None:
                                 gate = await runtime.operation(

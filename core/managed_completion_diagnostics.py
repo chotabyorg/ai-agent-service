@@ -29,6 +29,7 @@ class CompletionDiagnostic:
     model_ms: int | None = None
     first_delta_ms: int | None = None
     http_status: int | None = None
+    failure_category: str | None = None
 
 
 def emit_completion_diagnostic(diagnostic: CompletionDiagnostic) -> None:
@@ -73,6 +74,11 @@ def _trusted_completion_record(record):
             if type(value.http_status) is not int or not 100 <= value.http_status <= 599:
                 return None
             fields['http_status'] = value.http_status
+        if value.failure_category is not None:
+            from services.model_retry import FAILURE_CATEGORIES
+            if type(value.failure_category) is not str or value.failure_category not in FAILURE_CATEGORIES:
+                return None
+            fields['failure_category'] = value.failure_category
     except Exception:
         return None
     template = "managed_completion_observed " + " ".join(name + "=%s" for name in fields)

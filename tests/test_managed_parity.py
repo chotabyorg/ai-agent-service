@@ -64,6 +64,7 @@ async def test_shared_kb_prompt_model_and_tool_continuation_golden_parity(api_cl
     ("funds","MODEL_INSUFFICIENT_FUNDS",True),("rate","MODEL_RATE_LIMITED",False),
     ("timeout","MODEL_TIMEOUT",False),("connection","MODEL_UNAVAILABLE",False),("api","MODEL_ERROR",False)])
 async def test_model_error_codes_and_existing_key_deactivation(api_client,db_session,monkeypatch,model,kind,code,deactivated,caplog):
+    """Keep final error codes and deactivation unchanged after bounded recovery."""
     agent,value=await setup(api_client,db_session,monkeypatch)
     request=httpx.Request("POST","http://synthetic")
     errors=dict(auth=AuthenticationError(SENTINEL,response=httpx.Response(401,request=request),body={}),
@@ -72,6 +73,8 @@ async def test_model_error_codes_and_existing_key_deactivation(api_client,db_ses
         timeout=APITimeoutError(request=request),connection=APIConnectionError(message=SENTINEL,request=request),
         api=APIError(SENTINEL,request=request,body={}))
     model.chat.completions.queue(errors[kind])
+    if kind in {'rate','connection'}:
+        model.chat.completions.queue(errors[kind])
     result=await execute(api_client,value)
     assert result.json()["status"]=="FAILED" and result.json()["error_code"]==code
     assert model.closed and SENTINEL not in result.text+caplog.text

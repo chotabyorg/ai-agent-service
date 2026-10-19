@@ -97,12 +97,12 @@ def observe_model_failure(error, *, request, step, timing):
         from openai import APIError
         if type(request) is not ManagedTurnRequest or not isinstance(error, APIError):
             return
-        status = vars(error).get('status_code')
-        if type(status) is not int or not 100 <= status <= 599:
-            status = None
+        from services.model_retry import classify_model_failure
+        failure = classify_model_failure(error)
         timing.complete()
         emit_completion_diagnostic(CompletionDiagnostic(turn_id=request.turn_id, step=step,
             branch='MODEL_FAILURE', finish='MISSING', visible_content='NOT_INSPECTED',
-            model_ms=timing.model_ms, http_status=status))
+            model_ms=timing.model_ms, http_status=failure.http_status,
+            failure_category=failure.category))
     except Exception:
         pass
