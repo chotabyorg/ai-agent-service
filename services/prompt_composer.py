@@ -52,6 +52,7 @@ class RuntimeCapabilityContext(BaseModel):
 
     @model_validator(mode='after')
     def same_historical_reference(self):
+        """Reject fresh facts detached from their scoped historical reference."""
         if self.current_booking is not None and (
                 self.pending is not None or self.recent_booking is None
                 or self.current_booking.booking_ref != self.recent_booking.booking_ref):

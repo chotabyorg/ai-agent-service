@@ -17,11 +17,13 @@ from tests.test_recent_booking_context import completed
 @pytest.mark.parametrize('status', ['CONFIRMED', 'CANCELLED', 'COMPLETED'])
 async def test_fresh_revision_and_status_replace_historical_state_without_effect(
         db_session, crm_settings, status):
+    """Use current provider facts while retaining later-consent admission."""
     _, current, _, provider = await completed(db_session, crm_settings)
     adapter=current.registration.adapter
     original=adapter.client.transport
 
     async def updated(request):
+        """Simulate a newer CRM revision and verify provider I/O owns no DB lock."""
         response=await original.handle_async_request(request)
         if request.url.path.endswith('/execute/booking.get'):
             # Current facts intentionally differ from the create receipt. No
@@ -70,10 +72,12 @@ async def test_fresh_revision_and_status_replace_historical_state_without_effect
 @pytest.mark.parametrize('problem', ['wrong_ref','malformed','unavailable'])
 async def test_unproven_read_falls_back_to_historical_lookup_hint(
         db_session, crm_settings, problem):
+    """Keep only the historical hint when current facts cannot be proved."""
     _,current,_,provider=await completed(db_session,crm_settings)
     original=current.registration.adapter.client.transport
 
     async def changed(request):
+        """Supply a mismatched, malformed or unavailable read response."""
         response=await original.handle_async_request(request)
         if request.url.path.endswith('/execute/booking.get'):
             value=json.loads(response.content)
@@ -95,10 +99,12 @@ async def test_unproven_read_falls_back_to_historical_lookup_hint(
 @pytest.mark.parametrize('parent_cancel', [False,True])
 async def test_optional_read_is_bounded_but_parent_cancellation_propagates(
         db_session, crm_settings, monkeypatch, parent_cancel):
+    """Distinguish the optional read's timeout from cancellation of the turn."""
     _,current,_,provider=await completed(db_session,crm_settings)
     entered=asyncio.Event()
 
     async def stalled(method,*args):
+        """Block a READ without issuing a provider effect."""
         assert method=='read'
         entered.set()
         await asyncio.Event().wait()
@@ -116,6 +122,7 @@ async def test_optional_read_is_bounded_but_parent_cancellation_propagates(
 
 
 def test_current_projection_cannot_cross_reference_or_include_authority():
+    """Reject foreign references and private or authority-bearing fields."""
     fresh=dict(booking_ref='booking_test',revision='fresh-7',status='CONFIRMED',
                start_at='2026-10-20T08:00:00Z',end_at='2026-10-20T08:30:00Z',timezone='Europe/Minsk')
     historical=dict(booking_ref='booking_test',historical_summary='historical')
