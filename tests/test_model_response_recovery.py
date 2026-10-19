@@ -19,7 +19,7 @@ from tests.test_managed_turns import model  # noqa: F401
 
 
 @pytest.mark.parametrize('code,category,retryable', [
-    (429,'RATE_LIMITED',True),(503,'SERVER_ERROR',True),
+    (429,'RATE_LIMITED',True),(503,'SERVER_ERROR',True),(529,'SERVER_ERROR',True),
     ('server_error','SERVER_ERROR',True),('rate_limit_exceeded','RATE_LIMITED',True),
     (400,'CLIENT_ERROR',False),(401,'CLIENT_ERROR',False),(402,'CLIENT_ERROR',False),
     ('private-provider-sentinel','UNKNOWN',False),(None,'UNKNOWN',False)])
@@ -85,7 +85,7 @@ def test_in_flight_budget_is_temporary_and_requires_bounded_retry_after(header,a
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('stream_code',[429,'server_error',None])
+@pytest.mark.parametrize('stream_code',[429,529,'server_error',None])
 async def test_managed_recovers_before_any_partial_without_replaying_a_read(
         db_session,crm_settings,monkeypatch,stream_code):
     """Retry only the failed completion after a successful guarded READ."""
@@ -96,6 +96,25 @@ async def test_managed_recovers_before_any_partial_without_replaying_a_read(
     model.chat.completions.queue(preparation('catalog_search',{},'read'),error,
                                  build_llm_response(content='Какое время вам удобно?'))
     before=runtime.deadline
+    assert await run_core(db_session,runtime,model)=='Какое время вам удобно?'
+    assert provider['posts']==0 and len(model.chat.completions.calls)==3
+    assert model.chat.completions.calls[1]==model.chat.completions.calls[2]
+    assert runtime.deadline==before
+    assert await business.repository.selected_plan(business.request,business.grant) is None
+
+
+@pytest.mark.asyncio
+async def test_provider_overload_http_recovers_without_replaying_a_read(
+        db_session,crm_settings,monkeypatch):
+    """A provider HTTP 529 can use the same bounded pre-speech recovery."""
+    business,runtime,provider,_=await local_runtime(db_session,crm_settings,monkeypatch)
+    model=ScriptedLLMClient()
+    error=APIStatusError('private-provider-sentinel',response=httpx.Response(529,
+        request=httpx.Request('POST','https://synthetic.invalid')),body={'code':529})
+    model.chat.completions.queue(preparation('catalog_search',{},'read'),error,
+                                 build_llm_response(content='Какое время вам удобно?'))
+    before=runtime.deadline
+    assert classify_model_failure(error).http_status==529
     assert await run_core(db_session,runtime,model)=='Какое время вам удобно?'
     assert provider['posts']==0 and len(model.chat.completions.calls)==3
     assert model.chat.completions.calls[1]==model.chat.completions.calls[2]

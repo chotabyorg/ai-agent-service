@@ -59,7 +59,7 @@ def classify_model_failure(error: APIError) -> ModelFailure:
     if type(code) is int:
         if code == 429:
             return ModelFailure('RATE_LIMITED', status)
-        if code in {500, 502, 503, 504}:
+        if code in {500, 502, 503, 504, 529}:
             return ModelFailure('SERVER_ERROR', status)
         if 400 <= code <= 499:
             return ModelFailure('CLIENT_ERROR', status)

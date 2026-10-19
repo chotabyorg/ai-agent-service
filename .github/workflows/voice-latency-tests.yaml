@@ -60,12 +60,16 @@ jobs:
                    'Source: ' + os.environ['GITHUB_SHA'],
                    'Exit code: ' + str(code), '']
           if report.exists():
-              cases = list(ElementTree.parse(report).iter('testcase'))
-              failed = [case for case in cases if case.find('failure') is not None
-                        or case.find('error') is not None]
-              lines.append('Cases: ' + str(len(cases)) + '; failed/error: ' + str(len(failed)))
-              lines.extend('- `' + (case.get('classname', '') + '::' + case.get('name', '')).replace('`', '')[:500]
-                           + '`' for case in failed[:100])
+              try:
+                  cases = list(ElementTree.parse(report).iter('testcase'))
+              except (ElementTree.ParseError, OSError):
+                  lines.append('JUnit report unavailable or malformed; pytest exit code preserved.')
+              else:
+                  failed = [case for case in cases if case.find('failure') is not None
+                            or case.find('error') is not None]
+                  lines.append('Cases: ' + str(len(cases)) + '; failed/error: ' + str(len(failed)))
+                  lines.extend('- `' + (case.get('classname', '') + '::' + case.get('name', '')).replace('`', '')[:500]
+                               + '`' for case in failed[:100])
           else:
               lines.append('No JUnit report: collection or runner failure requires the authenticated log.')
           with open(os.environ['GITHUB_STEP_SUMMARY'], 'a', encoding='utf-8') as summary:
