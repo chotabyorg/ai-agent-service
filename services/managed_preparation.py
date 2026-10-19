@@ -213,6 +213,32 @@ async def _preflight_feedback_guard(runtime):
     return None
 
 
+def _missing_spoken_booking_contact(runtime, name, arguments):
+    """Recognize an incomplete inline Voice contact without repairing arguments."""
+    if not isinstance(arguments, dict):
+        return False
+    booking = arguments if name == 'booking_create' else None
+    if (name == 'business_propose' and set(arguments) == {'actions'}
+            and isinstance(arguments['actions'], list) and len(arguments['actions']) == 1):
+        action = arguments['actions'][0]
+        if isinstance(action, dict) and set(action) == {'capability', 'arguments'} and action['capability'] == 'booking.create':
+            booking = action['arguments']
+    if not isinstance(booking, dict) or booking.get('customer_ref') is not None:
+        return False
+    customer = booking.get('customer')
+    identity = customer.get('identity') if isinstance(customer, dict) else None
+    # Email and verified-reference flows retain their ordinary validation. A
+    # missing phone never authorizes a lookup using an invented model contact.
+    if not isinstance(identity, dict) or identity.get('kind') == 'EMAIL':
+        return False
+    if (runtime.binding is None or 'booking.create' not in runtime.binding.enabled_capabilities
+            or runtime.registration.capability('booking.create') is None):
+        return False
+    from services.voice_contact import voice_phone_facts
+    caller = getattr(getattr(runtime, 'execution', None), 'caller_phone', '')
+    return voice_phone_facts(getattr(runtime, 'request', None), caller) == ()
+
+
 async def prepare_booking_customer_reuse(runtime, name, arguments):
     """Resolve supplied booking identity through the guarded customer.find read.
 
@@ -221,6 +247,17 @@ async def prepare_booking_customer_reuse(runtime, name, arguments):
     """
     if name not in PREPARATION_TOOLS:
         return None
+    if _missing_spoken_booking_contact(runtime, name, arguments):
+        # STT can deliver the appointment/name before the following phone
+        # fragment. Ask for the absent fact before normalizing a model's
+        # placeholder contact/name; no normalized action, lookup or plan exists.
+        gate = await _preflight_feedback_guard(runtime)
+        _observe_preparation(runtime, name=name, refusal='AUTHORITY_BLOCKED' if gate is not None
+                             else 'VALIDATION_ERROR', lookup_mode='IDENTITY_ONLY')
+        if gate is not None:
+            return gate
+        runtime._booking_workflow_started = True
+        return BusinessToolResult(safe_draft='Подскажите, пожалуйста, контактный номер для записи.')
     try:
         actions = _validated_preparation_actions(runtime, name, arguments)
     except BusinessSafetyError as error:
