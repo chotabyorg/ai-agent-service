@@ -59,11 +59,15 @@ class ManagedRuntime:
                 awaitable.close()
             raise
         with anyio.CancelScope(deadline=self.deadline) as scope:
+            previous_scope = self.active_scope
             self.active_scope = scope
             try:
                 result = await awaitable
             finally:
-                self.active_scope = None
+                # Adapter READs can nest inside prompt/tool operations in this
+                # same owner task. Restore their parent so later HTTP
+                # cancellation still reaches the operation that is awaiting.
+                self.active_scope = previous_scope
         self.check()
         if scope.cancel_called:
             raise ManagedExecutionError("EXECUTION_TIMEOUT")
