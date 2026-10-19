@@ -61,6 +61,13 @@ def select_managed_completion(response, clean_text):
     return SelectedCompletion(message, "FINAL", state, answer)
 
 
+def is_stopped_prose(response, selected):
+    """Allow format repair only for a complete, visible, non-tool response."""
+    return (selected.branch == "FINAL" and selected.visible_content == "TEXT"
+            and bool(selected.answer)
+            and _field(_choice(response), "finish_reason", Choice) == "stop")
+
+
 def observe_managed_completion(response, selected, *, request, step, timing=None):
     try:
         if type(request) is not ManagedTurnRequest:

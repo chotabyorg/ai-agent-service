@@ -111,11 +111,19 @@ async def test_current_input_distinguishes_silence_from_reply_after_interrupted_
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('delivered', [False, True])
-@pytest.mark.parametrize('intent', ['CONFIRM', 'UNRELATED'])
-@pytest.mark.parametrize('coalesced', [False, True])
+@pytest.mark.parametrize('delivered,intent,coalesced,prose_first', [
+    # Preserve every existing mixed-selection/tool rejection. Prose repair is
+    # exercised only with customer input; the separate unchanged-base probe
+    # retains the pre-existing mixed-selection prose limitation.
+    (delivered, intent, coalesced, False)
+    for delivered in (False, True) for intent in ('CONFIRM', 'UNRELATED') for coalesced in (False, True)
+] + [
+    (delivered, intent, coalesced, True)
+    for delivered in (False, True) for intent in ('CONFIRM', 'UNRELATED') for coalesced in (False, True)
+    if not (coalesced and delivered)
+])
 async def test_presence_after_idle_cannot_confirm_pending_booking(
-        db_session, crm_settings, monkeypatch, model, delivered, intent, coalesced):
+        db_session, crm_settings, monkeypatch, model, delivered, intent, coalesced, prose_first):
     from models.business import BusinessPlan
     from services.business_runtime import BusinessRuntime
     from services.managed_runtime import ManagedRuntime
@@ -153,6 +161,8 @@ async def test_presence_after_idle_cannot_confirm_pending_booking(
     call = build_tool_call('presence', 'business_decide_proposal',
                           json.dumps({'proposal_id': proposal_id, 'intent': intent}))
     call.type = 'function'
+    if prose_first:
+        model.chat.completions.queue(build_llm_response(content='Непроверенное утверждение: вы записаны.'))
     model.chat.completions.queue(build_llm_response(tool_calls=[call]),
         build_llm_response(content='Я вас слышу. Подтвердите предложенную запись, пожалуйста.'))
     async def db_provider():
@@ -168,6 +178,7 @@ async def test_presence_after_idle_cannot_confirm_pending_booking(
     if coalesced and delivered:
         # A selection containing an agent Message cannot supply business input.
         # Preserve the runtime's existing rejection rather than weakening it.
+        assert not prose_first
         assert result['status'] == 'FAILED' and result['error_code'] == 'TOOL_SETUP_FAILED', result
         return
     elif intent == 'CONFIRM':

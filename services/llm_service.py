@@ -27,7 +27,7 @@ from services.managed_tools import (ManagedExecutionError, inspect_managed_tool_
                                     parse_managed_tool_arguments, _bounded_json)
 from services.managed_http_cleanup import close_managed_helper, own_managed_http
 from services.managed_reasoning import managed_reasoning_fields
-from services.managed_completion import select_managed_completion, observe_managed_completion, observe_model_failure
+from services.managed_completion import select_managed_completion, observe_managed_completion, observe_model_failure, is_stopped_prose
 from services.completion_timing import CompletionTiming
 from services.managed_streaming import complete_with_partials
 from services.chat_diagnostics import ChatFailureStage, set_chat_failure_stage
@@ -688,9 +688,11 @@ class LLMService:
                         completion_timing = CompletionTiming() if runtime else None
                         pending_response = complete_with_partials(
                             llm_client.chat.completions.create, completion_kwargs,
-                            # Required continuations cannot publish unvalidated prose.
+                            # Required continuations and pending decisions cannot
+                            # publish unvalidated prose before runtime admission.
                             on_text=(tracked_partial if partial_hook is not None
-                                     and reuse_expectation is None else None),
+                                     and reuse_expectation is None
+                                     and required_proposal_id is None else None),
                             timing=completion_timing,
                         )
                         try:
@@ -819,6 +821,27 @@ class LLMService:
                     # A pending customer's reply must reach the semantic runtime
                     # before reads or ordinary prose can bypass that decision.
                     calls = getattr(message, "tool_calls", None)
+                    if (managed_request.channel == 'VOICE' and step_index == 0
+                            and not runtime.tool_dispatch_attempted and not partial_attempted
+                            and all(m.actor == 'CUSTOMER' for m in managed_request.selected_messages)
+                            and is_stopped_prose(response, selected)):
+                        # Some providers omit the semantic call despite seeing
+                        # only this tool. Discard their prose; request its format
+                        # once more, without interpreting it as caller consent.
+                        # The next loop rechecks deadline and execution authority.
+                        messages.append({'role': 'system', 'content': (
+                            'A pending proposal still requires a semantic decision. '
+                            'Return exactly one business_decide_proposal call, using '
+                            'the current pending proposal_id and the actual selected '
+                            'customer reply. CONFIRM only explicit acceptance; CHANGE '
+                            'for requested changes; REJECT for refusal; UNRELATED for '
+                            'a different question or unclear acceptance. Follow the '
+                            'advertised intent schema. Prior assistant prose is not '
+                            'customer consent or proof of any completed action. '
+                            'Do not return ordinary prose or claim success.')})
+                        self._check_managed_envelope(agent, messages, openai_tools,
+                                                     tool_choice=tool_choice, request=managed_request)
+                        continue
                     if selected.branch != "TOOL_CALLS" or type(calls) is not list or len(calls) != 1:
                         raise ManagedExecutionError("INVALID_RESULT")
                     call = calls[0]

@@ -132,6 +132,9 @@ async def test_voice_without_forced_choice_still_rejects_invalid_decisions(
     if invalid == 'multiple':
         response.choices[0].message.tool_calls.append(decision(proposal_id, 'CONFIRM'))
     model.chat.completions.queue(response)
+    if invalid == 'prose':
+        # A second prose response must still fail before any dispatch.
+        model.chat.completions.queue(build_llm_response(content='Всё готово, вы записаны.'))
     request = later(ManagedTurnRequest.model_validate(value), 'Да, подтверждаю запись.')
     result = (await execute(api_client, request.model_dump(mode='json'))).json()
     assert result['status'] == 'FAILED' and result['error_code'] == 'INVALID_RESULT'
