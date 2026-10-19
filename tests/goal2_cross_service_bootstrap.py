@@ -7,6 +7,7 @@ This module is never imported by production startup.
 
 import asyncio
 import base64
+import hashlib
 import json
 import os
 import socket
@@ -218,25 +219,74 @@ class Observe:
         managed = scope["type"] == "http" and scope["path"] == "/internal/v1/managed-turns/execute"
         if managed:
             self.state.record("managed_http_requests")
-        body = bytearray()
+        request_body = bytearray()
+        response_body = bytearray()
+        response_media_type = ""
+
+        async def observe_receive():
+            event = await receive()
+            if managed and event["type"] == "http.request":
+                request_body.extend(event.get("body", b""))
+            return event
 
         async def observe_send(event):
+            nonlocal response_media_type
+            if managed and event["type"] == "http.response.start":
+                headers = {key.lower(): value for key, value in event.get("headers", [])}
+                response_media_type = headers.get(b"content-type", b"").decode("latin1")
             if managed and event["type"] == "http.response.body":
-                body.extend(event.get("body", b""))
+                response_body.extend(event.get("body", b""))
                 if not event.get("more_body", False):
-                    value = json.loads(body)
-                    if "status" in value:
-                        self.state.record("managed_results", {key: value[key] for key in
-                            ["turn_id", "conversation_id", "status", "error_code"]})
+                    if response_media_type.split(";", 1)[0].strip().lower() == "text/event-stream":
+                        events = [
+                            json.loads(line[5:].strip())
+                            for line in response_body.decode("utf-8").splitlines()
+                            if line.startswith("data:") and line[5:].strip()
+                        ]
+                        final = [event for event in events if event.get("partial_final") is True]
+                        self.state.record("managed_stream_summaries", {
+                            "media_type": "text/event-stream",
+                            "event_count": len(events),
+                            "partial_count": sum(
+                                event.get("partial_final") is False for event in events
+                            ),
+                            "final_count": len(final),
+                            "final_status": final[-1].get("status") if final else None,
+                        })
+                    else:
+                        value = json.loads(response_body)
+                        if "status" in value:
+                            self.state.record("managed_results", {key: value[key] for key in
+                                ["turn_id", "conversation_id", "status", "error_code"]})
             await send(event)
 
         try:
-            await self.app(scope, receive, observe_send)
+            await self.app(scope, observe_receive, observe_send)
         finally:
             if managed and scope.get("managed_turn_request") is not None:
                 request = scope["managed_turn_request"]
                 self.state.record("managed_projections", request.model_dump(mode="json"))
                 self.state.record("managed_projection_fields_set", sorted(request.model_fields_set))
+                raw_request = bytes(request_body)
+                try:
+                    raw_value = json.loads(raw_request)
+                    canonical_request = json.dumps(
+                        raw_value, sort_keys=True, separators=(",", ":"),
+                        ensure_ascii=False, allow_nan=False,
+                    ).encode("utf-8")
+                except (ValueError, TypeError):
+                    canonical_request = b""
+                self.state.record(
+                    "managed_request_body_sha256", hashlib.sha256(raw_request).hexdigest()
+                )
+                self.state.record(
+                    "managed_request_canonical_sha256",
+                    hashlib.sha256(canonical_request).hexdigest(),
+                )
+                self.state.record(
+                    "managed_request_body_sizes",
+                    {"raw": len(raw_request), "canonical": len(canonical_request)},
+                )
 
 
 def run():

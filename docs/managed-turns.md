@@ -153,11 +153,13 @@ request fields must still match exactly. Explicit extension settings never use
 that fallback. Sidecar DTO hashes continue to cover their exact serialized shape
 and do not use the Business ledger fallback.
 
-Roll this reader out before Conversation begins writing extension fields
-explicitly. It accepts pre-stream and extension-era readers while new Business
+Roll this reader out first. Current Conversation already writes the explicit
+`false/2000` text profile and `true/2000` Voice-v2 profile; AI accepts those
+profiles and the historical omitted-field shape. Conversation can then deploy its
+reader to restore omitted historical bodies from retained hashes. New AI Business
 contexts store the canonical profile hash. This is a source-only compatibility
-change: no old Turn, Business context or evidence row is migrated or rewritten.
-A v1 and v2 projection of the same Turn remain distinct.
+change: no old Turn, Business context or evidence row is migrated or rewritten. A
+v1 and v2 projection of the same Turn remain distinct.
 `OperationReference` and the read-only `ManagedEvidenceRequest`/Result remain v1
 with their existing fields, limits and scope. The evidence endpoint may read refs
 for a v2 execution through the existing v1 identity request.
