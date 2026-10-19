@@ -114,8 +114,9 @@ async def test_current_input_distinguishes_silence_from_reply_after_interrupted_
 @pytest.mark.parametrize('delivered', [False, True])
 @pytest.mark.parametrize('intent', ['CONFIRM', 'UNRELATED'])
 @pytest.mark.parametrize('coalesced', [False, True])
+@pytest.mark.parametrize('prose_first', [False, True])
 async def test_presence_after_idle_cannot_confirm_pending_booking(
-        db_session, crm_settings, monkeypatch, model, delivered, intent, coalesced):
+        db_session, crm_settings, monkeypatch, model, delivered, intent, coalesced, prose_first):
     from models.business import BusinessPlan
     from services.business_runtime import BusinessRuntime
     from services.managed_runtime import ManagedRuntime
@@ -153,6 +154,8 @@ async def test_presence_after_idle_cannot_confirm_pending_booking(
     call = build_tool_call('presence', 'business_decide_proposal',
                           json.dumps({'proposal_id': proposal_id, 'intent': intent}))
     call.type = 'function'
+    if prose_first:
+        model.chat.completions.queue(build_llm_response(content='Непроверенное утверждение: вы записаны.'))
     model.chat.completions.queue(build_llm_response(tool_calls=[call]),
         build_llm_response(content='Я вас слышу. Подтвердите предложенную запись, пожалуйста.'))
     async def db_provider():
@@ -167,8 +170,14 @@ async def test_presence_after_idle_cannot_confirm_pending_booking(
         assert (await db.get(BusinessPlan, UUID(proposal_id))).proposal_state == 'PREPARED'
     if coalesced and delivered:
         # A selection containing an agent Message cannot supply business input.
-        # Preserve the runtime's existing rejection rather than weakening it.
-        assert result['status'] == 'FAILED' and result['error_code'] == 'TOOL_SETUP_FAILED', result
+        # No repair is allowed. The existing result guard can replace rejected
+        # prose with the retained proposal; it still cannot authorize an effect.
+        if prose_first:
+            assert result['status'] == 'DRAFT_READY'
+            assert len(model.chat.completions.calls) == 1
+            assert 'Непроверенное' not in result['draft_text']
+        else:
+            assert result['status'] == 'FAILED' and result['error_code'] == 'TOOL_SETUP_FAILED', result
         return
     elif intent == 'CONFIRM':
         assert result['status'] == 'FAILED' and result['error_code'] == 'INVALID_RESULT', result
