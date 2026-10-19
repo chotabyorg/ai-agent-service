@@ -35,7 +35,9 @@ async def assemble(items, **kwargs):
 @pytest.mark.parametrize('shape', ['openrouter', 'openai', 'sdk', 'namespace', 'sse'])
 async def test_terminal_usage_preserves_the_same_answer_and_partials(shape):
     usage = {'prompt_tokens': 20, 'completion_tokens': 5, 'total_tokens': 25,
-             'completion_tokens_details': {'reasoning_tokens': 2}, 'private': 'do-not-retain'}
+             'completion_tokens_details': {'reasoning_tokens': 2},
+             'prompt_tokens_details': {'cached_tokens': 12, 'cache_write_tokens': 3},
+             'cost': 0.000001239, 'private': 'do-not-retain'}
     terminal = frame('', finish='stop', usage=usage)
     if shape == 'openai':
         terminal['choices'] = []
@@ -54,7 +56,9 @@ async def test_terminal_usage_preserves_the_same_answer_and_partials(shape):
     assert result.choices[0].finish_reason == 'stop'
     assert vars(result.usage) == {
         'prompt_tokens': 20, 'completion_tokens': 5, 'total_tokens': 25,
-        'completion_tokens_details': SimpleNamespace(reasoning_tokens=2)}
+        'completion_tokens_details': SimpleNamespace(reasoning_tokens=2),
+        'prompt_tokens_details': SimpleNamespace(cached_tokens=12, cache_write_tokens=3),
+        'cost': 0.000001239}
     assert 'do-not-retain' not in repr(result)
 
 
