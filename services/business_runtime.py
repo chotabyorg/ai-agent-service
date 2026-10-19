@@ -567,8 +567,41 @@ class BusinessRuntime:
             summary = completed_booking_reply(operation, receipt)
         except Exception:
             return empty
-        return {"pending": None, "recent_booking": {
+        context = {"pending": None, "recent_booking": {
             "booking_ref": receipt.object_id, "historical_summary": summary}}
+        # One bounded, ordinary READ avoids asking the model to rediscover its
+        # own just-confirmed booking among unrelated cancelled appointments.
+        # No historical revision or provider effect is reused here.
+        current = await self._current_booking_prompt_context(receipt.object_id)
+        if current is not None:
+            context['current_booking'] = current
+        return context
+
+    async def _current_booking_prompt_context(self, booking_ref):
+        """Hydrate only a validated own reference through the normal READ guards."""
+        from business_capabilities.results import Booking
+        from services.prompt_composer import CurrentBookingPrompt
+
+        result = None
+        # A slow optional read must not consume the whole model execution
+        # budget. Parent cancellation and managed deadlines still propagate.
+        with anyio.move_on_after(2) as bounded:
+            result = await self.call_tool('booking_get', {'booking_ref': booking_ref})
+        if bounded.cancel_called or result is None or result.halt_status is not None:
+            return None
+        payload = result.tool_payload
+        if not isinstance(payload, dict) or payload.get('status') != 'OK':
+            return None
+        try:
+            booking = Booking.model_validate(payload.get('data'))
+            if booking.ref != booking_ref:
+                return None
+            return CurrentBookingPrompt(booking_ref=booking.ref,
+                **booking.model_dump(include={
+                    'revision', 'status', 'start_at', 'end_at', 'timezone',
+                    'offering_name', 'resource_name'})).model_dump(mode='json')
+        except (ValueError, TypeError):
+            return None
 
     async def _effect_eligibility(self, origin_turn_id):
         result = await self._eligibility_result(origin_turn_id)

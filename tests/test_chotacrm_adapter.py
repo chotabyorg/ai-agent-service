@@ -52,6 +52,14 @@ async def setup(factory, settings):
                 revision=1, capabilities=list(DEFAULTS), timezone='Europe/Minsk'))
         if path.endswith('/execute/catalog.search'):
             return httpx.Response(200, json=dict(status='OK', data={'items':[]}))
+        if path.endswith('/execute/booking.get'):
+            arguments = json.loads(request.content)['arguments']
+            assert set(arguments) == {'booking_ref'}
+            records['booking_reads'] = records.get('booking_reads', 0) + 1
+            matching = [value['data'] for value in records['receipts'].values()
+                        if value.get('status') == 'OK' and value.get('data', {}).get('ref') == arguments['booking_ref']]
+            assert matching
+            return httpx.Response(200, json=dict(status='OK', data=matching[-1]))
         if path.endswith('/execute/customer.find'):
             arguments = json.loads(request.content)['arguments']
             assert 'name' not in arguments
