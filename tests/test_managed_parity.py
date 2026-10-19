@@ -6,7 +6,7 @@ from uuid import UUID, uuid4
 
 import httpx
 import pytest
-from openai import APIConnectionError, APIError, APITimeoutError, AuthenticationError, RateLimitError
+from openai import APIConnectionError, APIError, APIStatusError, APITimeoutError, AuthenticationError, RateLimitError
 
 import main
 import services.llm_service as llm_module
@@ -61,19 +61,23 @@ async def test_shared_kb_prompt_model_and_tool_continuation_golden_parity(api_cl
 
 @pytest.mark.integration
 @pytest.mark.parametrize("kind,code,deactivated", [("auth","MODEL_AUTH_FAILED",True),
-    ("funds","MODEL_INSUFFICIENT_FUNDS",True),("rate","MODEL_RATE_LIMITED",False),
+    ("funds","MODEL_INSUFFICIENT_FUNDS",True),("payment_http","MODEL_INSUFFICIENT_FUNDS",True),
+    ("inflight","MODEL_RATE_LIMITED",False),("rate","MODEL_RATE_LIMITED",False),
     ("timeout","MODEL_TIMEOUT",False),("connection","MODEL_UNAVAILABLE",False),("api","MODEL_ERROR",False)])
 async def test_model_error_codes_and_existing_key_deactivation(api_client,db_session,monkeypatch,model,kind,code,deactivated,caplog):
     """Keep final error codes and deactivation unchanged after bounded recovery."""
     agent,value=await setup(api_client,db_session,monkeypatch)
     request=httpx.Request("POST","http://synthetic")
     errors=dict(auth=AuthenticationError(SENTINEL,response=httpx.Response(401,request=request),body={}),
-        funds=RateLimitError("402 insufficient "+SENTINEL,response=httpx.Response(429,request=request),body={}),
-        rate=RateLimitError(SENTINEL,response=httpx.Response(429,request=request),body={}),
+        funds=RateLimitError(SENTINEL,response=httpx.Response(429,request=request),body={'code':402}),
+        payment_http=APIStatusError(SENTINEL,response=httpx.Response(402,request=request),body={'code':402}),
+        inflight=APIStatusError(SENTINEL,response=httpx.Response(402,request=request,headers={'Retry-After':'0'}),
+            body={'code':402,'metadata':{'limit_source':'openrouter_in_flight_budget'}}),
+        rate=RateLimitError("credits 402 insufficient "+SENTINEL,response=httpx.Response(429,request=request),body={'code':429}),
         timeout=APITimeoutError(request=request),connection=APIConnectionError(message=SENTINEL,request=request),
         api=APIError(SENTINEL,request=request,body={}))
     model.chat.completions.queue(errors[kind])
-    if kind in {'rate','connection'}:
+    if kind in {'rate','inflight'}:
         model.chat.completions.queue(errors[kind])
     result=await execute(api_client,value)
     assert result.json()["status"]=="FAILED" and result.json()["error_code"]==code

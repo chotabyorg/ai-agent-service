@@ -45,9 +45,30 @@ jobs:
           from pathlib import Path
           import subprocess
           import sys
+          from xml.etree import ElementTree
           files = sorted(str(p) for p in Path('tests').rglob('test_*.py')
                          if 'goal3_business_cross_service' not in p.parts)
           selected = files[int(os.environ['TEST_SHARD'])::4]
           assert selected
-          raise SystemExit(subprocess.call([sys.executable, '-m', 'pytest', '-q', *selected]))
+          report = Path('native-results.xml')
+          code = subprocess.call([sys.executable, '-m', 'pytest', '-q',
+                                  '--junitxml=' + str(report), *selected])
+          # Keep a small public result summary; provider payloads, failure text,
+          # environment values and captured stdout never leave the job logs.
+          lines = ['## Native test results', '',
+                   'Shard: ' + os.environ['TEST_SHARD'],
+                   'Source: ' + os.environ['GITHUB_SHA'],
+                   'Exit code: ' + str(code), '']
+          if report.exists():
+              cases = list(ElementTree.parse(report).iter('testcase'))
+              failed = [case for case in cases if case.find('failure') is not None
+                        or case.find('error') is not None]
+              lines.append('Cases: ' + str(len(cases)) + '; failed/error: ' + str(len(failed)))
+              lines.extend('- `' + (case.get('classname', '') + '::' + case.get('name', '')).replace('`', '')[:500]
+                           + '`' for case in failed[:100])
+          else:
+              lines.append('No JUnit report: collection or runner failure requires the authenticated log.')
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a', encoding='utf-8') as summary:
+              summary.write('\n'.join(lines) + '\n')
+          raise SystemExit(code)
           PY

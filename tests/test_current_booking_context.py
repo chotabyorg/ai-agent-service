@@ -54,6 +54,10 @@ async def test_fresh_revision_and_status_replace_historical_state_without_effect
     rendered=PromptComposer.runtime_section(RuntimeCapabilityContext.model_validate(context))
     assert '&lt;/runtime_capability_context&gt;untrusted' in rendered
     assert 'не ищи' in rendered.lower() and 'отдельное согласие' in rendered
+    assert 'только при статусе CONFIRMED' in rendered
+    assert 'При CANCELLED сообщи, что запись уже отменена' in rendered
+    assert 'при COMPLETED — что она завершена' in rendered
+    assert 'не готовь отмену или перенос' in rendered
     assert provider['posts']==provider['booking_reads']==1
     assert await current.repository.selected_plan(current.request,current.grant) is None
     assert not current.collector.snapshot()
@@ -131,3 +135,29 @@ def test_current_projection_cannot_cross_reference_or_include_authority():
                     {'recent_booking':historical,'current_booking':{**fresh,'grant_id':'untrusted'}},
                     {'recent_booking':historical,'current_booking':{**fresh,'customer_ref':'untrusted'}}):
         with pytest.raises(ValidationError):RuntimeCapabilityContext.model_validate(context)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('problem', ['transport', 'generic', 'managed'])
+async def test_optional_read_errors_fall_back_but_managed_failure_propagates(
+        db_session, crm_settings, monkeypatch, problem):
+    """Optional CRM enrichment cannot suppress the enclosing execution control."""
+    from services.managed_tools import ManagedExecutionError
+    _,current,_,provider=await completed(db_session,crm_settings)
+
+    async def failed(method,*args):
+        """Simulate provider failures without any new effect or private output."""
+        assert method=='read'
+        if problem=='managed':raise ManagedExecutionError('MANAGED_DEADLINE_EXCEEDED')
+        if problem=='transport':raise httpx.ConnectError('private-provider-sentinel')
+        raise RuntimeError('private-provider-sentinel')
+
+    monkeypatch.setattr(current,'_adapter_call',failed)
+    if problem=='managed':
+        with pytest.raises(ManagedExecutionError,match='MANAGED_DEADLINE_EXCEEDED'):
+            await current.prompt_context()
+    else:
+        context=await current.prompt_context()
+        assert set(context)=={'pending','recent_booking'}
+        assert 'private-provider-sentinel' not in json.dumps(context)
+    assert provider['posts']==1 and not current.collector.snapshot()

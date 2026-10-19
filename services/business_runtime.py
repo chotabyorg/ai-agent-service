@@ -16,6 +16,7 @@ from schemas.managed_turn import OperationReference
 from services.business_registry import BusinessRegistry
 from services.business_repository import BusinessRepository
 from services.managed_runtime import ManagedRuntime
+from services.managed_tools import ManagedExecutionError
 
 
 class CommittedReferenceCollector:
@@ -585,8 +586,13 @@ class BusinessRuntime:
         result = None
         # A slow optional read must not consume the whole model execution
         # budget. Parent cancellation and managed deadlines still propagate.
-        with anyio.move_on_after(2) as bounded:
-            result = await self.call_tool('booking_get', {'booking_ref': booking_ref})
+        try:
+            with anyio.move_on_after(2) as bounded:
+                result = await self.call_tool('booking_get', {'booking_ref': booking_ref})
+        except ManagedExecutionError:
+            raise
+        except Exception:
+            return None
         if bounded.cancel_called or result is None or result.halt_status is not None:
             return None
         payload = result.tool_payload

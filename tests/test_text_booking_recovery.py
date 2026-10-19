@@ -50,7 +50,8 @@ async def test_model_retry_is_once_and_not_for_permanent_client_errors(
         api_client, db_session, monkeypatch, 200, {}, channel=channel)
     model.chat.completions.queue(failure(status), failure(status), build_llm_response(content='never used'))
     result = (await execute(api_client, value)).json()
-    assert result['status'] == 'FAILED' and result['error_code'] == 'MODEL_ERROR'
+    expected_code = 'MODEL_RATE_LIMITED' if status == 429 else 'MODEL_ERROR'
+    assert result['status'] == 'FAILED' and result['error_code'] == expected_code
     assert len(model.chat.completions.calls) == expected_calls and calls['execute'] == 0
 
 

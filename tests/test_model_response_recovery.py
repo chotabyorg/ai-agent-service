@@ -3,12 +3,12 @@ from types import SimpleNamespace
 
 import httpx
 import pytest
-from openai import APIError, APIConnectionError, APITimeoutError
+from openai import APIError, APIConnectionError, APIStatusError, APITimeoutError, RateLimitError
 
 from models.agent import AgentTemplate
 from services.llm_service import LLMService
 from services.managed_tools import ManagedExecutionError
-from services.model_retry import classify_model_failure, model_retry_delay
+from services.model_retry import classify_model_failure, model_payment_required, model_retry_delay
 from services.prompt_builder import ChatContext
 from tests.fakes import ScriptedLLMClient, build_llm_response
 from tests.test_chotacrm_adapter import crm_settings  # noqa: F401
@@ -48,7 +48,40 @@ def test_timeouts_are_not_retried_but_transport_setup_can_recover():
     """A timeout has already consumed its attempt budget."""
     request=httpx.Request('POST','https://synthetic.invalid')
     assert model_retry_delay(APITimeoutError(request=request)) is None
-    assert model_retry_delay(APIConnectionError(request=request)) is not None
+    setup=APIConnectionError(request=request)
+    setup.__cause__=httpx.ConnectError('private-provider-sentinel')
+    assert model_retry_delay(setup) is not None
+    assert model_retry_delay(APIConnectionError(request=request)) is None
+
+
+@pytest.mark.parametrize('cause', [httpx.ReadError, httpx.RemoteProtocolError, RuntimeError])
+def test_non_setup_connection_wrappers_are_not_retried(cause):
+    """A stream or cleanup failure cannot masquerade as a fresh connection failure."""
+    error=APIConnectionError(request=httpx.Request('POST','https://synthetic.invalid'))
+    error.__cause__=cause('private-provider-sentinel')
+    assert classify_model_failure(error).category=='UNKNOWN'
+    assert model_retry_delay(error) is None
+
+
+@pytest.mark.parametrize('message', ['credits exceeded', 'insufficient rate allowance', 'request 402abcdef'])
+def test_rate_limit_text_does_not_invent_a_payment_refusal(message):
+    """Only structured provider codes can deactivate an agent for payment."""
+    error=RateLimitError(message,response=httpx.Response(429,request=httpx.Request('POST','https://synthetic.invalid')),
+                         body={'code':429})
+    assert not model_payment_required(error)
+    assert classify_model_failure(error).category=='RATE_LIMITED'
+    assert model_retry_delay(error) is not None
+
+
+@pytest.mark.parametrize('header,allowed', [(None,False),('0',True),('5',False)])
+def test_in_flight_budget_is_temporary_and_requires_bounded_retry_after(header,allowed):
+    """A documented concurrent-spend reservation limit never deactivates the key."""
+    error=APIStatusError('private-provider-sentinel',response=httpx.Response(402,
+        request=httpx.Request('POST','https://synthetic.invalid'),headers={} if header is None else {'Retry-After':header}),
+        body={'error':{'code':402,'metadata':{'limit_source':'openrouter_in_flight_budget'}}})
+    assert not model_payment_required(error)
+    assert classify_model_failure(error).category=='RATE_LIMITED'
+    assert (model_retry_delay(error) is not None)==allowed
 
 
 @pytest.mark.asyncio

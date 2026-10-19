@@ -5,7 +5,8 @@ from email.utils import parsedate_to_datetime
 import math
 import random
 
-from openai import APIConnectionError, APIError, APIStatusError, APITimeoutError, RateLimitError
+import httpx
+from openai import APIConnectionError, APIError, APIStatusError, APITimeoutError
 
 
 FAILURE_CATEGORIES = frozenset({'RATE_LIMITED', 'SERVER_ERROR', 'CLIENT_ERROR',
@@ -20,20 +21,41 @@ class ModelFailure:
     http_status: int | None = None
 
 
+def _error_envelope(error: APIError) -> dict:
+    """Inspect only the provider's structured envelope, never exception text."""
+    body = vars(error).get('body')
+    if type(body) is not dict:
+        return {}
+    nested = body.get('error')
+    return nested if type(nested) is dict else body
+
+
+def _in_flight_budget(error: APIError) -> bool:
+    """Recognize the documented temporary OpenRouter reservation limit."""
+    metadata = _error_envelope(error).get('metadata')
+    return type(metadata) is dict and metadata.get('limit_source') == 'openrouter_in_flight_budget'
+
+
+def model_payment_required(error: APIError) -> bool:
+    """Distinguish structured payment refusal from a temporary in-flight limit."""
+    code = _error_envelope(error).get('code')
+    payment = vars(error).get('status_code') == 402 or (type(code) is int and code == 402)
+    metadata = _error_envelope(error).get('metadata')
+    payment = payment or (type(metadata) is dict and metadata.get('error_type') == 'payment_required')
+    return payment and not _in_flight_budget(error)
+
+
 def classify_model_failure(error: APIError) -> ModelFailure:
     """Recognize HTTP errors and documented SDK stream error codes."""
     status = vars(error).get('status_code')
     status = status if type(status) is int and 100 <= status <= 599 else None
-    # Preserve the existing SDK compatibility path for a payment refusal
-    # wrapped as RateLimitError; it must never consume a recovery attempt.
-    if isinstance(error, RateLimitError) and any(x in str(error).lower() for x in ('402','insufficient','credits')):
+    if model_payment_required(error):
         return ModelFailure('CLIENT_ERROR', status)
+    if _in_flight_budget(error) and (status == 402 or _error_envelope(error).get('code') == 402):
+        return ModelFailure('RATE_LIMITED', status)
     code = status
     if code is None:
-        body = vars(error).get('body')
-        if type(body) is dict:
-            nested = body.get('error')
-            code = (nested if type(nested) is dict else body).get('code')
+        code = _error_envelope(error).get('code')
     if type(code) is int:
         if code == 429:
             return ModelFailure('RATE_LIMITED', status)
@@ -46,7 +68,9 @@ def classify_model_failure(error: APIError) -> ModelFailure:
     if isinstance(error, APITimeoutError):
         return ModelFailure('TIMEOUT', status)
     if isinstance(error, APIConnectionError):
-        return ModelFailure('TRANSPORT', status)
+        # The SDK also wraps response/stream/cleanup errors in this class.
+        # Only a proven connection setup failure is a transport retry signal.
+        return ModelFailure('TRANSPORT' if isinstance(error.__cause__, httpx.ConnectError) else 'UNKNOWN', status)
     return ModelFailure('UNKNOWN', status)
 
 
@@ -54,6 +78,9 @@ def model_retry_delay(error: APIError) -> float | None:
     """Honor Retry-After only inside a two-second interactive wait budget."""
     failure = classify_model_failure(error)
     if failure.category not in {'RATE_LIMITED', 'SERVER_ERROR', 'TRANSPORT'}:
+        return None
+    if _in_flight_budget(error) and (not isinstance(error, APIStatusError)
+                                   or 'retry-after' not in error.response.headers):
         return None
     delay = random.uniform(.5, 1.) if failure.category == 'RATE_LIMITED' else random.uniform(.15, .35)
     if isinstance(error, APIStatusError):

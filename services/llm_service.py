@@ -736,8 +736,8 @@ class LLMService:
                         raise ManagedExecutionError("MODEL_AUTH_FAILED") from None
                     raise AgentApiKeyInvalidError("OpenRouter key is invalid. Agent deactivated.")
                 except RateLimitError as exc:
-                    error_str = str(exc).lower()
-                    if "402" in error_str or "insufficient" in error_str or "credits" in error_str:
+                    from services.model_retry import model_payment_required
+                    if model_payment_required(exc):
                         await self._deactivate_agent(agent, db_session, "Insufficient funds on OpenRouter", runtime=runtime)
                         if runtime:
                             raise ManagedExecutionError("MODEL_INSUFFICIENT_FUNDS") from None
@@ -754,6 +754,16 @@ class LLMService:
                         raise ManagedExecutionError("MODEL_UNAVAILABLE") from None
                     raise ChatProcessingError("Cannot connect to OpenRouter.")
                 except APIError as exc:
+                    from services.model_retry import classify_model_failure, model_payment_required
+                    if model_payment_required(exc):
+                        await self._deactivate_agent(agent, db_session, "Insufficient funds on OpenRouter", runtime=runtime)
+                        if runtime:
+                            raise ManagedExecutionError("MODEL_INSUFFICIENT_FUNDS") from None
+                        raise AgentInsufficientFundsError("No funds on OpenRouter. Agent deactivated.")
+                    if classify_model_failure(exc).category == 'RATE_LIMITED':
+                        if runtime:
+                            raise ManagedExecutionError("MODEL_RATE_LIMITED") from None
+                        raise AgentRateLimitError("Rate limit exceeded. Try again later.")
                     if runtime:
                         raise ManagedExecutionError("MODEL_ERROR") from None
                     logger.error("OpenRouter error for agent %s: %s", agent.id, exc)
