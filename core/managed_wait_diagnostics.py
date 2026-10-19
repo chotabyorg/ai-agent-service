@@ -7,6 +7,8 @@ import time
 from uuid import UUID
 
 import anyio
+import httpx
+from openai import APITimeoutError
 
 _IDENTITY = object()
 _PHASES = frozenset({'MODEL_HTTP', 'EXECUTION_GUARD', 'FINAL_GUARD', 'RETRY_WAIT'})
@@ -66,8 +68,15 @@ def observe_managed_wait(runtime, phase, *, step, attempt=1):
         state = 'CANCELLED' if isinstance(error, asyncio.CancelledError) else 'ERROR'
         try:
             from services.managed_tools import ManagedExecutionError
-            if isinstance(error, ManagedExecutionError) and error.code == 'EXECUTION_TIMEOUT':
+            if (isinstance(error, APITimeoutError)
+                    or isinstance(error, ManagedExecutionError) and error.code == 'EXECUTION_TIMEOUT'):
                 state = 'TIMEOUT'
+            elif isinstance(error.__cause__, httpx.TimeoutException):
+                # The proxy retains the typed HTTPX timeout as its explicit cause.
+                # Other connection failures and unrelated exception contexts stay ERROR.
+                from services.llm_service import PrivacyProxyConnectionError
+                if isinstance(error, PrivacyProxyConnectionError):
+                    state = 'TIMEOUT'
         except Exception:
             pass
         _observe(runtime, phase, step, attempt, state, started)

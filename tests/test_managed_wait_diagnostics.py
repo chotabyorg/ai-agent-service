@@ -6,6 +6,8 @@ from types import SimpleNamespace
 from uuid import uuid4
 
 import anyio
+import httpx
+from openai import APIConnectionError, APITimeoutError
 import pytest
 
 from core import managed_wait_diagnostics as diagnostics
@@ -60,6 +62,68 @@ async def test_terminal_observation_preserves_the_original_error(caplog, kind, s
         with diagnostics.observe_managed_wait(runtime, 'MODEL_HTTP', step=1):
             raise error
     assert raised.value is error
+    assert [row.state for row in observations(caplog)] == ['START', state]
+    assert SECRET not in caplog.text and all(SECRET not in repr(row.__dict__) for row in caplog.records)
+
+
+@pytest.mark.parametrize('kind, state', [
+    ('sdk-timeout', 'TIMEOUT'), ('sdk-connection', 'ERROR'),
+    ('proxy-timeout', 'TIMEOUT'), ('proxy-connection', 'ERROR'),
+    ('proxy-unavailable', 'ERROR'), ('proxy-timeout-context', 'ERROR'),
+])
+async def test_provider_timeout_types_preserve_error_and_deadline(caplog, kind, state):
+    from services.llm_service import PrivacyProxyConnectionError
+    request = httpx.Request('POST', 'https://fixture.invalid/' + SECRET)
+    if kind == 'sdk-timeout':
+        error = APITimeoutError(request=request)
+    elif kind == 'sdk-connection':
+        error = APIConnectionError(message=SECRET, request=request)
+    else:
+        error = PrivacyProxyConnectionError(SECRET)
+        if kind == 'proxy-timeout':
+            error.__cause__ = httpx.ReadTimeout(SECRET, request=request)
+        elif kind == 'proxy-connection':
+            error.__cause__ = httpx.ConnectError(SECRET, request=request)
+        elif kind == 'proxy-timeout-context':
+            # An unrelated handled timeout must not relabel a later connection error.
+            error.__context__ = httpx.ReadTimeout(SECRET, request=request)
+    runtime = ManagedRuntime(10, request=SimpleNamespace(turn_id=uuid4()))
+    deadline = runtime.deadline
+    with pytest.raises(type(error)) as raised:
+        with diagnostics.observe_managed_wait(runtime, 'MODEL_HTTP', step=1):
+            raise error
+    assert raised.value is error and runtime.deadline == deadline
+    assert [row.state for row in observations(caplog)] == ['START', state]
+    assert SECRET not in caplog.text and all(SECRET not in repr(row.__dict__) for row in caplog.records)
+
+
+@pytest.mark.parametrize('failure, state', [(httpx.ReadTimeout, 'TIMEOUT'), (httpx.ConnectError, 'ERROR')])
+async def test_real_privacy_proxy_conversion_keeps_timeout_distinct(monkeypatch, caplog, failure, state):
+    from services.llm_service import PrivacyProxyCompletions, PrivacyProxyConnectionError
+    original = failure(SECRET, request=httpx.Request('POST', 'https://fixture.invalid'))
+
+    async def fail(request):
+        raise original
+
+    client_class = httpx.AsyncClient
+    clients = []
+
+    def client(**kwargs):
+        value = client_class(transport=httpx.MockTransport(fail), **kwargs)
+        clients.append(value)
+        return value
+
+    monkeypatch.setattr('services.llm_service.httpx.AsyncClient', client)
+    proxy = PrivacyProxyCompletions(privacy_filter_base_url='https://fixture.invalid',
+        internal_api_token=SECRET, privacy_filter_timeout_seconds=1, llm_base_url='https://fixture.invalid',
+        agent_api_key=SECRET, privacy_session_id=uuid4())
+    runtime = ManagedRuntime(10, request=SimpleNamespace(turn_id=uuid4()))
+    deadline = runtime.deadline
+    with pytest.raises(PrivacyProxyConnectionError) as raised:
+        with diagnostics.observe_managed_wait(runtime, 'MODEL_HTTP', step=1):
+            await proxy.create(model='fixture', messages=[])
+    assert raised.value.__cause__ is original and runtime.deadline == deadline
+    assert len(clients) == 1 and clients[0].is_closed
     assert [row.state for row in observations(caplog)] == ['START', state]
     assert SECRET not in caplog.text and all(SECRET not in repr(row.__dict__) for row in caplog.records)
 
