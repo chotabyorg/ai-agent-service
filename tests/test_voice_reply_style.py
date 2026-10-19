@@ -111,10 +111,17 @@ async def test_current_input_distinguishes_silence_from_reply_after_interrupted_
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('delivered', [False, True])
-@pytest.mark.parametrize('intent', ['CONFIRM', 'UNRELATED'])
-@pytest.mark.parametrize('coalesced', [False, True])
-@pytest.mark.parametrize('prose_first', [False, True])
+@pytest.mark.parametrize('delivered,intent,coalesced,prose_first', [
+    # Preserve every existing mixed-selection/tool rejection. Prose repair is
+    # exercised only with customer input; the separate unchanged-base probe
+    # retains the pre-existing mixed-selection prose limitation.
+    (delivered, intent, coalesced, False)
+    for delivered in (False, True) for intent in ('CONFIRM', 'UNRELATED') for coalesced in (False, True)
+] + [
+    (delivered, intent, coalesced, True)
+    for delivered in (False, True) for intent in ('CONFIRM', 'UNRELATED') for coalesced in (False, True)
+    if not (coalesced and delivered)
+])
 async def test_presence_after_idle_cannot_confirm_pending_booking(
         db_session, crm_settings, monkeypatch, model, delivered, intent, coalesced, prose_first):
     from models.business import BusinessPlan
@@ -170,14 +177,9 @@ async def test_presence_after_idle_cannot_confirm_pending_booking(
         assert (await db.get(BusinessPlan, UUID(proposal_id))).proposal_state == 'PREPARED'
     if coalesced and delivered:
         # A selection containing an agent Message cannot supply business input.
-        # No repair is allowed. The existing result guard can replace rejected
-        # prose with the retained proposal; it still cannot authorize an effect.
-        if prose_first:
-            assert result['status'] == 'DRAFT_READY'
-            assert len(model.chat.completions.calls) == 1
-            assert 'Непроверенное' not in result['draft_text']
-        else:
-            assert result['status'] == 'FAILED' and result['error_code'] == 'TOOL_SETUP_FAILED', result
+        # Preserve the runtime's existing rejection rather than weakening it.
+        assert not prose_first
+        assert result['status'] == 'FAILED' and result['error_code'] == 'TOOL_SETUP_FAILED', result
         return
     elif intent == 'CONFIRM':
         assert result['status'] == 'FAILED' and result['error_code'] == 'INVALID_RESULT', result
