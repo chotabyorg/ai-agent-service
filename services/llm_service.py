@@ -989,10 +989,12 @@ class LLMService:
                                 openai_tools = [tool for tool in openai_tools
                                                 if tool["function"]["name"] not in retired_voice_tools]
                         if (func_name == "business_decide_proposal"
-                                and business_result.tool_payload.get("status") == "STALE_PROPOSAL_RETIRED"):
-                            # The old proposal is now a nonconfirmable tombstone.
-                            # Refresh every model-facing surface together so a
-                            # current-origin action can follow ordinary policy.
+                                and (business_result.tool_payload.get("status") == "STALE_PROPOSAL_RETIRED"
+                                     or (business_result.tool_payload.get("status") == "CANCELLED"
+                                         and business_result.tool_payload.get("intent") in {"CHANGE", "REJECT"}))):
+                            # The saved proposal has been retired. Refresh every
+                            # model-facing surface together before continuing;
+                            # cancellation must not leave a confirmable prompt.
                             refreshed_context = await runtime.operation(
                                 runtime.business.prompt_context())
                             prompt_context = RuntimeCapabilityContext.model_validate(refreshed_context)
