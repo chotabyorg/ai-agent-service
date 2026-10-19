@@ -25,7 +25,8 @@ def _number_run(tokens):
     """Return a phone and consumed prefix length, preserving spoken zeros."""
     parts = []
     index = 0
-    if tokens and tokens[0] in {'плюс', '+'}:
+    explicit_plus = bool(tokens) and tokens[0] in {'плюс', '+'}
+    if explicit_plus:
         index += 1
     while index < len(tokens) and index < 48:
         word = tokens[index]
@@ -60,7 +61,17 @@ def _number_run(tokens):
     if index < len(tokens) and tokens[index] in {'тысяч', 'тысяча', 'тысячи', 'миллион', 'миллионов'}:
         return None, index
     digits = ''.join(parts)
+    if not explicit_plus and digits.startswith('8'):
+        # A domestic trunk prefix is not an international country code.
+        return None, index
     return ('+' + digits if _PHONE.fullmatch('+' + digits) else None), index
+
+
+def _answer_phone_facts(tokens):
+    number, consumed = _number_run(tokens)
+    if tokens[consumed:consumed + 1] == ['или']:
+        return ()
+    return (number,) if number else ()
 
 
 def _explicit_phone_facts(text):
@@ -75,15 +86,16 @@ def _explicit_phone_facts(text):
         if _ANCHOR.search(tail):
             text = tail
             break
-        if tokens and all(token in _NUMBER_WORDS or token.isdecimal() for token in tokens):
-            number, _ = _number_run(tokens)
-            return (number,) if number else ()
+        if tokens and (tokens[0] in _NUMBER_WORDS or tokens[0].isdecimal()):
+            return _answer_phone_facts(tokens)
     anchors = list(_ANCHOR.finditer(text))
     if not anchors:
         return None
     numbers = set()
     for anchor in anchors[:4]:
         tokens = _TOKEN.findall(text[anchor.end():])[:50]
+        if anchor.group() in {'плюс', '+'}:
+            tokens.insert(0, anchor.group())
         number, consumed = _number_run(tokens)
         if number:
             numbers.add(number)
@@ -160,9 +172,8 @@ def _window_phone_facts(messages, input_last_sequence, caller_phone, depth=0):
             and item.actor == 'AGENT' and item.direction == 'OUTBOUND'), None)
         tokens = _TOKEN.findall(text)
         if (previous_agent is not None and _CONTACT.search(previous_agent.text.casefold())
-                and tokens and all(token in _NUMBER_WORDS or token.isdecimal() for token in tokens)):
-            number, _ = _number_run(tokens)
-            return (number,) if number else ()
+                and tokens and (tokens[0] in _NUMBER_WORDS or tokens[0].isdecimal())):
+            return _answer_phone_facts(tokens)
     return (caller_phone,) if isinstance(caller_phone, str) and _PHONE.fullmatch(caller_phone) else ()
 
 

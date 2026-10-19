@@ -29,6 +29,14 @@ from tests.test_managed_turns import payload
     ('Телефон +375291234201, вернее +375291234202.', ('+375291234202',)),
     ('Телефон +375291234201, нет, телефон плюс триста семьдесят пять.', ()),
     ('Телефон +375291234201, точнее 375291234202.', ('+375291234202',)),
+    ('Телефон +375291234201, вернее 375291234202, спасибо.', ('+375291234202',)),
+    ('Телефон +375291234201, вернее 37529, спасибо.', ()),
+    ('Телефон +375291234201, вернее 375291234202 или 375291234203.', ()),
+    ('Телефон 8 916 123 45 67.', ()),
+    ('Телефон восемь девятьсот шестнадцать сто двадцать три сорок пять шестьдесят семь.', ()),
+    ('Телефон +8613812345678.', ('+8613812345678',)),
+    ('+8613812345678.', ('+8613812345678',)),
+    ('Плюс восемьдесят шесть сто тридцать восемь двенадцать тридцать четыре пятьдесят шесть семьдесят восемь.', ('+8613812345678',)),
 ])
 def test_phone_facts_preserve_spoken_groups_and_reject_incomplete_values(text, expected):
     from services.voice_contact import voice_phone_facts, voice_phone_hint
@@ -132,6 +140,10 @@ def test_explicit_contact_overrides_caller_and_other_channels_are_unchanged():
     ('Продиктуйте ваш контактный номер.', 'триста семьдесят пять двадцать девять сто двадцать три сорок два ноль один', ('+375291234201',)),
     ('На какую дату вас записать?', '20.10.2026', ()),
     ('Цена услуги 22 рубля.', '375291234201', ()),
+    ('Назовите телефон.', '375 29 123 42 01, пожалуйста.', ('+375291234201',)),
+    ('Назовите телефон.', '375 29, спасибо.', ()),
+    ('Назовите телефон.', '375291234201 или 375291234202.', ()),
+    ('Назовите телефон.', '8 916 123 45 67, спасибо.', ()),
 ])
 def test_digits_alone_require_a_customer_answer_to_a_contact_question(question, answer, expected):
     from uuid import uuid4
@@ -142,6 +154,18 @@ def test_digits_alone_require_a_customer_answer_to_a_contact_question(question, 
     value.update(messages=[question_message, answer_message], context_last_sequence=2,
         input_first_sequence=2, input_last_sequence=2, selected_input_message_ids=[answer_message['id']])
     assert voice_phone_facts(ManagedTurnRequest.model_validate(value)) == expected
+
+
+@pytest.mark.parametrize('answer,expected', [
+    ('375 29 123 42 02, пожалуйста.', ('+375291234202',)),
+    ('375 29, спасибо.', ()),
+])
+def test_dictated_answer_with_trailing_words_never_inherits_old_contact(answer, expected):
+    from services.voice_contact import voice_phone_facts
+    value = spoken_window('Телефон +375291234201.', 'Назовите телефон.', answer)
+    value['messages'][1].update(actor='AGENT', direction='OUTBOUND')
+    request = ManagedTurnRequest.model_validate(value)
+    assert voice_phone_facts(request, '+375291234299') == expected
 
 
 @pytest.mark.asyncio

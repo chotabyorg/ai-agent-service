@@ -21,6 +21,45 @@ from tests.test_voice_latency import profile
 
 @pytest.mark.integration
 @pytest.mark.parametrize('stream', [False, True])
+@pytest.mark.parametrize('followup', ['read', 'second_decision'])
+async def test_unrelated_voice_decision_restores_reads_without_unlocking_proposal(
+        api_client, db_session, monkeypatch, stream, followup):
+    from tests.test_booking_workflow import tool
+    from tests.test_voice_search_progress import install
+    value, args, calls, model, searches = await install(api_client, db_session, monkeypatch)
+    async with db_session() as db:
+        agent = await db.get(AgentTemplate, UUID(value['agent_id']))
+    monkeypatch.setattr(get_settings(), 'managed_voice_latency_profiles', [
+        profile(value, agent.model_name, stream)])
+    model.chat.completions.queue(preparation('booking_create', args, 'prepare'))
+    assert (await execute(api_client, value)).json()['status'] == 'DRAFT_READY'
+    async with db_session() as db:
+        proposal_id = str((await db.scalars(select(BusinessPlan))).one().id)
+    model.chat.completions.queue(build_llm_response(tool_calls=[decision(proposal_id, 'UNRELATED')]))
+    if followup == 'read':
+        model.chat.completions.queue(tool('resource_search', {}, 'read'),
+                                     build_llm_response(content='У нас работает Анна.'))
+    else:
+        model.chat.completions.queue(build_llm_response(tool_calls=[decision(proposal_id, 'CONFIRM')]))
+    request = later(ManagedTurnRequest.model_validate(value), 'Какие мастера у вас работают?')
+    result = (await execute(api_client, request.model_dump(mode='json'))).json()
+    names = {tool['function']['name'] for tool in model.chat.completions.calls[2]['tools']}
+    assert 'resource_search' in names and 'business_decide_proposal' not in names
+    if followup == 'read':
+        assert result['status'] == 'DRAFT_READY' and len(searches) == 1
+    else:
+        assert result['status'] == 'FAILED' and result['error_code'] == 'TOOL_SETUP_FAILED'
+        assert not searches
+    assert calls['execute'] == 0
+    async with db_session() as db:
+        plan = (await db.scalars(select(BusinessPlan))).one()
+        operation = (await db.scalars(select(BusinessOperation))).one()
+        assert str(plan.id) == proposal_id and plan.proposal_state == 'PREPARED'
+        assert operation.attempt_count == 0
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize('stream', [False, True])
 @pytest.mark.parametrize('intent,text,state,effects', [
     ('CONFIRM', 'Да, подтверждаю запись.', 'CONFIRMED', 1),
     ('CHANGE', 'Нет, измените время на час позже.', 'CANCELLED', 0),
