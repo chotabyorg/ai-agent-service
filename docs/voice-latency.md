@@ -104,6 +104,22 @@ CRM and TTS and is not a production latency claim.
 
 ## Native verification
 
+For a fresh confirmable pending Voice proposal with customer-only selected
+input, the first model request includes the same format guidance used by the
+existing bounded prose repair. It asks for exactly one semantic decision using
+the advertised intent schema. It does not force a named tool choice, interpret
+prose as consent, or change the runtime's proposal, permit or UNKNOWN checks.
+Stale proposals, mixed selected actors and text channels keep their prior first
+request behavior. A connection-check reply still has only UNRELATED available.
+
+The guidance is part of the mandatory prefix and counts toward the context
+budget before old unselected history is trimmed. It is replaced, rather than
+duplicated, if the one existing prose repair is needed. After the runtime has
+processed a semantic decision, the code-owned message is removed by identity so
+it cannot demand a hidden decision tool during an ordinary follow-up answer.
+This targets an avoidable model round trip; deterministic regression tests alone
+do not establish provider accuracy or a latency improvement.
+
 Tests can use an explicitly disposable PostgreSQL database on localhost with a
 name beginning `test_ai_`. Set `TEST_DATABASE_URL` and
 `TEST_DATABASE_DISPOSABLE=yes`, then run `python -m pytest -q`. The native fixture
