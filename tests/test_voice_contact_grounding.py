@@ -25,6 +25,10 @@ from tests.test_managed_turns import payload
     ('Телефон плюс триста семьдесят пять миллионов.', ()),
     ('Телефон +3752912342011234.', ()),
     ('Телефон плюс неизвестно сорок два.', ()),
+    ('Телефон +375291234201. Последняя цифра два.', ('+375291234202',)),
+    ('Телефон +375291234201, вернее +375291234202.', ('+375291234202',)),
+    ('Телефон +375291234201, нет, телефон плюс триста семьдесят пять.', ()),
+    ('Телефон +375291234201, точнее 375291234202.', ('+375291234202',)),
 ])
 def test_phone_facts_preserve_spoken_groups_and_reject_incomplete_values(text, expected):
     from services.voice_contact import voice_phone_facts, voice_phone_hint
@@ -35,6 +39,62 @@ def test_phone_facts_preserve_spoken_groups_and_reject_incomplete_values(text, e
     assert voice_phone_facts(request) == expected
     assert voice_phone_hint(request)
     assert request.model_dump_json() == original
+
+
+def spoken_window(*texts):
+    from uuid import uuid4
+    value = payload(channel='VOICE')
+    template = value['messages'][0]
+    value['messages'] = [dict(template, id=str(uuid4()), sequence=sequence, text=text)
+                         for sequence, text in enumerate(texts, 1)]
+    value.update(context_last_sequence=len(texts), input_first_sequence=len(texts),
+        input_last_sequence=len(texts), selected_input_message_ids=[value['messages'][-1]['id']])
+    return value
+
+
+@pytest.mark.parametrize('correction,expected', [
+    ('Последняя цифра два.', ('+375291234202',)),
+    ('Нет, последняя цифра — не один, а два.', ('+375291234202',)),
+    ('Последняя цифра это два, а не один.', ('+375291234202',)),
+    ('Замените последнюю цифру на ноль.', ('+375291234200',)),
+    ('В телефоне последняя цифра 2.', ('+375291234202',)),
+    ('Последняя цифра телефона два.', ('+375291234202',)),
+    ('Последняя цифра два или три.', ()),
+    ('Последние две цифры двадцать два.', ()),
+    ('Последняя цифра два, последняя цифра три.', ()),
+    ('Последняя цифра кода два.', ('+375291234201',)),
+])
+def test_customer_correction_supersedes_old_number_without_mutating_input(correction, expected):
+    from services.voice_contact import voice_phone_facts
+    value = spoken_window('Телефон +375291234201.', correction)
+    request = ManagedTurnRequest.model_validate(value)
+    original = request.model_dump_json()
+    assert voice_phone_facts(request, '+375291234299') == expected
+    assert request.model_dump_json() == original
+
+
+def test_corrections_require_contact_context_and_remain_inside_customer_boundary():
+    from services.voice_contact import voice_phone_facts
+    value = spoken_window('Телефон +375291234201.', 'Последняя цифра два.')
+    value.update(input_first_sequence=1, input_last_sequence=1,
+        selected_input_message_ids=[value['messages'][0]['id']])
+    assert voice_phone_facts(ManagedTurnRequest.model_validate(value)) == ('+375291234201',)
+    value.update(input_first_sequence=2, input_last_sequence=2,
+        selected_input_message_ids=[value['messages'][1]['id']])
+    value['messages'][1].update(actor='AGENT', direction='OUTBOUND')
+    assert voice_phone_facts(ManagedTurnRequest.model_validate(value)) == ('+375291234201',)
+    assert voice_phone_facts(ManagedTurnRequest.model_validate(
+        spoken_window('Последняя цифра два.')), '+375291234299') == ()
+    value = spoken_window('В телефоне последняя цифра два.')
+    assert voice_phone_facts(ManagedTurnRequest.model_validate(value), '+375291234299') == ('+375291234292',)
+
+
+def test_correction_chain_is_bounded_and_never_reverts_to_caller_id():
+    from services.voice_contact import voice_phone_facts
+    value = spoken_window('Телефон +375291234201.', 'Последняя цифра два.', 'Последняя цифра три.')
+    assert voice_phone_facts(ManagedTurnRequest.model_validate(value), '+375291234299') == ('+375291234203',)
+    value = spoken_window('Телефон +375291234201.', *(['Последняя цифра два.'] * 9))
+    assert voice_phone_facts(ManagedTurnRequest.model_validate(value), '+375291234299') == ()
 
 
 def test_only_customer_input_before_selected_boundary_supplies_phone():
@@ -85,14 +145,16 @@ def test_digits_alone_require_a_customer_answer_to_a_contact_question(question, 
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('text,phone', [
-    ('Запишите меня завтра в 13:00. Меня зовут Артем.', '+375000000000'),
-    ('Телефон плюс триста семьдесят пять двадцать девять сто двадцать три сорок два ноль один.', '+375291234001'),
-    ('Телефон +375291234201.', '+375291234001'),
-    ('Телефон +375291234201.', '+375291234201'),
-    ('Телефон плюс триста семьдесят пять двадцать девять сто двадцать три сорок два ноль один.', '+375291234201'),
+@pytest.mark.parametrize('text,phone,allowed', [
+    ('Запишите меня завтра в 13:00. Меня зовут Артем.', '+375000000000', False),
+    ('Телефон плюс триста семьдесят пять двадцать девять сто двадцать три сорок два ноль один.', '+375291234001', False),
+    ('Телефон +375291234201.', '+375291234001', False),
+    ('Телефон +375291234201.', '+375291234201', True),
+    ('Телефон плюс триста семьдесят пять двадцать девять сто двадцать три сорок два ноль один.', '+375291234201', True),
+    ('Телефон +375291234201. Последняя цифра два.', '+375291234201', False),
+    ('Телефон +375291234201. Последняя цифра два.', '+375291234202', True),
 ])
-async def test_only_grounded_phone_can_reach_customer_lookup(monkeypatch, text, phone):
+async def test_only_grounded_phone_can_reach_customer_lookup(monkeypatch, text, phone, allowed):
     value = payload(channel='VOICE')
     value['messages'][0]['text'] = text
     request = ManagedTurnRequest.model_validate(value)
@@ -116,7 +178,7 @@ async def test_only_grounded_phone_can_reach_customer_lookup(monkeypatch, text, 
         start_at='2099-01-01T12:00:00Z',
         customer=dict(display_name='Артем', identity=dict(kind='PHONE', value=phone)))
     result = await prepare_booking_customer_reuse(runtime, 'booking_create', args)
-    if phone == '+375291234201':
+    if allowed:
         assert result is None and len(calls) == 1
         assert calls[0][0][2] == {'identity': {'kind': 'PHONE', 'value': phone}}
     else:
@@ -133,6 +195,8 @@ async def test_only_grounded_phone_can_reach_customer_lookup(monkeypatch, text, 
     'Запишите меня завтра. Меня зовут Влад.',
     'Телефон +375291112234.',
     'Телефон +375291112233 или +375291112234.',
+    'Телефон +375291112233. Последняя цифра четыре.',
+    'Телефон +375291112233. Последняя цифра четыре или пять.',
 ])
 async def test_voice_contact_refusal_cannot_reserve_a_plan_or_lookup_another_customer(
         api_client, db_session, monkeypatch, tool, speech):
