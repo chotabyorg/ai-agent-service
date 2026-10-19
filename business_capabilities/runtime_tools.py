@@ -3,6 +3,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
+from core.managed_wait_diagnostics import observe_managed_wait
 from models.business import BusinessOperation
 from schemas.business import BusinessAction, BusinessSafetyError, BusinessToolResult
 from business_capabilities.registry import CAPABILITIES, WIRE_REGISTRY, Risk, tool_schema
@@ -271,14 +272,23 @@ async def _call_capability_impl(runtime, name, arguments):
             if runtime.collector.snapshot():
                 raise BusinessSafetyError('FACTS_UNAVAILABLE', processing_status='UNKNOWN') from None
             return BusinessToolResult(tool_payload=failure(error.code))
-    gate = await runtime.execution_guard(allow_incomplete=True)
+    # Each guarded READ gets a bounded local observation ordinal. These spans
+    # observe the existing calls; no argument, guard, transaction or timeout is
+    # shared, skipped or moved. Beyond the diagnostic bound execution continues.
+    read_step = getattr(runtime, '_read_observation_step', 0) + 1
+    runtime._read_observation_step = read_step
+    execution = getattr(runtime, 'execution', None) if read_step <= 20 else None
+    with observe_managed_wait(execution, 'READ_PRE_GUARD', step=read_step):
+        gate = await runtime.execution_guard(allow_incomplete=True)
     if gate is not None:
         return gate
     # Recheck current owner configuration under the existing short admission lock
     # order. Provider independently rechecks grant/tenant/projection authority.
-    await _authorize_read(runtime, capability.id)
+    with observe_managed_wait(execution, 'READ_AUTHORITY', step=read_step):
+        await _authorize_read(runtime, capability.id)
     try:
-        result = await runtime._adapter_call('read', runtime.scope, action)
+        with observe_managed_wait(execution, 'READ_ADAPTER', step=read_step):
+            result = await runtime._adapter_call('read', runtime.scope, action)
     except BusinessRuntimeError as error:
         runtime.observe_business_diagnostic(stage='TOOL_READ', capability=capability.id,
             refusal_category=_REFUSAL_BY_ERROR.get(error.code, 'OTHER'))
@@ -291,7 +301,8 @@ async def _call_capability_impl(runtime, name, arguments):
         runtime.observe_business_diagnostic(stage='TOOL_READ', capability=capability.id,
             refusal_category='LOOKUP_INVALID')
         raise
-    gate = await runtime.execution_guard(allow_incomplete=True)
+    with observe_managed_wait(execution, 'READ_POST_GUARD', step=read_step):
+        gate = await runtime.execution_guard(allow_incomplete=True)
     return gate or BusinessToolResult(tool_payload=result)
 
 
