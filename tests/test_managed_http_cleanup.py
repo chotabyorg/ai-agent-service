@@ -179,7 +179,7 @@ def bare_stream(connection):
     return stream
 
 
-def helper_clients(monkeypatch, server, mode, *, fault_client=1, patch=True):
+def helper_clients(monkeypatch, server, mode, *, fault_client=1, patch=True, connect_timeout=None):
     original_client, original_transport = httpx.AsyncClient, httpx.AsyncHTTPTransport
     state = SimpleNamespace(clients=[], transports=[], connections=[], sockets=[], events=[],
                             close_started=asyncio.Event(), close_cancelled=False)
@@ -229,6 +229,9 @@ def helper_clients(monkeypatch, server, mode, *, fault_client=1, patch=True):
     def create(**kwargs):
         assert kwargs.get("trust_env") is False
         kwargs.pop("transport", None)
+        if connect_timeout is not None:
+            kwargs["timeout"] = httpx.Timeout(kwargs["timeout"])
+            kwargs["timeout"].connect = connect_timeout
         transport = FaultTransport(verify=server.verify, trust_env=False)
         transport.fault = len(state.clients) + 1 == fault_client and mode != "success"
         client = original_client(transport=transport, **kwargs)
@@ -443,15 +446,18 @@ async def test_operation_close_failure_before_pool_snapshot_retains_actual_socke
         monkeypatch.setattr(settings, "knowledge_base_service_url", server.origin)
         monkeypatch.setattr(settings, "privacy_filter_base_url", server.origin)
         monkeypatch.setattr(settings, "llm_base_url", server.origin + "/v1")
-        state = helper_clients(monkeypatch, server, "success", patch=family != "direct")
+        # This case exercises close after an acquired socket's READ/protocol
+        # failure. A short TCP/TLS setup timeout can bypass that fault entirely.
+        state = helper_clients(monkeypatch, server, "success", patch=family != "direct", connect_timeout=2)
         if family == "direct":
-            state.operation_timeout = .05
+            state.operation_timeout = httpx.Timeout(.05, connect=2)
             direct_sdk(monkeypatch, state)
         operation_close_fault(monkeypatch, state, close_fault,
                               fault_connection=2 if family == "privacy" and post_tool else 1)
         before = set(asyncio.all_tasks())
         response = await execute(api_client, value)
         result = response.json()
+        assert server.received.is_set() and state.sockets, "Exercise the acquired-socket fault, not connect timeout"
         assert result["status"] == ("UNKNOWN" if post_tool else "FAILED")
         assert result["error_code"] == "TOOL_CLEANUP_FAILED"
         assert result["draft_text"] is None
@@ -465,6 +471,28 @@ async def test_operation_close_failure_before_pool_snapshot_retains_actual_socke
         await assert_released(state, server, before, db_probe)
         captured = capfd.readouterr()
         assert SENTINEL not in response.text + caplog.text + captured.out + captured.err
+
+
+@pytest.mark.integration
+async def test_slow_connect_still_exercises_acquired_socket_close_fault(
+        api_client, db_session, db_probe, monkeypatch, model, tools, tmp_path, caplog, capfd):
+    """A 75ms connect must not consume this fixture's 50ms READ deadline."""
+    from httpcore import ConnectTimeout
+    from httpcore._backends.anyio import AnyIOBackend
+    original_connect = AnyIOBackend.connect_tcp
+
+    async def slow_connect(backend, *args, **kwargs):
+        try:
+            with anyio.fail_after(kwargs.get("timeout")):
+                await asyncio.sleep(.075)
+                return await original_connect(backend, *args, **kwargs)
+        except TimeoutError as error:
+            raise ConnectTimeout() from error
+
+    monkeypatch.setattr(AnyIOBackend, "connect_tcp", slow_connect)
+    await test_operation_close_failure_before_pool_snapshot_retains_actual_socket(
+        api_client, db_session, db_probe, monkeypatch, model, tools, tmp_path, caplog, capfd,
+        family="kb", post_tool=False, operation_error="read", close_fault="raise", tls=True)
 
 
 @pytest.mark.integration

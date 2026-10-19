@@ -21,6 +21,12 @@ fresh provider facts and unresolved-effect state. Short database locks never spa
 provider/model network calls. Configuration intents block business dispatch until
 the remote grant change is acknowledged and the local state is settled.
 
+The two catalog revisions memoize only code-owned schema/profile/contract
+metadata on their immutable registration instance. Replacing a registration
+recomputes both values; the canonical bytes and retained-catalog acceptance
+policy stay the same. Live bindings, configuration generations, provider facts,
+permissions, permits and receipts are still checked on every existing path.
+
 ## Capabilities and product policy
 
 The eighteen canonical actions use provider-neutral underscore tool names (for
