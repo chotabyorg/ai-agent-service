@@ -591,6 +591,15 @@ class LLMService:
                 raise ManagedExecutionError("INVALID_RESULT")
             tool_choice = ({"type": "function", "function": {"name": "business_decide_proposal"}}
                            if required_proposal_id is not None else None)
+            if required_proposal_id is not None and managed_request.channel == 'VOICE':
+                # Some Voice providers fail even buffered named tool_choice.
+                # Offer only the required semantic tool. The strict decision
+                # shape, selected proposal and runtime authority below still
+                # reject prose, other tools and unauthorized confirmations.
+                openai_tools = [tool for tool in openai_tools
+                               if tool['function']['name'] == 'business_decide_proposal']
+                tool_registry = {'business_decide_proposal': None}
+                tool_choice = None
             preparation_schemas = {}
             if runtime:
                 from services.managed_preparation import PROPOSAL_TOOLS, SCHEMA_VALIDATED_TOOLS, PreparationSchema
@@ -1052,6 +1061,24 @@ class LLMService:
                             self._check_managed_envelope(
                                 agent, messages, openai_tools, tool_choice=tool_choice,
                                 request=managed_request)
+                        elif (managed_request.channel == 'VOICE'
+                              and func_name == 'business_decide_proposal'
+                              and business_result.tool_payload.get('status') == 'UNCHANGED'
+                              and business_result.tool_payload.get('intent') == 'UNRELATED'):
+                            # The pending proposal stays frozen, but unrelated
+                            # questions may use the ordinary guarded read tools.
+                            # No second decision about it is available this turn.
+                            openai_tools = [tool for tool in booking_tools(
+                                runtime.business.openai_tools(), enabled=voice_booking_only)
+                                if tool['function']['name'] not in (
+                                    retired_voice_tools | {'business_decide_proposal'})]
+                            tool_registry = {tool['function']['name']: None for tool in openai_tools}
+                            preparation_schemas = {
+                                tool['function']['name']: PreparationSchema(tool['function']['parameters'])
+                                for tool in openai_tools
+                                if tool['function']['name'] in SCHEMA_VALIDATED_TOOLS}
+                            self._check_managed_envelope(
+                                agent, messages, openai_tools, request=managed_request)
                         # Durable normalized replay/conflict owns business
                         # identity; the legacy raw-string loop guard does not.
                         continue
@@ -1153,7 +1180,8 @@ class LLMService:
                 "используй его без повторного вопроса. Если телефон ещё не указан и нужен для записи, "
                 "коротко попроси его назвать. Используй именно продиктованные цифры."
             )
-        return suffix
+        from services.voice_contact import voice_phone_hint
+        return suffix + voice_phone_hint(request, caller_phone)
 
     def _managed_voice_profile(self, agent, *, request=None):
         model = agent.model_name or self.settings.llm_default_model

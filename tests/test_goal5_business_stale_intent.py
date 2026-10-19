@@ -357,7 +357,13 @@ async def test_voice_profile_bytes_are_included_in_stale_change_refresh_budget(
         without_profile = len(json.dumps(service._managed_envelope(
             agent, messages, tools, tool_choice=tool_choice, request=None),
             ensure_ascii=False, allow_nan=False).encode("utf-8"))
-        if tool_choice is None and not refresh_observations:
+        tool_names = {tool["function"]["name"] for tool in tools}
+        if "business_propose" in tool_names and not refresh_observations:
+            # Voice deliberately omits provider-specific forced tool_choice
+            # while the pending decision is still mandatory. Identify the
+            # refresh by its newly available proposal tool instead.
+            assert len(model.chat.completions.calls) == 1
+            assert tool_choice is None
             # The limit is set just below this call's profile envelope, so the
             # voice profile's extra bytes are exactly what pushes it over.
             budget = max(1024, without_profile)
@@ -399,6 +405,9 @@ async def test_voice_profile_bytes_are_included_in_stale_change_refresh_budget(
     assert expected_sizes["budget"] < expected_sizes["with_profile"]
     assert len(refresh_observations) == 1 and refresh_observations[0] is request
     assert len(model.chat.completions.calls) == 1
+    assert [tool["function"]["name"]
+            for tool in model.chat.completions.calls[0]["tools"]] == [
+        "business_decide_proposal"]
     assert model.chat.completions.calls[0]["extra_body"] == {
         "reasoning": {"effort": "none"}, "provider": {"sort": "latency"}}
     assert provider.posts == 0 and port.permit_requests == []
