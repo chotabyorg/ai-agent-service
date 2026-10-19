@@ -238,19 +238,24 @@ class BusinessRepository:
         return await session.scalar(select(BusinessScope).filter_by(
             **values, conversation_id=value.conversation_id))
 
-    async def _authority(self, session, value, grant, *, create_scope=False):
+    async def _authority(self, session, value, grant, *, create_scope=False, shared_config_locks=False):
+        """Reload complete-scope authority while excluding config writers."""
+        # Only read authorization opts into compatible config-reader locks.
+        # Scope creation and all existing write/admission callers stay exclusive.
+        if shared_config_locks and create_scope:
+            raise ValueError('Shared config locks cannot create a scope')
         values = tenant_values(value, grant)
         if session.info.get("business_nowait"):
             await session.execute(text("SET LOCAL lock_timeout = '250ms'"))
         agent = await session.scalar(select(AgentTemplate).where(
             AgentTemplate.id == value.agent_id, AgentTemplate.user_id == grant.agent_owner_id)
-            .with_for_update(nowait=session.info.get("business_nowait", False)).execution_options(populate_existing=True))
+            .with_for_update(read=shared_config_locks, nowait=session.info.get("business_nowait", False)).execution_options(populate_existing=True))
         if agent is None or not agent.is_active:
             raise BusinessSafetyError("AUTHORITY_DENIED")
         from business_capabilities.connections import lock_agent_connection, validate_connection_authority
-        await lock_agent_connection(session, value.agent_id)
+        await lock_agent_connection(session, value.agent_id, shared=shared_config_locks)
         binding = await session.scalar(select(BusinessBinding).filter_by(**values, active=True)
-                                       .with_for_update(nowait=session.info.get("business_nowait", False)).execution_options(populate_existing=True))
+                                       .with_for_update(read=shared_config_locks, nowait=session.info.get("business_nowait", False)).execution_options(populate_existing=True))
         if binding is None:
             raise BusinessSafetyError("BINDING_UNAVAILABLE")
         if binding.adapter_id == 'chotacrm':

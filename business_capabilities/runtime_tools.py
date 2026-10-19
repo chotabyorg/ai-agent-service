@@ -296,17 +296,19 @@ async def _call_capability_impl(runtime, name, arguments):
 
 
 async def _authorize_read(runtime, capability_id):
-    """Wait briefly for shared config, then reload authority before a CRM read.
+    """Reload authority under compatible config-reader locks before a CRM read.
 
     No provider call or write reservation occurs inside this transaction. Keep
-    the existing lock order and fresh authority checks; only reads tolerate a
-    short config-row wait. A timeout fails closed without replaying the tool.
+    the existing lock order and fresh authority checks. Shared config locks
+    exclude configuration writers without making independent reads wait for
+    one another. A bounded writer wait still fails closed, without a retry.
     """
     try:
         async with runtime.repository._session() as db:
             async with db.begin():
                 await db.execute(text("SET LOCAL lock_timeout = '250ms'"))
-                binding, _ = await runtime.repository._authority(db, runtime.request, runtime.grant)
+                binding, _ = await runtime.repository._authority(
+                    db, runtime.request, runtime.grant, shared_config_locks=True)
                 if capability_id not in binding.enabled_capabilities:
                     raise BusinessSafetyError('CAPABILITY_DISABLED')
     except DBAPIError as error:
