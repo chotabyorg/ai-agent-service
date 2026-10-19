@@ -16,7 +16,10 @@ _PHASES = frozenset({'MODEL_HTTP', 'EXECUTION_GUARD', 'FINAL_GUARD', 'RETRY_WAIT
                     'BUSINESS_BINDING_SYNC', 'BUSINESS_OPEN_CONTEXT', 'BUSINESS_RECOVER_ATTEMPTS',
                     'BUSINESS_COLLECT_REFS', 'BUSINESS_INVALIDATE_PROPOSAL', 'BUSINESS_SELECT_RECOVERY',
                     'BUSINESS_CLOSE_RECOVERY', 'READ_PRE_GUARD', 'READ_AUTHORITY',
-                    'READ_ADAPTER', 'READ_POST_GUARD'})
+                    'READ_ADAPTER', 'READ_POST_GUARD', 'BUSINESS_CONFIRM_REPOSITORY',
+                    'BUSINESS_EFFECT_ACQUIRE', 'BUSINESS_EFFECT_PERMIT', 'BUSINESS_EFFECT_BIND',
+                    'BUSINESS_DISPATCH_CLAIM', 'BUSINESS_FACTS_ADAPTER',
+                    'BUSINESS_PROVIDER_EXECUTE', 'BUSINESS_RECEIPT_FINALIZE'})
 _STATES = frozenset({'START', 'COMPLETED', 'ERROR', 'CANCELLED', 'TIMEOUT'})
 _MAX_MS = 2147483647
 
@@ -73,7 +76,7 @@ def observe_managed_wait(runtime, phase, *, step, attempt=1):
         state = 'CANCELLED' if isinstance(error, asyncio.CancelledError) else 'ERROR'
         try:
             from services.managed_tools import ManagedExecutionError
-            if (isinstance(error, APITimeoutError)
+            if (isinstance(error, (APITimeoutError, TimeoutError))
                     or isinstance(error, ManagedExecutionError) and error.code == 'EXECUTION_TIMEOUT'):
                 state = 'TIMEOUT'
             elif isinstance(error.__cause__, httpx.TimeoutException):
