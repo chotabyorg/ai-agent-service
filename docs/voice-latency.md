@@ -123,3 +123,25 @@ An initial six-request synthetic comparison (2026-10-15, invented salon, about
 seconds and scoped options 2.184/1.466/1.319 seconds. Requests alternated modes;
 the small sample and provider/cache variance do not prove a production SLA.
 No customer prompt, history, transcript or knowledge-base context was used.
+
+## Pending decision admission diagnostics
+
+For a current pending proposal, a copied model-facing decision schema advertises
+only that proposal ID. It does not preselect the customer's intent, rewrite model
+arguments or modify the canonical tool registry. A connection-check reply still
+offers only `UNRELATED`. Exact proposal matching, one-call admission, the existing
+prose-only repair bound, execution guards and later customer consent stay required.
+
+Rejected pending responses emit only closed field/rule categories through the
+existing managed Business log boundary. These distinguish call shape, target ID,
+argument parsing, assistant-message serialization and envelope validation before
+tool dispatch. They contain no proposal IDs, arguments, reasoning or conversation
+content; observation failures do not change execution results or error codes.
+
+The historical five-call failure had `TOOL_CALLS` telemetry and `INVALID_RESULT`
+before any tool timing or effect attempt. Its raw response was not retained, so
+the particular failing field is unknown. This change does not prove that a wrong
+proposal ID caused that failure. Native regressions, full CI and new functional
+booking/cancellation acceptance remain required. Measure provider schema adherence,
+prompt cache coverage and latency; no speedup or full model-quality result follows
+from the schema change alone.

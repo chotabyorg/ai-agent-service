@@ -28,6 +28,9 @@ from services.managed_tools import (ManagedExecutionError, inspect_managed_tool_
                                     parse_managed_tool_arguments, _bounded_json)
 from services.managed_http_cleanup import close_managed_helper, own_managed_http
 from services.managed_reasoning import managed_reasoning_fields
+from services.pending_decision_contract import (
+    pending_decision_tools, validate_pending_decision, observe_pending_rejection,
+)
 from services.managed_completion import select_managed_completion, observe_managed_completion, observe_model_failure, is_stopped_prose
 from services.completion_timing import CompletionTiming
 from services.managed_streaming import complete_with_partials
@@ -579,15 +582,12 @@ class LLMService:
             if voice_profile is not None:
                 from services.voice_reply_style import replying_to_connection_check
                 presence_reply = replying_to_connection_check(managed_request)
-            if required_proposal_id is not None and presence_reply:
-                # Offer no CONFIRM choice for a bare answer to the connection
-                # check. The existing runtime still interprets UNRELATED and
-                # owns the pending proposal and all dispatch authority.
-                for tool in openai_tools:
-                    if tool['function']['name'] == 'business_decide_proposal':
-                        import copy
-                        tool['function']['parameters'] = copy.deepcopy(tool['function']['parameters'])
-                        tool['function']['parameters']['properties']['intent']['enum'] = ['UNRELATED']
+            if required_proposal_id is not None:
+                # The model can choose the customer's intent, but the only
+                # admissible target is the current runtime's pending proposal.
+                # The strict post-response ID check remains authoritative.
+                openai_tools = pending_decision_tools(
+                    openai_tools, required_proposal_id, presence_reply=presence_reply)
             if required_proposal_id is not None and "business_decide_proposal" not in tool_registry:
                 raise ManagedExecutionError("INVALID_RESULT")
             tool_choice = ({"type": "function", "function": {"name": "business_decide_proposal"}}
@@ -859,19 +859,8 @@ class LLMService:
                         self._check_managed_envelope(agent, messages, openai_tools,
                                                      tool_choice=tool_choice, request=managed_request)
                         continue
-                    if selected.branch != "TOOL_CALLS" or type(calls) is not list or len(calls) != 1:
-                        raise ManagedExecutionError("INVALID_RESULT")
-                    call = calls[0]
-                    function = getattr(call, "function", None)
-                    if (getattr(call, "type", None) != "function"
-                            or not isinstance(getattr(call, "id", None), str) or not call.id
-                            or getattr(function, "name", None) != "business_decide_proposal"):
-                        raise ManagedExecutionError("INVALID_RESULT")
-                    decision_args = parse_managed_tool_arguments(getattr(function, "arguments", None))
-                    if (set(decision_args) != {"proposal_id", "intent"}
-                            or decision_args["proposal_id"] != required_proposal_id
-                            or (presence_reply and decision_args['intent'] != 'UNRELATED')):
-                        raise ManagedExecutionError("INVALID_RESULT")
+                    validate_pending_decision(selected, required_proposal_id,
+                        presence_reply=presence_reply, runtime=runtime)
                 if (selected is not None and selected.branch != "TOOL_CALLS") or (
                         selected is None and not getattr(message, "tool_calls", None)):
                     if runtime and runtime.business is not None:
@@ -970,10 +959,21 @@ class LLMService:
                         runtime.business._booking_workflow_started = True
                     seen_tool_ids.update(call.id for call in message.tool_calls
                         if isinstance(getattr(call, "id", None), str))
-                messages.append(self._assistant_message_to_dict(message, managed=runtime is not None))
+                try:
+                    assistant_message = self._assistant_message_to_dict(message, managed=runtime is not None)
+                except ManagedExecutionError:
+                    if required_proposal_id is not None:
+                        observe_pending_rejection(runtime, 'format', 'assistant_message')
+                    raise
+                messages.append(assistant_message)
                 if runtime:
-                    self._check_managed_envelope(agent, messages, openai_tools,
-                                                 tool_choice=tool_choice, request=managed_request)
+                    try:
+                        self._check_managed_envelope(agent, messages, openai_tools,
+                                                     tool_choice=tool_choice, request=managed_request)
+                    except ManagedExecutionError:
+                        if required_proposal_id is not None:
+                            observe_pending_rejection(runtime, 'schema', 'envelope')
+                        raise
 
                 set_chat_failure_stage(ChatFailureStage.TOOL_EXECUTION)
                 for tool_call in message.tool_calls:
