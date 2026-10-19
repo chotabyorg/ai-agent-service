@@ -6,6 +6,7 @@ from uuid import UUID
 
 import anyio
 
+from core.managed_wait_diagnostics import observe_managed_wait
 from schemas.business import (AttemptRejected, BusinessAction, BusinessSafetyError, BusinessToolResult,
                               DefinitiveNoEffect, MaterialFacts, ProvenFailedNoEffect,
                               ProvenSucceeded, StillUnknown, SucceededReceipt, fingerprint)
@@ -554,18 +555,25 @@ class BusinessRuntime:
         empty = {"pending": None}
         if self.registration.adapter_id != 'chotacrm':
             return empty
-        plan = await self.repository.latest_completed_booking(self.request, self.grant, self.registration)
+        # Distinguish repeated projections within one turn without adding content
+        # to diagnostics. The existing observer drops steps outside its bound.
+        step = getattr(self, '_context_observation_step', 0) + 1
+        self._context_observation_step = step
+        execution = getattr(self, 'execution', None)
+        with observe_managed_wait(execution, 'CONTEXT_REPOSITORY', step=step):
+            plan = await self.repository.latest_completed_booking(self.request, self.grant, self.registration)
         if plan is None:
             return empty
         operation = plan.operations[0]
         try:
-            from business_capabilities.runtime_tools import completed_booking_reply
-            receipt = SucceededReceipt.model_validate(operation.receipt_evidence)
-            _, digest = self.repository._evidence(receipt, operation.command)
-            if (digest != operation.receipt_fingerprint or receipt.receipt_id != operation.receipt_id
-                    or receipt.object_id != operation.object_id):
-                return empty
-            summary = completed_booking_reply(operation, receipt)
+            with observe_managed_wait(execution, 'CONTEXT_RECEIPT', step=step):
+                from business_capabilities.runtime_tools import completed_booking_reply
+                receipt = SucceededReceipt.model_validate(operation.receipt_evidence)
+                _, digest = self.repository._evidence(receipt, operation.command)
+                if (digest != operation.receipt_fingerprint or receipt.receipt_id != operation.receipt_id
+                        or receipt.object_id != operation.object_id):
+                    return empty
+                summary = completed_booking_reply(operation, receipt)
         except Exception:
             return empty
         context = {"pending": None, "recent_booking": {
@@ -573,12 +581,12 @@ class BusinessRuntime:
         # One bounded, ordinary READ avoids asking the model to rediscover its
         # own just-confirmed booking among unrelated cancelled appointments.
         # No historical revision or provider effect is reused here.
-        current = await self._current_booking_prompt_context(receipt.object_id)
+        current = await self._current_booking_prompt_context(receipt.object_id, diagnostic_step=step)
         if current is not None:
             context['current_booking'] = current
         return context
 
-    async def _current_booking_prompt_context(self, booking_ref):
+    async def _current_booking_prompt_context(self, booking_ref, *, diagnostic_step=1):
         """Hydrate only a validated own reference through the normal READ guards."""
         from business_capabilities.results import Booking
         from services.prompt_composer import CurrentBookingPrompt
@@ -588,7 +596,9 @@ class BusinessRuntime:
         # budget. Parent cancellation and managed deadlines still propagate.
         try:
             with anyio.move_on_after(2) as bounded:
-                result = await self.call_tool('booking_get', {'booking_ref': booking_ref})
+                with observe_managed_wait(getattr(self, 'execution', None),
+                                          'CONTEXT_BOOKING_READ', step=diagnostic_step):
+                    result = await self.call_tool('booking_get', {'booking_ref': booking_ref})
         except ManagedExecutionError:
             raise
         except Exception:

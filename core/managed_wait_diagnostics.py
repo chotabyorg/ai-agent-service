@@ -11,7 +11,8 @@ import httpx
 from openai import APITimeoutError
 
 _IDENTITY = object()
-_PHASES = frozenset({'MODEL_HTTP', 'EXECUTION_GUARD', 'FINAL_GUARD', 'RETRY_WAIT'})
+_PHASES = frozenset({'MODEL_HTTP', 'EXECUTION_GUARD', 'FINAL_GUARD', 'RETRY_WAIT',
+                    'CONTEXT_REPOSITORY', 'CONTEXT_RECEIPT', 'CONTEXT_BOOKING_READ'})
 _STATES = frozenset({'START', 'COMPLETED', 'ERROR', 'CANCELLED', 'TIMEOUT'})
 _MAX_MS = 2147483647
 
