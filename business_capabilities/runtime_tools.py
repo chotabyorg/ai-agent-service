@@ -1,6 +1,8 @@
 """Canonical tool surface, separate from durable business admission mechanics."""
 from datetime import datetime
 from zoneinfo import ZoneInfo
+from sqlalchemy import text
+from sqlalchemy.exc import DBAPIError
 from models.business import BusinessOperation
 from schemas.business import BusinessAction, BusinessSafetyError, BusinessToolResult
 from business_capabilities.registry import CAPABILITIES, WIRE_REGISTRY, Risk, tool_schema
@@ -212,6 +214,7 @@ async def call_capability(runtime, name, arguments, *, lookup_source='MODEL'):
 
 
 async def _call_capability_impl(runtime, name, arguments):
+    """Validate the selected action and recheck authority before CRM access."""
     capability = WIRE_REGISTRY.get(name)
     if capability is None:
         if name == 'business_propose':
@@ -273,11 +276,7 @@ async def _call_capability_impl(runtime, name, arguments):
         return gate
     # Recheck current owner configuration under the existing short admission lock
     # order. Provider independently rechecks grant/tenant/projection authority.
-    async with runtime.repository._session(decisive=True) as db:
-        async with db.begin():
-            binding, _ = await runtime.repository._authority(db, runtime.request, runtime.grant)
-            if capability.id not in binding.enabled_capabilities:
-                raise BusinessSafetyError('CAPABILITY_DISABLED')
+    await _authorize_read(runtime, capability.id)
     try:
         result = await runtime._adapter_call('read', runtime.scope, action)
     except BusinessRuntimeError as error:
@@ -294,6 +293,26 @@ async def _call_capability_impl(runtime, name, arguments):
         raise
     gate = await runtime.execution_guard(allow_incomplete=True)
     return gate or BusinessToolResult(tool_payload=result)
+
+
+async def _authorize_read(runtime, capability_id):
+    """Wait briefly for shared config, then reload authority before a CRM read.
+
+    No provider call or write reservation occurs inside this transaction. Keep
+    the existing lock order and fresh authority checks; only reads tolerate a
+    short config-row wait. A timeout fails closed without replaying the tool.
+    """
+    try:
+        async with runtime.repository._session() as db:
+            async with db.begin():
+                await db.execute(text("SET LOCAL lock_timeout = '250ms'"))
+                binding, _ = await runtime.repository._authority(db, runtime.request, runtime.grant)
+                if capability_id not in binding.enabled_capabilities:
+                    raise BusinessSafetyError('CAPABILITY_DISABLED')
+    except DBAPIError as error:
+        if not runtime.repository._contention(error):
+            raise
+        raise BusinessSafetyError('ADMISSION_CONTENDED') from None
 
 
 async def successful_results(runtime, plan):
