@@ -1048,13 +1048,17 @@ class LLMService:
                         if next_reuse is not None:
                             messages.append({'role': 'system', 'content':
                                 customer_reuse_instruction(func_name, next_reuse)})
-                        if voice_profile is not None and func_name == "resource_search":
+                        if voice_profile is not None and func_name in {"resource_search", "booking_search_options"}:
                             # Count the actual search, including its cursor, not
                             # the tool name: a broader query or next page is progress.
                             # Validate/normalize only AFTER the ordinary guarded read.
                             from business_capabilities.registry import normalize_arguments
-                            signature = json.dumps(normalize_arguments("resource.search", func_args),
-                                                   sort_keys=True, ensure_ascii=False)
+                            if func_name == 'booking_search_options':
+                                from services.booking_search_options import normalize_search_arguments
+                                search_arguments = normalize_search_arguments(func_args)
+                            else:
+                                search_arguments = normalize_arguments("resource.search", func_args)
+                            signature = json.dumps(search_arguments, sort_keys=True, ensure_ascii=False)
                             voice_search_counts[signature] = voice_search_counts.get(signature, 0) + 1
                             if voice_search_counts[signature] >= self.VOICE_SEARCH_REPEAT_LIMIT:
                                 # Keep both real results in context, but stop advertising

@@ -50,6 +50,9 @@ def canonical_tools(runtime, controls):
     if runtime.recovery_mode:
         result.append(runtime._status_tool())
         return result
+    from services.booking_search_options import REQUIRED_CAPABILITIES, search_tool
+    if REQUIRED_CAPABILITIES <= {c.id for c in readable}:
+        result.append(search_tool())
     if not runtime.effect_eligible:
         return result
     # Model never chooses a provider or arbitrary plan. The one supported bundle
@@ -73,7 +76,16 @@ def canonical_tools(runtime, controls):
     if actions:
         propose['function']['parameters']['properties']['actions'].update(maxItems=2, items={'oneOf': actions})
         result.append(propose)
-    result.extend(t for t in controls if t['function']['name'] == 'business_decide_proposal')
+    for decision in controls:
+        if decision['function']['name'] == 'business_decide_proposal':
+            decision['function']['description'] = (
+                'Interpret the complete selected customer reply about this frozen proposal. '
+                'CONFIRM means unchanged acceptance of its action, including acceptance of a booking.cancel proposal. '
+                'REJECT means refusing the proposal: it retires only the proposal and never cancels an appointment. '
+                'CHANGE means requesting a modification; UNRELATED means another topic. '
+                'A request to cancel an appointment is not a rejection of a cancellation proposal. '
+                'Never supply new action contents or use initial intent as later consent.')
+            result.append(decision)
     return result
 
 
@@ -216,6 +228,9 @@ async def call_capability(runtime, name, arguments, *, lookup_source='MODEL'):
 
 async def _call_capability_impl(runtime, name, arguments):
     """Validate the selected action and recheck authority before CRM access."""
+    from services.booking_search_options import TOOL_NAME, search_options
+    if name == TOOL_NAME:
+        return await search_options(runtime, arguments)
     capability = WIRE_REGISTRY.get(name)
     if capability is None:
         if name == 'business_propose':
@@ -303,7 +318,18 @@ async def _call_capability_impl(runtime, name, arguments):
         raise
     with observe_managed_wait(execution, 'READ_POST_GUARD', step=read_step):
         gate = await runtime.execution_guard(allow_incomplete=True)
-    return gate or BusinessToolResult(tool_payload=result)
+    if gate is not None:
+        return gate
+    if capability.id == 'booking.get' and result.get('status') == 'ERROR':
+        code = result.get('error', {}).get('code')
+        if code == 'NOT_FOUND':
+            reply = 'Не удалось найти эту запись. Уточните, пожалуйста, какую запись нужно проверить.'
+        else:
+            reply = 'Сейчас не удаётся проверить запись. Попробуйте, пожалуйста, чуть позже.'
+        # A failed read proves neither absence nor the historical status. End
+        # this turn with an honest reply before the model can invent either.
+        return BusinessToolResult(tool_payload=result, safe_draft=reply)
+    return BusinessToolResult(tool_payload=result)
 
 
 async def _authorize_read(runtime, capability_id):

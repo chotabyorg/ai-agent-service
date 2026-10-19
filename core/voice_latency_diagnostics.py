@@ -12,7 +12,7 @@ _TEXT_IDENTITY = object()
 _PHASES = frozenset({"MODEL", "TOOL", "PREPARE", "SETUP", "BUSINESS", "CONTEXT", "KNOWLEDGE"})
 _TOOLS = frozenset(WIRE_REGISTRY) | {
     "business_propose", "business_decide_proposal", "business_confirm",
-    "business_execute_plan",
+    "business_execute_plan", "booking_search_options",
 }
 
 
