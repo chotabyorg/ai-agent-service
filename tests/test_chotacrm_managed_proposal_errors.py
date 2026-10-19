@@ -381,6 +381,9 @@ async def install_managed_crm(api_client, db_session, monkeypatch, response_stat
         "start_at": start,
         "customer": {"display_name": "Влад", "identity": {"kind": "PHONE", "value": "+375291112233"}},
     }
+    if channel == "VOICE":
+        # The scripted booking uses facts actually supplied by the caller.
+        value["messages"][0]["text"] = "Запишите меня. Меня зовут Влад, телефон +375291112233."
     return value, arguments, registry, calls, effect_port, model
 
 

@@ -240,6 +240,19 @@ async def prepare_booking_customer_reuse(runtime, name, arguments):
         _observe_preparation(runtime, name=name, refusal='AUTHORITY_BLOCKED')
         return gate
 
+    identity = customer['identity']
+    if identity['kind'] == 'PHONE':
+        from services.voice_contact import voice_phone_facts
+        request = getattr(runtime, 'request', None)
+        caller = getattr(getattr(runtime, 'execution', None), 'caller_phone', '')
+        phones = voice_phone_facts(request, caller)
+        if phones is not None and (len(phones) != 1 or identity['value'] != phones[0]):
+            _observe_preparation(runtime, name=name, refusal='VALIDATION_ERROR', lookup_mode='IDENTITY_ONLY')
+            # No argument repair, lookup, plan reservation or external effect.
+            return BusinessToolResult(safe_draft=(
+                'Продиктуйте, пожалуйста, контактный номер по цифрам с кодом страны.'
+                if phones else 'Подскажите, пожалуйста, контактный номер для записи.'))
+
     find_capability = runtime.registration.capability('customer.find')
     if (find_capability is None or runtime.binding is None
             or 'customer.find' not in runtime.binding.enabled_capabilities):
