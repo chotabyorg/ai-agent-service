@@ -14,7 +14,6 @@ import httpx
 from openai import (
     APIConnectionError,
     APIError,
-    APIStatusError,
     APITimeoutError,
     AsyncOpenAI,
     AuthenticationError,
@@ -610,6 +609,14 @@ class LLMService:
             voice_search_counts: dict[str, int] = {}
             retired_voice_tools: set[str] = set()
             model_retry_used = False
+            partial_attempted = False
+
+            async def tracked_partial(text):
+                """A possibly published partial prevents every later model retry."""
+                nonlocal partial_attempted
+                partial_attempted = True
+                await partial_hook(text)
+
             for step_index in range(self.MAX_TOOL_STEPS):
                 set_chat_failure_stage(ChatFailureStage.LLM_REQUEST)
                 try:
@@ -673,7 +680,8 @@ class LLMService:
                         pending_response = complete_with_partials(
                             llm_client.chat.completions.create, completion_kwargs,
                             # Required continuations cannot publish unvalidated prose.
-                            on_text=None if reuse_expectation is not None else partial_hook,
+                            on_text=(tracked_partial if partial_hook is not None
+                                     and reuse_expectation is None else None),
                             timing=completion_timing,
                         )
                         try:
@@ -684,15 +692,18 @@ class LLMService:
                             if runtime:
                                 observe_model_failure(exc, request=managed_request,
                                     step=step_index + 1, timing=completion_timing)
-                            # One retry of this MODEL request per buffered text
-                            # turn. No tool replay, model switch, deadline reset
-                            # or retry after partial speech; 4xx remains closed.
-                            if (not runtime or managed_request.channel == 'VOICE'
-                                    or partial_hook is not None or model_retry_used
-                                    or not isinstance(exc, APIStatusError)
-                                    or exc.status_code not in {500, 502, 503, 504}):
+                            # One MODEL retry per turn, only before any partial
+                            # callback. Tools, request facts, model and deadline
+                            # remain unchanged; unknown/client failures stay closed.
+                            if not runtime or partial_attempted or model_retry_used:
+                                raise
+                            from services.model_retry import model_retry_delay
+                            delay = model_retry_delay(exc)
+                            if delay is None:
                                 raise
                             model_retry_used = True
+                            runtime.check()
+                            await runtime.operation(asyncio.sleep(delay))
                             runtime.check()
                             if runtime.business is not None:
                                 gate = await runtime.operation(
@@ -725,8 +736,8 @@ class LLMService:
                         raise ManagedExecutionError("MODEL_AUTH_FAILED") from None
                     raise AgentApiKeyInvalidError("OpenRouter key is invalid. Agent deactivated.")
                 except RateLimitError as exc:
-                    error_str = str(exc).lower()
-                    if "402" in error_str or "insufficient" in error_str or "credits" in error_str:
+                    from services.model_retry import model_payment_required
+                    if model_payment_required(exc):
                         await self._deactivate_agent(agent, db_session, "Insufficient funds on OpenRouter", runtime=runtime)
                         if runtime:
                             raise ManagedExecutionError("MODEL_INSUFFICIENT_FUNDS") from None
@@ -743,6 +754,16 @@ class LLMService:
                         raise ManagedExecutionError("MODEL_UNAVAILABLE") from None
                     raise ChatProcessingError("Cannot connect to OpenRouter.")
                 except APIError as exc:
+                    from services.model_retry import classify_model_failure, model_payment_required
+                    if model_payment_required(exc):
+                        await self._deactivate_agent(agent, db_session, "Insufficient funds on OpenRouter", runtime=runtime)
+                        if runtime:
+                            raise ManagedExecutionError("MODEL_INSUFFICIENT_FUNDS") from None
+                        raise AgentInsufficientFundsError("No funds on OpenRouter. Agent deactivated.")
+                    if classify_model_failure(exc).category == 'RATE_LIMITED':
+                        if runtime:
+                            raise ManagedExecutionError("MODEL_RATE_LIMITED") from None
+                        raise AgentRateLimitError("Rate limit exceeded. Try again later.")
                     if runtime:
                         raise ManagedExecutionError("MODEL_ERROR") from None
                     logger.error("OpenRouter error for agent %s: %s", agent.id, exc)
@@ -989,10 +1010,12 @@ class LLMService:
                                 openai_tools = [tool for tool in openai_tools
                                                 if tool["function"]["name"] not in retired_voice_tools]
                         if (func_name == "business_decide_proposal"
-                                and business_result.tool_payload.get("status") == "STALE_PROPOSAL_RETIRED"):
-                            # The old proposal is now a nonconfirmable tombstone.
-                            # Refresh every model-facing surface together so a
-                            # current-origin action can follow ordinary policy.
+                                and (business_result.tool_payload.get("status") == "STALE_PROPOSAL_RETIRED"
+                                     or (business_result.tool_payload.get("status") == "CANCELLED"
+                                         and business_result.tool_payload.get("intent") in {"CHANGE", "REJECT"}))):
+                            # The saved proposal has been retired. Refresh every
+                            # model-facing surface together before continuing;
+                            # cancellation must not leave a confirmable prompt.
                             refreshed_context = await runtime.operation(
                                 runtime.business.prompt_context())
                             prompt_context = RuntimeCapabilityContext.model_validate(refreshed_context)
