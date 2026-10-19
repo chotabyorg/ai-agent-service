@@ -23,6 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from mcp_clients.manager import MCPManager, MCPPreAcquisitionError
 from core.managed_security import managed_logging
+from core.managed_wait_diagnostics import observe_managed_wait
 from services.managed_tools import (ManagedExecutionError, inspect_managed_tool_result,
                                     parse_managed_tool_arguments, _bounded_json)
 from services.managed_http_cleanup import close_managed_helper, own_managed_http
@@ -642,9 +643,10 @@ class LLMService:
                                 and voice_profile is not None
                                 and not getattr(runtime, "tool_dispatch_attempted", False)
                             )
-                            gate = await runtime.operation(
-                                runtime.business.execution_guard(
-                                    allow_incomplete=True, reload=reload_gate))
+                            with observe_managed_wait(runtime, 'EXECUTION_GUARD', step=step_index + 1):
+                                gate = await runtime.operation(
+                                    runtime.business.execution_guard(
+                                        allow_incomplete=True, reload=reload_gate))
                             if gate is not None:
                                 if gate.halt_status:
                                     raise ManagedExecutionError(gate.error_code, processing_status=gate.halt_status)
@@ -684,6 +686,7 @@ class LLMService:
                         **({"extra_body": model_extra_body} if model_extra_body else {}),
                         extra_headers=self._build_extra_headers(),
                     )
+                    model_attempt = 1
                     while True:
                         completion_timing = CompletionTiming() if runtime else None
                         pending_response = complete_with_partials(
@@ -696,8 +699,10 @@ class LLMService:
                             timing=completion_timing,
                         )
                         try:
-                            response = (await runtime.operation(pending_response)
-                                        if runtime else await pending_response)
+                            with observe_managed_wait(runtime, 'MODEL_HTTP', step=step_index + 1,
+                                                      attempt=model_attempt):
+                                response = (await runtime.operation(pending_response)
+                                            if runtime else await pending_response)
                             break
                         except APIError as exc:
                             if runtime:
@@ -714,11 +719,16 @@ class LLMService:
                                 raise
                             model_retry_used = True
                             runtime.check()
-                            await runtime.operation(asyncio.sleep(delay))
+                            with observe_managed_wait(runtime, 'RETRY_WAIT', step=step_index + 1,
+                                                      attempt=model_attempt):
+                                await runtime.operation(asyncio.sleep(delay))
                             runtime.check()
+                            model_attempt += 1
                             if runtime.business is not None:
-                                gate = await runtime.operation(
-                                    runtime.business.execution_guard(allow_incomplete=True))
+                                with observe_managed_wait(runtime, 'EXECUTION_GUARD', step=step_index + 1,
+                                                          attempt=model_attempt):
+                                    gate = await runtime.operation(
+                                        runtime.business.execution_guard(allow_incomplete=True))
                                 if gate is not None:
                                     if gate.halt_status:
                                         raise ManagedExecutionError(gate.error_code,
@@ -858,7 +868,8 @@ class LLMService:
                 if (selected is not None and selected.branch != "TOOL_CALLS") or (
                         selected is None and not getattr(message, "tool_calls", None)):
                     if runtime and runtime.business is not None:
-                        gate = await runtime.operation(runtime.business.final_result_guard())
+                        with observe_managed_wait(runtime, 'FINAL_GUARD', step=step_index + 1):
+                            gate = await runtime.operation(runtime.business.final_result_guard())
                         if gate is not None:
                             if gate.halt_status:
                                 raise ManagedExecutionError(gate.error_code, processing_status=gate.halt_status)
@@ -924,7 +935,8 @@ class LLMService:
                                 or not isinstance(getattr(invalid_call, "id", None), str) or not invalid_call.id
                                 or runtime.tool_dispatch_attempted or runtime.business is None):
                             raise ManagedExecutionError("TOOL_SETUP_FAILED")
-                        gate = await runtime.operation(runtime.business.execution_guard(allow_incomplete=True))
+                        with observe_managed_wait(runtime, 'EXECUTION_GUARD', step=step_index + 1):
+                            gate = await runtime.operation(runtime.business.execution_guard(allow_incomplete=True))
                         if gate is not None and gate.halt_status:
                             raise ManagedExecutionError(gate.error_code, processing_status=gate.halt_status)
                         if gate is not None or runtime.business.collector.snapshot():
