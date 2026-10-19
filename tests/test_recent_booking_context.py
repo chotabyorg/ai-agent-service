@@ -28,6 +28,7 @@ async def completed(factory, settings):
 
 @pytest.mark.asyncio
 async def test_projection_reuses_only_validated_historical_booking_reference(db_session, crm_settings):
+    """Project current facts for the own reference without permitting an effect."""
     _, current, _, provider = await completed(db_session, crm_settings)
     context = await current.prompt_context()
     assert context['pending'] is None

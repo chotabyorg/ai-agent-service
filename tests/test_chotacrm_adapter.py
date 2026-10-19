@@ -33,6 +33,7 @@ def crm_settings():
 
 
 async def setup(factory, settings):
+    """Build a scoped runtime with an inspectable synthetic CRM provider."""
     owner, agent, connection, workspace, grant_id = (uuid4() for _ in range(5))
     async with factory() as db:
         db.add(AgentTemplate(id=agent, user_id=owner, name='Synthetic', system_prompt='test',
@@ -46,6 +47,7 @@ async def setup(factory, settings):
     args = dict(resource_ref='resource_test', offering_ref='offering_test', start_at=start,
                 customer=dict(display_name='Влад', identity=dict(kind='PHONE', value='+375291112233')))
     async def handle(request):
+        """Return typed CRM fixtures and count reads separately from effects."""
         path = request.url.path
         if path.endswith('/context'):
             return httpx.Response(200, json=dict(workspace_id=str(workspace), grant_id=str(grant_id),

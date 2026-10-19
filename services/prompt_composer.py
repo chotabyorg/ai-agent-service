@@ -100,6 +100,7 @@ class PromptComposer:
 
     @staticmethod
     def runtime_section(context: RuntimeCapabilityContext | None) -> str:
+        """Render escaped runtime facts and the separate-consent contract."""
         body = (
             "Доступны только инструменты, фактически переданные в этом запросе. "
             "Следуй их схемам; не придумывай механизм подтверждения, если runtime его не предоставил."
