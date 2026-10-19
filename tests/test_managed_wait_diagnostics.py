@@ -18,7 +18,9 @@ SECRET = 'private-prompt-contact-provider-body'
 
 
 @pytest.fixture(autouse=True)
-def logging_boundary(monkeypatch):
+def logging_boundary(monkeypatch, request):
+    if request.node.get_closest_marker('integration'):
+        request.getfixturevalue('migrated_postgres')
     install_managed_log_boundary()
     logger = logging.getLogger('uvicorn.error')
     monkeypatch.setattr(logger, 'disabled', False)
@@ -152,9 +154,14 @@ async def test_blocked_guard_timeout_is_not_reported_as_model_wait(
     from tests.test_pending_proposal_decision import run_core
     from tests.test_preparation_schema_correction import local_runtime
     business, runtime, provider, _ = await local_runtime(db_session, crm_settings, monkeypatch)
-    runtime.deadline = anyio.current_time() + .1
+    entered = []
 
     async def blocked(**kwargs):
+        # Expire the existing scope only once this guard has actually started.
+        # A deadline before run_core can instead expire during unrelated setup.
+        entered.append(True)
+        runtime.deadline = anyio.current_time() + .01
+        runtime.active_scope.deadline = runtime.deadline
         await asyncio.Event().wait()
 
     monkeypatch.setattr(business, 'execution_guard', blocked)
@@ -164,4 +171,4 @@ async def test_blocked_guard_timeout_is_not_reported_as_model_wait(
     rows = observations(caplog)
     assert [(row.phase, row.state) for row in rows] == [
         ('EXECUTION_GUARD', 'START'), ('EXECUTION_GUARD', 'TIMEOUT')]
-    assert model.chat.completions.calls == [] and provider['posts'] == 0
+    assert entered == [True] and model.chat.completions.calls == [] and provider['posts'] == 0
