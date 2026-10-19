@@ -214,6 +214,7 @@ async def call_capability(runtime, name, arguments, *, lookup_source='MODEL'):
 
 
 async def _call_capability_impl(runtime, name, arguments):
+    """Validate the selected action and recheck authority before CRM access."""
     capability = WIRE_REGISTRY.get(name)
     if capability is None:
         if name == 'business_propose':

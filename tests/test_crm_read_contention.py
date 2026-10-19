@@ -39,6 +39,7 @@ async def test_long_config_lock_fails_closed_before_provider_read(db_session, cr
     original = runtime.registration.adapter.read
 
     async def observe(*args, **kwargs):
+        """Record attempted CRM reads without changing their behavior."""
         reads.append(True)
         return await original(*args, **kwargs)
 
@@ -54,13 +55,21 @@ async def test_agent_revocation_during_wait_prevents_provider_read(db_session, c
     """Fresh authority after the wait must observe an agent revocation."""
     runtime, _, provider, _ = await setup(db_session, crm_settings)
     reads = []
+    refusals = []
     original = runtime.registration.adapter.read
 
     async def observe(*args, **kwargs):
+        """Record attempted CRM reads without changing their behavior."""
         reads.append(True)
         return await original(*args, **kwargs)
 
+    def diagnostic(**fields):
+        """Inspect the raw reason before diagnostic projection groups it."""
+        if fields.get('stage') == 'TOOL_GUARD':
+            refusals.append(fields.get('refusal_category'))
+
     monkeypatch.setattr(runtime.registration.adapter, 'read', observe)
+    monkeypatch.setattr(runtime, 'observe_business_diagnostic', diagnostic)
     async with held(db_session, AgentTemplate, AgentTemplate.id == runtime.request.agent_id) as (blocker, pid):
         read = asyncio.create_task(runtime.call_tool('catalog_search', {}))
         try:
@@ -71,6 +80,7 @@ async def test_agent_revocation_during_wait_prevents_provider_read(db_session, c
             await blocker.rollback()
             result = await asyncio.wait_for(read, 3)
     assert result.halt_status == 'FAILED' and reads == [] and provider['posts'] == 0
+    assert refusals == ['AUTHORITY_DENIED']
 
 
 @pytest.mark.asyncio
