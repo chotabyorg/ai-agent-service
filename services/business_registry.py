@@ -2,6 +2,7 @@
 
 from collections.abc import Mapping
 from dataclasses import dataclass
+from functools import cached_property
 from types import MappingProxyType
 from typing import Any, Literal, Protocol
 
@@ -97,8 +98,11 @@ class AdapterRegistration:
                     and self.execution_contract.bounded_acceptance != "FENCED")):
             raise ValueError("Exact conservative retained catalog required")
 
-    @property
+    @cached_property
     def legacy_catalog_revision(self) -> str:
+        # This registration and its schema definitions are code-owned. Cache
+        # derived metadata on this instance only; replacement builds a fresh
+        # registration. No live binding, facts, permit or receipt is cached.
         if self.confirmation_mode == 'SEMANTIC_V1':
             # Hash each code-owned schema independently. A full eighteen-tool
             # catalog exceeds the per-business-value node bound; do not relax
@@ -118,7 +122,7 @@ class AdapterRegistration:
                               "schema": c.argument_model.model_json_schema()} for c in self.capabilities],
         })
 
-    @property
+    @cached_property
     def catalog_revision(self) -> str:
         value = {
             "legacy_catalog_revision": self.legacy_catalog_revision,
