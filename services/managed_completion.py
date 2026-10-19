@@ -5,11 +5,11 @@ from types import SimpleNamespace
 
 from openai.types.chat import ChatCompletionMessage
 from openai.types.chat.chat_completion import ChatCompletion, Choice
-from openai.types.completion_usage import CompletionTokensDetails, CompletionUsage
 
 from core.managed_completion_diagnostics import CompletionDiagnostic, emit_completion_diagnostic
 from schemas.managed_turn import ManagedTurnRequest
 from services.completion_timing import CompletionTiming
+from services.completion_accounting import accounting_metrics
 
 
 _MISSING = object()
@@ -69,15 +69,7 @@ def observe_managed_completion(response, selected, *, request, step, timing=None
         category = "MISSING" if finish is _MISSING or finish is None else (
             _FINISH.get(finish, "OTHER") if type(finish) is str else "OTHER")
         usage = _field(response, "usage", ChatCompletion)
-        counts = {}
-        for name in ("prompt_tokens", "completion_tokens", "total_tokens"):
-            value = _field(usage, name, CompletionUsage)
-            if type(value) is int and 0 <= value <= 2147483647:
-                counts[name] = value
-        details = _field(usage, "completion_tokens_details", CompletionUsage)
-        value = _field(details, "reasoning_tokens", CompletionTokensDetails)
-        if type(value) is int and 0 <= value <= 2147483647:
-            counts["reasoning_tokens"] = value
+        counts = accounting_metrics(usage)
         if type(timing) is CompletionTiming:
             for name in ('model_ms', 'first_delta_ms'):
                 value = getattr(timing, name)

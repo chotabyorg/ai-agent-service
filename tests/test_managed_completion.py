@@ -144,7 +144,9 @@ async def test_real_sdk_and_proxy_storage_observation(api_client, db_session, mo
         "choices": [{"index": 0, "finish_reason": "stop", "message": {
             "role": "assistant", "content": "Готово", "reasoning": SECRET}}],
         "usage": {"prompt_tokens": 5, "completion_tokens": 7, "total_tokens": 12,
-                  "completion_tokens_details": {"reasoning_tokens": 3}}, "private_extra": SECRET}
+                  "completion_tokens_details": {"reasoning_tokens": 3},
+                  "prompt_tokens_details": {"cached_tokens": 4, "cache_write_tokens": 1},
+                  "cost": 0.000001239, "private_extra": SECRET}, "private_extra": SECRET}
     reply = ChatCompletion.model_validate(raw) if shape == "sdk" else _to_namespace(raw)
     model.chat.completions.queue(reply)
     with caplog.at_level(logging.INFO):
@@ -152,6 +154,7 @@ async def test_real_sdk_and_proxy_storage_observation(api_client, db_session, mo
     assert result["status"] == "DRAFT_READY" and result["draft_text"] == "Готово"
     record = observed(caplog)[0]
     assert (record.prompt_tokens, record.completion_tokens, record.total_tokens, record.reasoning_tokens) == (5, 7, 12, 3)
+    assert (record.cached_tokens, record.cache_write_tokens, record.cost_nano_credits) == (4, 1, 1239)
     assert record.turn_id == value["turn_id"] and record.step == 1
     assert type(record.model_ms) is int and record.model_ms >= 0
     assert 'first_delta_ms' not in record.__dict__  # Buffered completion has no token clock.
@@ -299,6 +302,8 @@ def diagnostic(**changes):
 @pytest.mark.parametrize("changes", [{"step": True}, {"step": 0}, {"step": 21}, {"turn_id": SECRET},
     {"branch": "FINAL_" + SECRET}, {"finish": "STOP_" + SECRET}, {"visible_content": SECRET},
     {"prompt_tokens": True}, {"reasoning_tokens": -1}, {"total_tokens": 2147483648},
+    {"cached_tokens": True}, {"cache_write_tokens": -1},
+    {"cost_nano_credits": True}, {"cost_nano_credits": -1}, {"cost_nano_credits": 10**18+1},
     {"model_ms": True}, {"first_delta_ms": -1}, {"model_ms": 2147483648},
     {"http_status": True}, {"http_status": 99}, {"http_status": 600}, {"http_status": SECRET}])
 def test_identity_is_not_enough_for_invalid_dto(caplog, changes):

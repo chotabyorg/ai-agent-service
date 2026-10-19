@@ -11,7 +11,8 @@ _FINISHES = frozenset({"STOP", "TOOL_CALLS", "LENGTH", "CONTENT_FILTER",
                        "FUNCTION_CALL", "MISSING", "OTHER"})
 _CONTENT = frozenset({"TEXT", "MISSING", "EMPTY", "WHITESPACE",
                      "STRIPPED_EMPTY", "INVALID_TYPE", "NOT_INSPECTED"})
-_COUNTS = ("prompt_tokens", "completion_tokens", "total_tokens", "reasoning_tokens")
+_COUNTS = ("prompt_tokens", "completion_tokens", "total_tokens", "reasoning_tokens",
+           "cached_tokens", "cache_write_tokens")
 _METRICS = _COUNTS + ("model_ms", "first_delta_ms")
 
 
@@ -26,6 +27,9 @@ class CompletionDiagnostic:
     completion_tokens: int | None = None
     total_tokens: int | None = None
     reasoning_tokens: int | None = None
+    cached_tokens: int | None = None
+    cache_write_tokens: int | None = None
+    cost_nano_credits: int | None = None
     model_ms: int | None = None
     first_delta_ms: int | None = None
     http_status: int | None = None
@@ -70,6 +74,10 @@ def _trusted_completion_record(record):
             if type(item) is not int or not 0 <= item <= 2147483647:
                 return None
             fields[field] = item
+        if value.cost_nano_credits is not None:
+            if type(value.cost_nano_credits) is not int or not 0 <= value.cost_nano_credits <= 10**18:
+                return None
+            fields['cost_nano_credits'] = value.cost_nano_credits
         if value.http_status is not None:
             if type(value.http_status) is not int or not 100 <= value.http_status <= 599:
                 return None

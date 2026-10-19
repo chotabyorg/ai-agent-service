@@ -20,6 +20,7 @@ from openai.types.chat.chat_completion_chunk import ChatCompletionChunk
 from openai.types.completion_usage import CompletionTokensDetails, CompletionUsage
 
 from services.completion_timing import CompletionTiming
+from services.completion_accounting import accounting_metrics, bounded_cost, usage_field
 
 # Bounded assembly; mirrors the managed result budget without importing it.
 MAX_STREAM_CHARS = 8000
@@ -64,15 +65,17 @@ def _usage(item: Any) -> SimpleNamespace | None:
     usage = _metadata_field(item, 'usage')
     if type(usage) not in (dict, SimpleNamespace, CompletionUsage):
         return None
-    counts = {}
-    for name in ('prompt_tokens', 'completion_tokens', 'total_tokens'):
-        value = _metadata_field(usage, name)
-        if type(value) is int and 0 <= value <= 2147483647:
-            counts[name] = value
-    details = _metadata_field(usage, 'completion_tokens_details')
-    reasoning = _metadata_field(details, 'reasoning_tokens')
-    if type(reasoning) is int and 0 <= reasoning <= 2147483647:
-        counts['completion_tokens_details'] = SimpleNamespace(reasoning_tokens=reasoning)
+    metrics = accounting_metrics(usage)
+    counts = {name: metrics[name] for name in ('prompt_tokens', 'completion_tokens', 'total_tokens')
+              if name in metrics}
+    if 'reasoning_tokens' in metrics:
+        counts['completion_tokens_details'] = SimpleNamespace(reasoning_tokens=metrics['reasoning_tokens'])
+    prompt = {name: metrics[name] for name in ('cached_tokens', 'cache_write_tokens') if name in metrics}
+    if prompt:
+        counts['prompt_tokens_details'] = SimpleNamespace(**prompt)
+    cost = bounded_cost(usage_field(usage, 'cost'))
+    if cost is not None:
+        counts['cost'] = cost
     return SimpleNamespace(**counts)
 
 
