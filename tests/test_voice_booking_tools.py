@@ -90,9 +90,9 @@ async def test_selected_voice_direct_booking_confirms_and_replays_once(api_clien
         {'proposal_id': proposal_id, 'intent': 'CONFIRM'}, 'confirm'))
     confirmed = (await execute(api_client, payload)).json()
     assert [ref['outcome'] for ref in confirmed['operation_refs']] == ['SUCCEEDED']
-    assert model.chat.completions.calls[-1]['tool_choice']['function']['name'] == 'business_decide_proposal'
-    assert 'business_decide_proposal' in {t['function']['name']
-        for t in model.chat.completions.calls[-1]['tools']}
+    decision_call = model.chat.completions.calls[-1]
+    assert 'tool_choice' not in decision_call
+    assert [t['function']['name'] for t in decision_call['tools']] == ['business_decide_proposal']
     assert (await execute(api_client, payload)).json()['operation_refs'] == confirmed['operation_refs']
     async with db_session() as db:
         operation = await db.scalar(select(BusinessOperation))
