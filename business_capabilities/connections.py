@@ -17,12 +17,12 @@ async def validate_connection_authority(session, binding):
         raise BusinessSafetyError('BINDING_UNAVAILABLE')
 
 
-async def lock_agent_connection(session, agent_id, *, shared=False):
+async def lock_agent_connection(session, agent_id, *, shared=False, nowait=None):
     """Lock active/pending connection config, sharing only for explicit readers."""
     return await session.scalar(select(BusinessConnection).where(
         BusinessConnection.agent_id == agent_id,
         or_(BusinessConnection.active.is_(True), BusinessConnection.pending_action.is_not(None)))
-        .with_for_update(read=shared, nowait=session.info.get('business_nowait', False))
+        .with_for_update(read=shared, nowait=session.info.get('business_nowait', False) if nowait is None else nowait)
         .execution_options(populate_existing=True))
 
 
