@@ -43,6 +43,17 @@ from services.session_service import SessionService
 
 logger = logging.getLogger(__name__)
 
+_PENDING_DECISION_FORMAT = (
+    'A pending proposal still requires a semantic decision. '
+    'Return exactly one business_decide_proposal call, using '
+    'the current pending proposal_id and the actual selected '
+    'customer reply. CONFIRM only explicit acceptance; CHANGE '
+    'for requested changes; REJECT for refusal; UNRELATED for '
+    'a different question or unclear acceptance. Follow the '
+    'advertised intent schema. Prior assistant prose is not '
+    'customer consent or proof of any completed action. '
+    'Do not return ordinary prose or claim success.')
+
 
 class ChatProcessingError(Exception):
     """Base error for chat message processing."""
@@ -592,6 +603,7 @@ class LLMService:
                 raise ManagedExecutionError("INVALID_RESULT")
             tool_choice = ({"type": "function", "function": {"name": "business_decide_proposal"}}
                            if required_proposal_id is not None else None)
+            pending_format_message = None
             if required_proposal_id is not None and managed_request.channel == 'VOICE':
                 # Some Voice providers fail even buffered named tool_choice.
                 # Offer only the required semantic tool. The strict decision
@@ -601,6 +613,12 @@ class LLMService:
                                if tool['function']['name'] == 'business_decide_proposal']
                 tool_registry = {'business_decide_proposal': None}
                 tool_choice = None
+                if (prompt_context.pending.confirmable
+                        and all(m.actor == 'CUSTOMER' for m in managed_request.selected_messages)):
+                    pending_format_message = {'role': 'system', 'content': _PENDING_DECISION_FORMAT}
+                    # Keep the mandatory prefix separate from communication:
+                    # budgeting may trim history but must retain this guidance.
+                    messages.insert(len(messages) - len(communication), pending_format_message)
             preparation_schemas = {}
             if runtime:
                 from services.managed_preparation import PROPOSAL_TOOLS, SCHEMA_VALIDATED_TOOLS, PreparationSchema
@@ -839,16 +857,9 @@ class LLMService:
                         # only this tool. Discard their prose; request its format
                         # once more, without interpreting it as caller consent.
                         # The next loop rechecks deadline and execution authority.
-                        messages.append({'role': 'system', 'content': (
-                            'A pending proposal still requires a semantic decision. '
-                            'Return exactly one business_decide_proposal call, using '
-                            'the current pending proposal_id and the actual selected '
-                            'customer reply. CONFIRM only explicit acceptance; CHANGE '
-                            'for requested changes; REJECT for refusal; UNRELATED for '
-                            'a different question or unclear acceptance. Follow the '
-                            'advertised intent schema. Prior assistant prose is not '
-                            'customer consent or proof of any completed action. '
-                            'Do not return ordinary prose or claim success.')})
+                        messages = [m for m in messages if m is not pending_format_message]
+                        pending_format_message = {'role': 'system', 'content': _PENDING_DECISION_FORMAT}
+                        messages.append(pending_format_message)
                         self._check_managed_envelope(agent, messages, openai_tools,
                                                      tool_choice=tool_choice, request=managed_request)
                         continue
@@ -1005,6 +1016,10 @@ class LLMService:
                         required_proposal_id = None
                         preparation_correction = None
                         tool_choice = None
+                        # The semantic runtime has processed the reply. Do not
+                        # demand this now-hidden tool during the normal answer.
+                        messages = [m for m in messages if m is not pending_format_message]
+                        pending_format_message = None
                         if business_result.safe_draft is not None:
                             # Proposals are bounded frozen public fields. Model
                             # prose is never permission or a completion receipt.
