@@ -124,7 +124,10 @@ async def test_presence_after_idle_cannot_confirm_pending_booking(
     import tests.test_chotacrm_adapter as crm_fixture
     from tests.test_business_runtime import make_request
 
-    monkeypatch.setattr(crm_fixture, 'make_request', lambda agent: make_request(agent, channel='VOICE'))
+    monkeypatch.setattr(crm_fixture, 'make_request', lambda agent: make_request(
+        agent, channel='VOICE', messages=[dict(
+            id=uuid4(), sequence=1, actor='CUSTOMER', direction='INBOUND', content_type='TEXT',
+            text='Запишите меня, Влад. Телефон +375291112233.')]))
     original, registry, provider, args = await crm_fixture.setup(db_session, crm_settings)
     prepared = await original.call_tool('booking_create', args)
     proposal_id = prepared.tool_payload['proposal_id']
