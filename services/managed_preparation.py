@@ -15,7 +15,7 @@ PROPOSAL_TOOLS = PREPARATION_TOOLS | frozenset({'booking_cancel', 'booking_resch
 # Read arguments use the same closed, advertised schema as proposal input.
 # This permits one correction before dispatch, never a retry of an effect.
 SCHEMA_VALIDATED_TOOLS = PROPOSAL_TOOLS | frozenset(
-    capability.tool_name for capability in CAPABILITIES if capability.risk == Risk.READ)
+    capability.tool_name for capability in CAPABILITIES if capability.risk == Risk.READ) | {'booking_search_options'}
 SAFE_RULES = frozenset({'type', 'required', 'additionalProperties', 'oneOf', 'anyOf', 'allOf',
     'not', 'const', 'enum', 'minLength', 'maxLength', 'pattern', 'format', 'minItems', 'maxItems',
     'uniqueItems', 'minimum', 'maximum', 'exclusiveMinimum', 'exclusiveMaximum', 'multipleOf'})

@@ -50,6 +50,9 @@ def canonical_tools(runtime, controls):
     if runtime.recovery_mode:
         result.append(runtime._status_tool())
         return result
+    from services.booking_search_options import REQUIRED_CAPABILITIES, search_tool
+    if REQUIRED_CAPABILITIES <= {c.id for c in readable}:
+        result.append(search_tool())
     if not runtime.effect_eligible:
         return result
     # Model never chooses a provider or arbitrary plan. The one supported bundle
@@ -225,6 +228,9 @@ async def call_capability(runtime, name, arguments, *, lookup_source='MODEL'):
 
 async def _call_capability_impl(runtime, name, arguments):
     """Validate the selected action and recheck authority before CRM access."""
+    from services.booking_search_options import TOOL_NAME, search_options
+    if name == TOOL_NAME:
+        return await search_options(runtime, arguments)
     capability = WIRE_REGISTRY.get(name)
     if capability is None:
         if name == 'business_propose':
