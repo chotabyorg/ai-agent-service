@@ -104,6 +104,15 @@ CRM and TTS and is not a production latency claim.
 
 ## Native verification
 
+When a Voice pending-decision response needs the existing one-shot prose repair,
+its code-owned format message is retained only until the runtime processes that
+decision. It is then removed by object identity before an ordinary answer can
+continue without the semantic decision tool. Customer messages remain verbatim,
+including text identical to the guidance. The first model request, repair text,
+retry bound, tool schemas and runtime authorization rules remain unchanged.
+This fixes contradictory follow-up guidance; it does not establish a latency
+improvement or add guidance to the first model request.
+
 Tests can use an explicitly disposable PostgreSQL database on localhost with a
 name beginning `test_ai_`. Set `TEST_DATABASE_URL` and
 `TEST_DATABASE_DISPOSABLE=yes`, then run `python -m pytest -q`. The native fixture
