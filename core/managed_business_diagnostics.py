@@ -10,7 +10,7 @@ _IDENTITY = object()
 _STAGES = frozenset({"PREPARATION", "LOOKUP", "PROPOSAL", "TERMINAL", "TOOL_INPUT", "TOOL_READ", "TOOL_GUARD"})
 _CAPABILITIES = frozenset({
     "booking.create", "booking_create", "business_propose",
-    "customer.find", "customer_find", "business_decide_proposal", "NOT_APPLICABLE",
+    "customer.find", "customer_find", "business_decide_proposal", "booking_search_options", "NOT_APPLICABLE",
 }) | frozenset(value for capability in CAPABILITIES for value in (capability.id, capability.tool_name))
 _REFUSALS = frozenset({
     "NONE", "IDENTITY_CONFLICT", "AMBIGUOUS_IDENTITY", "LOOKUP_UNAVAILABLE",

@@ -10,6 +10,7 @@ from cryptography.hazmat.primitives.asymmetric import padding, rsa
 
 from business_capabilities.context import BusinessRuntimeError
 from business_capabilities.registry import REGISTRY
+from core.managed_wait_diagnostics import observe_managed_crm_wait
 
 
 def _b64(data: bytes) -> str:
@@ -48,41 +49,60 @@ class ChotaCRMClient:
         except (ValueError, TypeError):
             raise BusinessRuntimeError('PROVIDER_UNAVAILABLE') from None
 
+    @staticmethod
+    def _http_phase(method, path):
+        # Only code-owned route classes leave the client, never URLs, paths,
+        # assertions, headers, claims or request/response payloads.
+        if method == 'GET' and path == 'context':
+            return 'CRM_CONTEXT_HTTP'
+        if isinstance(path, str):
+            if method == 'POST' and path.startswith('facts/'):
+                return 'CRM_FACTS_HTTP'
+            if method == 'POST' and path.startswith('execute/'):
+                return 'CRM_EXECUTE_HTTP'
+            if method == 'GET' and path.startswith('operations/'):
+                return 'CRM_STATUS_HTTP'
+        return 'CRM_OTHER_HTTP'
+
     async def request(self, method, path, *, scope, claims, body=None, cookie=None, execution=None):
         if not self.settings.business_capabilities_enabled:
             raise BusinessRuntimeError('PROVIDER_UNAVAILABLE')
-        headers = {'Authorization': 'Bearer ' + self.assertion(scope, claims, execution=execution)}
+        with observe_managed_crm_wait(execution, 'CRM_ASSERTION'):
+            headers = {'Authorization': 'Bearer ' + self.assertion(scope, claims, execution=execution)}
         if cookie is not None:
             # Configuration only; no cookies are retained in model/connection/runtime state.
             headers['Cookie'] = cookie
             headers['X-User-Id'] = claims['owner_id']
         from services.managed_http_cleanup import own_managed_http, close_managed_helper
-        client = httpx.AsyncClient(base_url=self.settings.business_crm_url.rstrip('/') + '/internal/agent/v1/',
-                                   timeout=self.settings.business_crm_timeout_seconds,
-                                   transport=self.transport, follow_redirects=False, trust_env=False)
+        with observe_managed_crm_wait(execution, 'CRM_CLIENT_SETUP'):
+            client = httpx.AsyncClient(base_url=self.settings.business_crm_url.rstrip('/') + '/internal/agent/v1/',
+                                       timeout=self.settings.business_crm_timeout_seconds,
+                                       transport=self.transport, follow_redirects=False, trust_env=False)
         try:
             if execution is not None:
                 own_managed_http(client)
-            async with client.stream(method, path.lstrip('/'), headers=headers, json=body) as response:
-                chunks = bytearray()
-                async for part in response.aiter_bytes():
-                    chunks.extend(part)
-                    if len(chunks) > 32768:
+            with observe_managed_crm_wait(execution, self._http_phase(method, path)):
+                async with client.stream(method, path.lstrip('/'), headers=headers, json=body) as response:
+                    chunks = bytearray()
+                    async for part in response.aiter_bytes():
+                        chunks.extend(part)
+                        if len(chunks) > 32768:
+                            raise BusinessRuntimeError('PROVIDER_UNAVAILABLE')
+                    if response.status_code in (401, 403):
+                        raise BusinessRuntimeError('PERMISSION_DENIED')
+                    if response.status_code == 204:
+                        return None
+                    if response.status_code >= 400:
                         raise BusinessRuntimeError('PROVIDER_UNAVAILABLE')
-                if response.status_code in (401, 403):
-                    raise BusinessRuntimeError('PERMISSION_DENIED')
-                if response.status_code == 204:
-                    return None
-                if response.status_code >= 400:
-                    raise BusinessRuntimeError('PROVIDER_UNAVAILABLE')
-                return json.loads(chunks)
+                    return json.loads(chunks)
         except (httpx.HTTPError, ValueError):
             raise BusinessRuntimeError('PROVIDER_UNAVAILABLE') from None
         finally:
-            if execution is not None:
-                await close_managed_helper(client)
-            else:
-                await client.aclose()
+            with observe_managed_crm_wait(execution, 'CRM_CLIENT_CLOSE'):
+                if execution is not None:
+                    await close_managed_helper(client)
+                else:
+                    await client.aclose()
 
     async def workspaces(self, owner_id: UUID, cookie: str):
         from business_capabilities.results import Workspaces
