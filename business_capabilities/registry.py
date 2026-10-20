@@ -23,8 +23,15 @@ class Capability:
     default_enabled: bool = True
 
     def tool(self):
+        description = self.description
+        if self.id == 'booking.check_availability':
+            description += (
+                ' Use this advisory read to choose among alternative times. '
+                'When the customer requested an exact time and the booking details are known, '
+                'call booking_create directly: preparation already checks fresh availability. '
+                'Do not insert this read before that preparation.')
         return {'type': 'function', 'function': {'name': self.tool_name,
-                'description': self.description, 'parameters': tool_schema(self.input)}}
+                'description': description, 'parameters': tool_schema(self.input)}}
 
 
 CAPABILITIES = (
