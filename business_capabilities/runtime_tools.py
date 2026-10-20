@@ -35,7 +35,7 @@ def completed_booking_reply(operation, receipt):
     details = booking.get('offering_name') or 'услуга'
     if booking.get('resource_name'):
         details += f", специалист {booking['resource_name']}"
-    return f"{prefix}: {details}, {time} ({booking['timezone']})."
+    return f"{prefix}: {details}, {time} по местному времени."
 
 
 def canonical_tools(runtime, controls):
