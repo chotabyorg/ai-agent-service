@@ -14,6 +14,12 @@ _CONTENT = frozenset({"TEXT", "MISSING", "EMPTY", "WHITESPACE",
 _COUNTS = ("prompt_tokens", "completion_tokens", "total_tokens", "reasoning_tokens",
            "cached_tokens", "cache_write_tokens")
 _METRICS = _COUNTS + ("model_ms", "first_delta_ms")
+_ROUTER_FIELDS = {
+    'router_metadata_state': frozenset({'MISSING', 'VALID', 'INVALID'}),
+    'router_selected_hint': frozenset({'MISSING', 'UNSELECTED', 'INVALID', 'OTHER',
+        'MAKORA', 'NEXTBIT', 'CLOUDFLARE', 'OPENAI'}),
+    'router_attempt_bucket': frozenset({'MISSING', 'INVALID', 'ZERO', 'ONE', 'MULTIPLE'}),
+}
 _LIMIT_FIELDS = {
     'limit_source': frozenset({'MISSING', 'OTHER', 'OPENROUTER_IN_FLIGHT_BUDGET',
         'OPENROUTER_CREDITS', 'OPENROUTER_KEY_LIMIT', 'OPENROUTER_GUARDRAIL_BUDGET',
@@ -56,6 +62,9 @@ class CompletionDiagnostic:
     retry_after_state: str | None = None
     error_kind: str | None = None
     provider_hint: str | None = None
+    router_metadata_state: str | None = None
+    router_selected_hint: str | None = None
+    router_attempt_bucket: str | None = None
 
 
 def emit_completion_diagnostic(diagnostic: CompletionDiagnostic) -> None:
@@ -116,6 +125,16 @@ def _trusted_completion_record(record):
             if value.branch != 'MODEL_FAILURE' or type(item) is not str or item not in allowed:
                 return None
             fields[field] = item
+        if any(getattr(value, name) is not None for name in _ROUTER_FIELDS):
+            for field, allowed in _ROUTER_FIELDS.items():
+                item = getattr(value, field)
+                if type(item) is not str or item not in allowed:
+                    return None
+                fields[field] = item
+            if value.router_metadata_state in {'MISSING', 'INVALID'} and (
+                    value.router_selected_hint != value.router_metadata_state
+                    or value.router_attempt_bucket != value.router_metadata_state):
+                return None
     except Exception:
         return None
     template = "managed_completion_observed " + " ".join(name + "=%s" for name in fields)
