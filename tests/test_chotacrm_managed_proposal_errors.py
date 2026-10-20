@@ -411,6 +411,7 @@ async def test_managed_proposal_provider_refusal_is_recoverable_before_reservati
 ):
     value, arguments, _, calls, effect_port, model = await install_managed_crm(
         api_client, db_session, monkeypatch, status, body,
+        enabled_capabilities=[*DEFAULTS, 'deal.create'],
     )
     action = {"capability": "booking.create", "arguments": arguments}
     model.chat.completions.queue(
@@ -450,7 +451,7 @@ async def test_provider_refusal_can_be_corrected_into_prepared_proposal_without_
     value, arguments, _, calls, effect_port, model = await install_managed_crm(
         api_client, db_session, monkeypatch, 200,
         {"status": "ERROR", "error": {"code": "BOOKING_CONFLICT", "message": "synthetic", "retry": "NEVER"}},
-        recover_after_first=True,
+        recover_after_first=True, enabled_capabilities=[*DEFAULTS, 'deal.create'],
     )
     corrected = dict(arguments)
     corrected["start_at"] = (datetime.fromisoformat(arguments["start_at"]) + timedelta(hours=1)).isoformat()
