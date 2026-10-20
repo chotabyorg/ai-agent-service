@@ -138,6 +138,18 @@ argument parsing, assistant-message serialization and envelope validation before
 tool dispatch. They contain no proposal IDs, arguments, reasoning or conversation
 content; observation failures do not change execution results or error codes.
 
+## Customer reuse instruction lifetime
+
+An identity-only lookup can require exactly one explicit preparation call with
+the returned customer reference. Its code-owned system instruction is removed
+by object identity once that validated continuation has been processed, including
+when fresh preparation facts refuse the proposal. Later guarded recovery reads
+must not inherit the consumed instruction to repeat the same call. Customer text,
+tool results, exact-argument admission, the single continuation budget, separate
+consent and effect/UNKNOWN guards remain unchanged. This removes contradictory
+guidance; it does not establish why a provider returned `NOT_FOUND` or prove
+real-model recovery quality or a latency improvement.
+
 The historical five-call failure had `TOOL_CALLS` telemetry and `INVALID_RESULT`
 before any tool timing or effect attempt. Its raw response was not retained, so
 the particular failing field is unknown. This change does not prove that a wrong

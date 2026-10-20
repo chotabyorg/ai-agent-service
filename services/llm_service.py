@@ -609,6 +609,7 @@ class LLMService:
                     for tool in openai_tools if tool["function"]["name"] in SCHEMA_VALIDATED_TOOLS}
             preparation_correction = None
             reuse_expectation = None
+            reuse_continuation_message = None
             reuse_continuation_used = False
             correction_budgets_used = set()
             seen_tool_ids = set()
@@ -1012,6 +1013,12 @@ class LLMService:
                         required_proposal_id = None
                         preparation_correction = None
                         tool_choice = None
+                        if reuse_continuation_message is not None:
+                            # The exact continuation was validated and processed.
+                            # Its one-response constraint must not govern recovery
+                            # from a refused preparation or later guarded reads.
+                            messages = [m for m in messages if m is not reuse_continuation_message]
+                            reuse_continuation_message = None
                         if pending_format_message is not None:
                             # The runtime processed the reply. Remove only our
                             # repair hint before continuing without this tool.
@@ -1046,8 +1053,9 @@ class LLMService:
                         messages.append({"role": "tool", "tool_call_id": tool_call.id,
                                          "name": func_name, "content": tool_result_text})
                         if next_reuse is not None:
-                            messages.append({'role': 'system', 'content':
-                                customer_reuse_instruction(func_name, next_reuse)})
+                            reuse_continuation_message = {'role': 'system', 'content':
+                                customer_reuse_instruction(func_name, next_reuse)}
+                            messages.append(reuse_continuation_message)
                         if voice_profile is not None and func_name in {"resource_search", "booking_search_options"}:
                             # Count the actual search, including its cursor, not
                             # the tool name: a broader query or next page is progress.
