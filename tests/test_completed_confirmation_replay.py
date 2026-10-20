@@ -52,7 +52,8 @@ async def test_exact_confirmation_replay_returns_retained_receipt_without_model_
     assert result.operation_refs == before
     assert 'Запись была подтверждена' in result.draft_text
     assert 'Окрашивание' in result.draft_text and 'Анна' in result.draft_text
-    assert '18:00' in result.draft_text and 'Europe/Minsk' in result.draft_text
+    assert '18:00' in result.draft_text and 'по местному времени' in result.draft_text
+    assert 'Europe/Minsk' not in result.draft_text
     assert 'booking_test' not in result.draft_text and 'customer_test' not in result.draft_text
     assert provider['posts'] == 1
 
