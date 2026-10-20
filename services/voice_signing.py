@@ -1,4 +1,4 @@
-"""Reuse only parsed key material, inside one explicitly selected Voice Turn."""
+"""Reuse parsed key material inside one owned, explicitly enabled Managed Turn."""
 from contextlib import contextmanager
 from contextvars import ContextVar
 
@@ -7,7 +7,7 @@ _current = ContextVar("voice_signing_material", default=None)
 
 
 @contextmanager
-def voice_signing_scope(owner):
+def managed_signing_scope(owner):
     # Identity is checked as well as ContextVar locality: inherited child contexts
     # and another runtime cannot use this Turn's entry. No token/grant is cached.
     entry = {"owner": owner, "pem": None, "key": None}
@@ -17,6 +17,10 @@ def voice_signing_scope(owner):
     finally:
         entry.clear()
         _current.reset(token)
+
+
+# Keep the existing Voice helper import compatible with its selected profile.
+voice_signing_scope = managed_signing_scope
 
 
 def signing_key(owner, pem, load):
