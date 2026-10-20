@@ -466,9 +466,10 @@ class LLMService:
         if runtime and runtime.business is not None:
             project = getattr(runtime.business, "prompt_context", None)
             if callable(project):
-                prompt_context = RuntimeCapabilityContext.model_validate(
-                    await runtime.operation(project())
-                )
+                with observe_managed_wait(runtime, 'BUSINESS_PROMPT_CONTEXT', step=1):
+                    prompt_context = RuntimeCapabilityContext.model_validate(
+                        await runtime.operation(project())
+                    )
         system_prompt = self.prompt_composer.compose(
             agent, chat_context, runtime_context=prompt_context,
         )

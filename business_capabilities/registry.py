@@ -1,6 +1,8 @@
 """Explicit wire-name bijection and product risk/default policy."""
 from dataclasses import dataclass
+from copy import deepcopy
 from enum import StrEnum
+from functools import lru_cache
 import re
 from pydantic import BaseModel
 from business_capabilities import schemas as s
@@ -65,7 +67,24 @@ def normalize_arguments(capability: str, arguments: object) -> dict:
     return REGISTRY[capability].input.model_validate(arguments).model_dump(mode='json', by_alias=True, exclude_none=True)
 
 
+_TOOL_SCHEMA_MODELS = frozenset(c.input for c in CAPABILITIES)
+
+
 def tool_schema(model):
+    # Only immutable, code-owned model definitions enter this bounded cache.
+    # Callers receive independent trees. Live availability, authority, refs and
+    # proposal state are still selected by the runtime on every invocation.
+    if model in _TOOL_SCHEMA_MODELS:
+        return deepcopy(_canonical_tool_schema(model))
+    return _build_tool_schema(model)
+
+
+@lru_cache(maxsize=len(_TOOL_SCHEMA_MODELS))
+def _canonical_tool_schema(model):
+    return _build_tool_schema(model)
+
+
+def _build_tool_schema(model):
     """Inline local definitions and omit nullable alternatives we do not accept."""
     source = model.model_json_schema()
     definitions = source.get('$defs', {})
