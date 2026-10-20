@@ -33,6 +33,7 @@ from services.pending_decision_contract import (
 )
 from services.managed_completion import select_managed_completion, observe_managed_completion, observe_model_failure, is_stopped_prose
 from services.completion_timing import CompletionTiming
+from services.router_metadata_observation import HEADER, RouterObservation, router_metadata_headers
 from services.managed_streaming import complete_with_partials
 from services.chat_diagnostics import ChatFailureStage, set_chat_failure_stage
 from services.agent_service import AgentService
@@ -411,6 +412,9 @@ class LLMService:
         )
         return ChatProcessingResult(session_id=session_id, answer=answer)
 
+    def _completion_headers(self, client, *, managed):
+        return router_metadata_headers(client, self._build_extra_headers(), managed=managed)
+
     def _create_llm_client(self, agent_api_key, privacy_session_id, *, managed=False):
         if self.settings.privacy_filter_enabled:
             if managed:
@@ -691,11 +695,14 @@ class LLMService:
                         parallel_tool_calls=self._managed_parallel_tool_calls(managed_request),
                         **({"tool_choice": tool_choice} if tool_choice is not None else {}),
                         **({"extra_body": model_extra_body} if model_extra_body else {}),
-                        extra_headers=self._build_extra_headers(),
+                        extra_headers=self._completion_headers(llm_client, managed=runtime is not None),
                     )
                     model_attempt = 1
                     while True:
                         completion_timing = CompletionTiming() if runtime else None
+                        if (completion_timing is not None
+                                and (completion_kwargs.get('extra_headers') or {}).get(HEADER) == 'enabled'):
+                            completion_timing.router_observation = RouterObservation()
                         pending_response = complete_with_partials(
                             llm_client.chat.completions.create, completion_kwargs,
                             # Required continuations and pending decisions cannot

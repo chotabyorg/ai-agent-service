@@ -22,6 +22,7 @@ from openai.types.completion_usage import CompletionTokensDetails, CompletionUsa
 
 from services.completion_timing import CompletionTiming
 from services.completion_accounting import accounting_metrics, bounded_cost, usage_field
+from services.router_metadata_observation import RouterObservation, has_router_metadata, router_observation
 
 # Bounded assembly; mirrors the managed result budget without importing it.
 MAX_STREAM_CHARS = 8000
@@ -304,8 +305,24 @@ async def complete_with_partials(
     stream_completion(), forwarding cumulative text partials.
     """
     if on_text is None:
-        return await create(**request_kwargs)
+        response = await create(**request_kwargs)
+        _observe_router(timing, response)
+        return response
     return await stream_completion(create, request_kwargs, on_text=on_text, timing=timing)
+
+
+def _observe_router(timing, response):
+    if type(timing) is not CompletionTiming or timing.router_observation is None:
+        return False
+    if not has_router_metadata(response):
+        return False
+    try:
+        observed = router_observation(response)
+    except Exception:
+        # Optional observations cannot turn a valid completion into a failure.
+        observed = RouterObservation('INVALID', 'INVALID', 'INVALID')
+    timing.router_observation = observed
+    return True
 
 
 async def stream_completion(
@@ -334,6 +351,7 @@ async def stream_completion(
     if inspect.isawaitable(result):
         result = await result
     if _get(result, "choices") is not None:
+        _observe_router(timing, result)
         return result
     text_parts: list[str] = []
     text_len = 0
@@ -346,6 +364,15 @@ async def stream_completion(
         seen += 1
         if seen > max_chunks:
             raise StreamLimitExceeded("Streaming completion exceeded chunk bound")
+        route_present = _observe_router(timing, item)
+        if (route_present and type(_get(item, 'choices')) is list
+                and not _get(item, 'choices') and _get(item, 'error') is None):
+            # Opted-in routing frames may be separate from terminal usage.
+            # They supply no text, tools, finish reason or execution authority.
+            accounting = _usage(item)
+            if accounting is not None and vars(accounting):
+                usage = accounting
+            continue
         accounting = _usage(item)
         if accounting is not None:
             if vars(accounting):
