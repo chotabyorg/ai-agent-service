@@ -62,14 +62,21 @@ def tool_schema(model):
     """Inline local definitions and omit nullable alternatives we do not accept."""
     source = model.model_json_schema()
     definitions = source.get('$defs', {})
-    def visit(value):
+    def visit(value, *, property_map=False):
         if isinstance(value, list):
             return [visit(item) for item in value]
         if not isinstance(value, dict):
             return value
+        if property_map:
+            # Property names, including a real field named "title", are data.
+            return {name: visit(schema) for name, schema in value.items()}
         if '$ref' in value:
             return visit(definitions[value['$ref'].removeprefix('#/$defs/')])
-        result = {key: visit(item) for key, item in value.items() if key != '$defs' and not (key == 'default' and item is None)}
+        # Pydantic repeats field/class names in title annotations. They do not
+        # constrain input; keep every validation keyword and property name.
+        result = {key: visit(item, property_map=key == 'properties')
+                  for key, item in value.items()
+                  if key not in {'$defs', 'title'} and not (key == 'default' and item is None)}
         if 'anyOf' in result:
             branches = [branch for branch in result['anyOf'] if branch.get('type') != 'null']
             if len(branches) == 1:
@@ -111,4 +118,10 @@ def tool_schema(model):
         # Expose the existing runtime validator to the model without changing
         # the durable catalog schema fingerprint or its accepted input set.
         result['oneOf'] = [{'required': ['customer_ref']}, {'required': ['customer']}]
+        result['properties']['customer_ref']['description'] = (
+            'Verified existing customer ref. When using it, omit the customer key entirely; '
+            'do not copy the lookup customer object or add customer=null.')
+        result['properties']['customer']['description'] = (
+            'Supplied name and exact contact when no verified customer ref was selected. '
+            'When using this object, omit customer_ref entirely.')
     return result
