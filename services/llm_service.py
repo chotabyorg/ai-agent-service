@@ -413,9 +413,21 @@ class LLMService:
         return ChatProcessingResult(session_id=session_id, answer=answer)
 
     def _completion_headers(self, client, *, managed):
+        adapter = self.settings.managed_completion_adapter
+        if managed and adapter is not None and adapter.kind != 'openrouter':
+            return None
         return router_metadata_headers(client, self._build_extra_headers(), managed=managed)
 
+    async def _managed_completion_create(self, client, **kwargs):
+        self.settings.managed_completion_adapter.validate_request(kwargs)
+        return await client.chat.completions.create(**kwargs)
+
     def _create_llm_client(self, agent_api_key, privacy_session_id, *, managed=False):
+        adapter = self.settings.managed_completion_adapter
+        if adapter is not None and adapter.kind == 'openai_compatible':
+            # A local/compatible endpoint must never receive a stored cloud key,
+            # including callers of the legacy, unmanaged API.
+            agent_api_key = self.settings.llm_api_key or 'local-endpoint'
         if self.settings.privacy_filter_enabled:
             if managed:
                 try:
@@ -681,7 +693,8 @@ class LLMService:
                         model=(self._managed_model(agent, request=managed_request) if runtime
                                else agent.model_name or self.settings.llm_default_model),
                         temperature=agent.temperature,
-                        max_tokens=self.settings.llm_max_tokens,
+                        max_tokens=(self._managed_max_tokens(agent, request=managed_request) if runtime
+                                    else self.settings.llm_max_tokens),
                         messages=messages,
                         # Narrow only this completion's advertised schemas. Keep
                         # the canonical registry and conservative context budget
@@ -705,7 +718,9 @@ class LLMService:
                                 and (completion_kwargs.get('extra_headers') or {}).get(HEADER) == 'enabled'):
                             completion_timing.router_observation = RouterObservation()
                         pending_response = complete_with_partials(
-                            llm_client.chat.completions.create, completion_kwargs,
+                            (lambda **kwargs: self._managed_completion_create(llm_client, **kwargs))
+                            if runtime and self.settings.managed_completion_adapter is not None
+                            else llm_client.chat.completions.create, completion_kwargs,
                             # Required continuations and pending decisions cannot
                             # publish unvalidated prose before runtime admission.
                             on_text=(tracked_partial if partial_hook is not None
@@ -1258,8 +1273,13 @@ class LLMService:
 
     def _managed_voice_profile(self, agent, *, request=None):
         model = agent.model_name or self.settings.llm_default_model
-        return next((profile for profile in self.settings.managed_voice_latency_profiles
+        return next((profile for profile in [*self.settings.managed_voice_latency_profiles,
+                                            *self.settings.managed_voice_profiles]
                      if profile.matches(request, model)), None)
+
+    def _managed_max_tokens(self, agent, *, request=None):
+        profile = self._managed_voice_profile(agent, request=request)
+        return min(self.settings.llm_max_tokens, getattr(profile, 'max_output_tokens', self.settings.llm_max_tokens))
 
     def _managed_model(self, agent, *, request=None):
         profile = self._managed_voice_profile(agent, request=request)
@@ -1288,7 +1308,7 @@ class LLMService:
 
     def _managed_envelope(self, agent, messages, tools, *, tool_choice=None, request=None):
         envelope = {"model": self._managed_model(agent, request=request),
-                "temperature": agent.temperature, "max_tokens": self.settings.llm_max_tokens,
+                "temperature": agent.temperature, "max_tokens": self._managed_max_tokens(agent, request=request),
                 "messages": messages, "tools": tools or None,
                 "parallel_tool_calls": self._managed_parallel_tool_calls(request)}
         if tool_choice is not None:
@@ -1302,7 +1322,9 @@ class LLMService:
                                   ensure_ascii=False, allow_nan=False).encode("utf-8"))
         except (ValueError, UnicodeError, RecursionError, TypeError):
             raise ManagedExecutionError("INVALID_RESULT") from None
-        if size > self.settings.managed_ai_context_bytes:
+        profile = self._managed_voice_profile(agent, request=request)
+        if size > min(self.settings.managed_ai_context_bytes,
+                      getattr(profile, 'context_bytes', self.settings.managed_ai_context_bytes)):
             raise ManagedExecutionError("CONTEXT_LIMIT")
 
     def _budget_managed_messages(self, agent, messages, tools, selected_indices, communication, simple, *, tool_choice=None, request=None):
