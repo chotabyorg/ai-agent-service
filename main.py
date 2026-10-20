@@ -2,7 +2,9 @@
 
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
+
+from api.gateway_owner import require_owner_gateway
 
 from api.internal.agents import router as internal_agents_router
 from api.internal.managed_turns import router as managed_turns_router
@@ -43,15 +45,22 @@ app = FastAPI(
     lifespan=lifespan,
 )
 app.add_middleware(ManagedTurnBoundary)
-from business_capabilities.registration import create_business_registry
-from db.database import AsyncSessionLocal
+# Preserve the existing registry import/initialization boundary after middleware.
+from business_capabilities.registration import create_business_registry  # noqa: E402
+from db.database import AsyncSessionLocal  # noqa: E402
 app.state.business_registry = create_business_registry(settings, AsyncSessionLocal)
-app.include_router(business_tools_router, prefix=f"{settings.api_v1_prefix}/agents", tags=['business-tools'])
+app.include_router(
+    business_tools_router,
+    prefix=f"{settings.api_v1_prefix}/agents",
+    tags=['business-tools'],
+    dependencies=[Depends(require_owner_gateway)],
+)
 
 app.include_router(
     agents_router,
     prefix=f"{settings.api_v1_prefix}/agents",
     tags=["agents"],
+    dependencies=[Depends(require_owner_gateway)],
 )
 app.include_router(
     chat_router,
@@ -72,11 +81,13 @@ app.include_router(
     tools_router,
     prefix=f"{settings.api_v1_prefix}/agents",
     tags=["tools"],
+    dependencies=[Depends(require_owner_gateway)],
 )
 app.include_router(
     openrouter_key_router,
     prefix=f"{settings.api_v1_prefix}/agents",
     tags=["openrouter-key"],
+    dependencies=[Depends(require_owner_gateway)],
 )
 app.include_router(
     internal_agents_router,

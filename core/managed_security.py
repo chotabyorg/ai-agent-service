@@ -19,6 +19,11 @@ EXECUTION_NAMESPACE = "main-chota.conversation.v1"
 MANAGED_SECRET_ENV_KEYS = frozenset({
     "managed_ai_auth_principals",
     "internal_ai_auth_principals",
+    "gateway_ai_auth_principals",
+    "gateway_ai_owner_token",
+    # Names used only by the disposable pinned-gateway runtime proof.
+    "owner_ai_token",
+    "owner_cp_token",
     "business_conversation_token",
 })
 managed_logging: ContextVar[bool] = ContextVar("managed_logging", default=False)
@@ -94,6 +99,23 @@ class OwnershipPrincipal(BaseModel):
         return any(grant.scope() == (owner_id, agent_id) for grant in self.grants)
 
 
+class GatewayPrincipal(BaseModel):
+    """Gateway workload assertion, limited to AI owner router admission."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    principal_id: Annotated[str, Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")]
+    caller: Literal["chota-gateway"]
+    purpose: Literal["gateway-owner-api"]
+    audience: Literal["ai-agent-service"]
+    current: OwnershipCredential
+    previous: OwnershipCredential | None = None
+    revoked: StrictBool = False
+
+    def credentials(self) -> tuple[OwnershipCredential, ...]:
+        return (self.current,) if self.previous is None else (self.current, self.previous)
+
+
 def _unique_json_object(pairs):
     value = {}
     for key, item in pairs:
@@ -101,6 +123,41 @@ def _unique_json_object(pairs):
             raise ValueError
         value[key] = item
     return value
+
+
+def parse_gateway_principals(
+    raw: str,
+    other_tokens: tuple[str, ...],
+) -> tuple[GatewayPrincipal, ...]:
+    """Validate receiver/purpose and every version without rendering secrets."""
+    if not raw:
+        return ()
+    try:
+        values = json.loads(
+            raw,
+            object_pairs_hook=_unique_json_object,
+            parse_constant=lambda _: (_ for _ in ()).throw(ValueError()),
+        )
+        if not isinstance(values, list) or len(values) > 32:
+            raise ValueError
+        principals = tuple(GatewayPrincipal.model_validate(value) for value in values)
+        ids: set[str] = set()
+        tokens: set[str] = set()
+        for principal in principals:
+            if principal.principal_id in ids:
+                raise ValueError
+            ids.add(principal.principal_id)
+            versions: set[str] = set()
+            for credential in principal.credentials():
+                token = credential.token.get_secret_value()
+                if (credential.version in versions or not valid_token(token)
+                        or token in tokens or token in other_tokens):
+                    raise ValueError
+                versions.add(credential.version)
+                tokens.add(token)
+        return principals
+    except Exception:
+        raise ValueError("Invalid gateway owner authentication configuration") from None
 
 
 def parse_ownership_principals(
