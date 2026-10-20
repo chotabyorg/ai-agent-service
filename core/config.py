@@ -92,6 +92,7 @@ class Settings(BaseSettings):
     managed_voice_latency_profiles: list[VoiceLatencyProfile] = Field(default_factory=list, max_length=64)
     managed_voice_profiles: list[VoiceRuntimeProfile] = Field(default_factory=list, max_length=64)
     managed_completion_adapter: CompletionAdapterProfile | None = None
+    managed_completion_api_key: SecretStr = SecretStr("")
     _managed_principals: tuple = PrivateAttr(default=())
 
     @model_validator(mode="after")
@@ -114,6 +115,9 @@ class Settings(BaseSettings):
             if (adapter.kind != 'openrouter' and (self.managed_voice_latency_profiles
                     or self.managed_openrouter_disable_reasoning_models or self.managed_text_disable_reasoning)):
                 raise RuntimeError('OpenRouter controls require the OpenRouter adapter')
+            if (not adapter.reasoning and (self.managed_voice_latency_profiles
+                    or self.managed_openrouter_disable_reasoning_models or self.managed_text_disable_reasoning)):
+                raise RuntimeError('Configured reasoning controls require adapter support')
         if (self.managed_openrouter_disable_reasoning_models
                 or self.managed_voice_latency_profiles
                 or self.managed_text_disable_reasoning):

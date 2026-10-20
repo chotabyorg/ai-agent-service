@@ -176,7 +176,7 @@ async def execute_managed_owned(request, grant, runtime, db_provider, session_fa
                 runtime.stack.enter_context(managed_signing_scope(runtime))
             try:
                 adapter = service.settings.managed_completion_adapter
-                key = (service.settings.llm_api_key or 'local-endpoint'
+                key = (service.settings.managed_completion_api_key.get_secret_value() or 'local-endpoint'
                     if adapter is not None and adapter.kind == 'openai_compatible'
                     else service._get_agent_api_key(agent))
             except Exception:

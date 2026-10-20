@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import httpx
 import pytest
 from openai import APITimeoutError, AsyncOpenAI
+from pydantic import SecretStr
 
 from core.completion_adapter import CompletionAdapterProfile
 from core.config import Settings
@@ -102,7 +103,9 @@ async def test_completion_contract(kind, case):
 
 @pytest.mark.parametrize('capability,options', [
     ('streaming', {'stream': True}), ('named_tool_choice', {'tool_choice': {'type': 'function'}}),
+    ('json_object', {'response_format': {'type': 'json_object'}}),
     ('json_schema', {'response_format': {'type': 'json_schema'}}),
+    ('reasoning', {'extra_body': {'reasoning': {'enabled': False}}}),
 ])
 def test_unsupported_request_is_rejected_instead_of_downgraded(capability, options):
     profile = CompletionAdapterProfile(kind='openai_compatible', **{capability: False})
@@ -135,7 +138,8 @@ def test_neutral_voice_budgets_scope_and_no_router_fields():
 @pytest.mark.asyncio
 async def test_compatible_client_never_receives_stored_cloud_key_or_router_headers(monkeypatch):
     service = LLMService()
-    service.settings = settings('openai_compatible', llm_http_referer='https://synthetic.invalid', llm_app_title='test')
+    service.settings = settings('openai_compatible', llm_http_referer='https://synthetic.invalid',
+                                llm_app_title='test', llm_api_key='global-cloud-key-do-not-transmit')
     client = service._create_llm_client('stored-cloud-key-do-not-transmit', None, managed=True)
     try:
         assert client.api_key == 'local-endpoint'
@@ -172,7 +176,8 @@ async def test_neutral_managed_voice_uses_endpoint_credential_without_key_warmup
     agent, value = await setup(api_client, db_session, monkeypatch, channel='VOICE')
     profile = VoiceRuntimeProfile(**{k:value[k] for k in ('owner_id', 'integration_id', 'agent_id')},
         model=agent['model_name'], max_output_tokens=128)
-    for key, val in dict(llm_base_url='http://127.0.0.1:19581/v1', llm_api_key='synthetic-endpoint-token',
+    for key, val in dict(llm_base_url='http://127.0.0.1:19581/v1',
+            managed_completion_api_key=SecretStr('synthetic-endpoint-token'),
             managed_completion_adapter=CompletionAdapterProfile(kind='openai_compatible'),
             managed_voice_profiles=[profile], managed_voice_latency_profiles=[]).items():
         monkeypatch.setattr(get_settings(), key, val)

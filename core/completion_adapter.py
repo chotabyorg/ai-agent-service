@@ -10,7 +10,9 @@ class CompletionAdapterProfile(BaseModel):
     streaming: bool = True
     tools: bool = True
     named_tool_choice: bool = True
+    json_object: bool = False
     json_schema: bool = False
+    reasoning: bool = False
     cancellation: bool = True
     # A declaration, never an instruction to fabricate absent usage or prices.
     reports_usage: bool = True
@@ -27,7 +29,9 @@ class CompletionAdapterProfile(BaseModel):
             request.get('stream') and not self.streaming
             or request.get('tools') and not self.tools
             or isinstance(request.get('tool_choice'), dict) and not self.named_tool_choice
+            or (request.get('response_format') or {}).get('type') == 'json_object' and not self.json_object
             or (request.get('response_format') or {}).get('type') == 'json_schema' and not self.json_schema
+            or bool((request.get('extra_body') or {}).get('reasoning')) and not self.reasoning
             or self.kind != 'openrouter' and bool(request.get('extra_body'))
         )
         if unsupported:

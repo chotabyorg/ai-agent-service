@@ -431,7 +431,7 @@ class LLMService:
         if adapter is not None and adapter.kind == 'openai_compatible':
             # A local/compatible endpoint must never receive a stored cloud key,
             # including callers of the legacy, unmanaged API.
-            agent_api_key = self.settings.llm_api_key or 'local-endpoint'
+            agent_api_key = self.settings.managed_completion_api_key.get_secret_value() or 'local-endpoint'
         if self.settings.privacy_filter_enabled:
             if managed:
                 try:
