@@ -252,6 +252,7 @@ async def _call_capability_impl(runtime, name, arguments):
             except BusinessRuntimeError as error:
                 if runtime.collector.snapshot():
                     raise BusinessSafetyError('FACTS_UNAVAILABLE', processing_status='UNKNOWN') from None
+                runtime._proposal_preparation_refused = True
                 return BusinessToolResult(tool_payload=failure(error.code))
         return None
     if capability.id not in runtime.binding.enabled_capabilities:
@@ -286,6 +287,8 @@ async def _call_capability_impl(runtime, name, arguments):
             # feedback. Existing effects/proposals keep the durable result guard.
             if runtime.collector.snapshot():
                 raise BusinessSafetyError('FACTS_UNAVAILABLE', processing_status='UNKNOWN') from None
+            if capability.risk == Risk.WRITE_CONFIRM:
+                runtime._proposal_preparation_refused = True
             return BusinessToolResult(tool_payload=failure(error.code))
     # Each guarded READ gets a bounded local observation ordinal. These spans
     # observe the existing calls; no argument, guard, transaction or timeout is

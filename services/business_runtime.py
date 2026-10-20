@@ -82,6 +82,7 @@ class BusinessRuntime:
         self.business_scope_seen = self.scope is not None
         self._proposal_decision = None
         self._retired_cancel_intent = None
+        self._proposal_preparation_refused = False
         self.effect_eligible = False
         self.effect_origin_turn_id = None
         self._prompt_context_prepared = False
@@ -247,6 +248,11 @@ class BusinessRuntime:
         """A retired cancellation proposal is not a booking-effect receipt."""
         return getattr(self, '_retired_cancel_intent', None) == 'CHANGE'
 
+    @property
+    def buffer_preparation_refusal(self):
+        """A later successful READ is not a successfully prepared proposal."""
+        return getattr(self, '_proposal_preparation_refused', False) is True
+
     def _original_acquisition(self, gate):
         if (gate.selection_kind not in {"OWN", "CONFIRM"} or gate.plan is None
                 or gate.request_conflict):
@@ -261,6 +267,12 @@ class BusinessRuntime:
             return self._halt(True)
         if gate.disposition == "NO_PLAN" and self.collector.snapshot():
             return self._halt(True)
+        if gate.disposition == "NO_PLAN" and final_answer and self.buffer_preparation_refusal:
+            # A definitive pre-reservation refusal permits ordinary recovery
+            # reads. Only a durable replacement plan can supply a proposal;
+            # untrusted prose cannot invent one after those reads.
+            return BusinessToolResult(safe_draft='Не удалось подготовить предложение для подтверждения. '
+                'Действие не выполнялось. Давайте уточним детали.')
         if gate.disposition in {"NO_PLAN", "ALL_SUCCEEDED"}:
             if final_answer and self.buffer_cancellation_continuation:
                 # CHANGE may still prepare a replacement through ordinary tools.
