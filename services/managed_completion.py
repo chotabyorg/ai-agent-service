@@ -97,11 +97,12 @@ def observe_model_failure(error, *, request, step, timing):
         if type(request) is not ManagedTurnRequest or not isinstance(error, APIError):
             return
         from services.model_retry import classify_model_failure
+        from services.model_limit_observation import model_limit_observation
         failure = classify_model_failure(error)
         timing.complete()
         emit_completion_diagnostic(CompletionDiagnostic(turn_id=request.turn_id, step=step,
             branch='MODEL_FAILURE', finish='MISSING', visible_content='NOT_INSPECTED',
             model_ms=timing.model_ms, http_status=failure.http_status,
-            failure_category=failure.category))
+            failure_category=failure.category, **model_limit_observation(error)))
     except Exception:
         pass

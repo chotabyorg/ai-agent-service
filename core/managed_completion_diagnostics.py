@@ -14,6 +14,14 @@ _CONTENT = frozenset({"TEXT", "MISSING", "EMPTY", "WHITESPACE",
 _COUNTS = ("prompt_tokens", "completion_tokens", "total_tokens", "reasoning_tokens",
            "cached_tokens", "cache_write_tokens")
 _METRICS = _COUNTS + ("model_ms", "first_delta_ms")
+_LIMIT_FIELDS = {
+    'limit_source': frozenset({'MISSING', 'OTHER', 'OPENROUTER_IN_FLIGHT_BUDGET',
+        'OPENROUTER_CREDITS', 'OPENROUTER_KEY_LIMIT', 'OPENROUTER_GUARDRAIL_BUDGET',
+        'OPENROUTER_WORKSPACE_BUDGET'}),
+    'provider_code_state': frozenset({'MISSING', 'PRESENT', 'INVALID'}),
+    'rate_limit_headers': frozenset({'MISSING', 'PARTIAL', 'COMPLETE'}),
+    'retry_after_state': frozenset({'MISSING', 'INVALID', 'WITHIN_BUDGET', 'OVER_BUDGET'}),
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,6 +42,10 @@ class CompletionDiagnostic:
     first_delta_ms: int | None = None
     http_status: int | None = None
     failure_category: str | None = None
+    limit_source: str | None = None
+    provider_code_state: str | None = None
+    rate_limit_headers: str | None = None
+    retry_after_state: str | None = None
 
 
 def emit_completion_diagnostic(diagnostic: CompletionDiagnostic) -> None:
@@ -87,6 +99,13 @@ def _trusted_completion_record(record):
             if type(value.failure_category) is not str or value.failure_category not in FAILURE_CATEGORIES:
                 return None
             fields['failure_category'] = value.failure_category
+        for field, allowed in _LIMIT_FIELDS.items():
+            item = getattr(value, field)
+            if item is None:
+                continue
+            if value.branch != 'MODEL_FAILURE' or type(item) is not str or item not in allowed:
+                return None
+            fields[field] = item
     except Exception:
         return None
     template = "managed_completion_observed " + " ".join(name + "=%s" for name in fields)
