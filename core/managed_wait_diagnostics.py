@@ -1,6 +1,6 @@
 """Bounded operation lifecycle observations without arguments or exceptions."""
 import asyncio
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 import logging
 import time
@@ -11,7 +11,9 @@ import httpx
 from openai import APITimeoutError
 
 _IDENTITY = object()
-_PHASES = frozenset({'MODEL_HTTP', 'EXECUTION_GUARD', 'FINAL_GUARD', 'RETRY_WAIT',
+_CRM_PHASES = frozenset({'CRM_ASSERTION', 'CRM_CLIENT_SETUP', 'CRM_CONTEXT_HTTP',
+    'CRM_FACTS_HTTP', 'CRM_EXECUTE_HTTP', 'CRM_STATUS_HTTP', 'CRM_OTHER_HTTP', 'CRM_CLIENT_CLOSE'})
+_PHASES = _CRM_PHASES | frozenset({'MODEL_HTTP', 'EXECUTION_GUARD', 'FINAL_GUARD', 'RETRY_WAIT',
                     'CONTEXT_REPOSITORY', 'CONTEXT_RECEIPT', 'CONTEXT_BOOKING_READ',
                     'BUSINESS_BINDING_SYNC', 'BUSINESS_OPEN_CONTEXT', 'BUSINESS_RECOVER_ATTEMPTS',
                     'BUSINESS_COLLECT_REFS', 'BUSINESS_INVALIDATE_PROPOSAL', 'BUSINESS_SELECT_RECOVERY',
@@ -76,7 +78,7 @@ def observe_managed_wait(runtime, phase, *, step, attempt=1):
         state = 'CANCELLED' if isinstance(error, asyncio.CancelledError) else 'ERROR'
         try:
             from services.managed_tools import ManagedExecutionError
-            if (isinstance(error, (APITimeoutError, TimeoutError))
+            if (isinstance(error, (APITimeoutError, TimeoutError, httpx.TimeoutException))
                     or isinstance(error, ManagedExecutionError) and error.code == 'EXECUTION_TIMEOUT'):
                 state = 'TIMEOUT'
             elif isinstance(error.__cause__, httpx.TimeoutException):
@@ -91,6 +93,23 @@ def observe_managed_wait(runtime, phase, *, step, attempt=1):
         raise
     else:
         _observe(runtime, phase, step, attempt, 'COMPLETED', started)
+
+
+def observe_managed_crm_wait(runtime, phase):
+    """Keep bounded CRM ordinals on one turn, without changing its lifetime."""
+    if runtime is None or type(phase) is not str or phase not in _CRM_PHASES:
+        return nullcontext()
+    try:
+        steps = getattr(runtime, '_crm_wait_steps', None)
+        if steps is None:
+            steps = runtime._crm_wait_steps = {}
+        step = steps.get(phase, 0) + 1
+        steps[phase] = min(step, 21)
+        if step > 20:
+            return nullcontext()
+    except Exception:
+        return nullcontext()
+    return observe_managed_wait(runtime, phase, step=step)
 
 
 def _trusted_wait_record(record):

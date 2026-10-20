@@ -180,5 +180,12 @@ async def test_observer_failure_or_bound_does_not_prevent_guarded_read(
     business._read_observation_step = 20
     second = await business.call_tool('catalog_search', {})
     assert first == second and first.tool_payload['status'] == 'OK'
-    assert not rows and business._read_observation_step == 21
+    assert not read_stages(rows) and business._read_observation_step == 21
+    # The outer READ observer and request-local CRM timers have independent
+    # bounds. Saturating READ must not erase the nested HTTP measurements.
+    assert [(row.phase, row.state) for row in rows] == [
+        (phase, state) for request_phase in ('CRM_CONTEXT_HTTP', 'CRM_EXECUTE_HTTP')
+        for phase in ('CRM_ASSERTION', 'CRM_CLIENT_SETUP', request_phase, 'CRM_CLIENT_CLOSE')
+        for state in ('START', 'COMPLETED')]
+    assert all(1 <= row.step <= 20 and row.attempt == 1 for row in rows)
     assert provider['posts'] == 0 and not business.collector.snapshot()

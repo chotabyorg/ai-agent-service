@@ -108,3 +108,24 @@ async def test_failed_customer_lookup_cannot_fall_through_into_customer_create(
     async with db_session() as db:
         assert await db.scalar(select(func.count()).select_from(BusinessOperation)) == 0
         assert await db.scalar(select(func.count()).select_from(BusinessPlan)) == 0
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize('channel', ['WEBSITE_WIDGET', 'VOICE'])
+async def test_aggregate_contact_validation_asks_neutrally_without_a_proposal_or_effect(
+        api_client, db_session, monkeypatch, channel):
+    value, arguments, _, calls, effect_port, model = await install_managed_crm(
+        api_client, db_session, monkeypatch, 200, {}, channel=channel,
+        lookup_response={'status': 'ERROR', 'error': {
+            'code': 'VALIDATION_ERROR', 'message': 'private detail', 'retry': 'NEVER'}})
+    model.chat.completions.queue(tool('booking_create', arguments, 'inline-customer'))
+    response = await execute(api_client, value)
+    result = response.json()
+    assert response.status_code == 200 and result['status'] == 'DRAFT_READY', result
+    assert 'контактный номер с кодом страны' in result['draft_text']
+    assert 'Не удалось' not in result['draft_text'] and 'private detail' not in result['draft_text']
+    assert len(model.chat.completions.calls) == 1 and calls['lookup'] == 1
+    assert calls['execute'] == calls['facts'] == 0 and effect_port.permit_requests == []
+    async with db_session() as db:
+        assert await db.scalar(select(func.count()).select_from(BusinessOperation)) == 0
+        assert await db.scalar(select(func.count()).select_from(BusinessPlan)) == 0
