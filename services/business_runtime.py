@@ -114,7 +114,8 @@ class BusinessRuntime:
                                     lookup_source="NOT_APPLICABLE", lookup_mode="NOT_APPLICABLE",
                                     lookup_result="NOT_RUN", proposal_present=None,
                                     operation_present=None, schema_rule="NOT_APPLICABLE",
-                                    schema_field="NOT_APPLICABLE"):
+                                    schema_field="NOT_APPLICABLE", offering_ref_source="NOT_APPLICABLE",
+                                    resource_ref_source="NOT_APPLICABLE", customer_ref_source="NOT_APPLICABLE"):
         """Emit a bounded observation using only closed runtime categories."""
         try:
             if getattr(self, "_business_diagnostic_observations", 0) >= 16:
@@ -151,6 +152,8 @@ class BusinessRuntime:
                 refusal_category=normalize_refusal(refusal_category), lookup_source=lookup_source,
                 lookup_mode=lookup_mode, lookup_result=lookup_result,
                 proposal_present=proposal_present, operation_present=operation_present,
+                offering_ref_source=offering_ref_source, resource_ref_source=resource_ref_source,
+                customer_ref_source=customer_ref_source,
             )
             from core.managed_business_diagnostics import emit_business_diagnostic
             self._business_diagnostic_observations += 1

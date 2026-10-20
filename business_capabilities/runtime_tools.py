@@ -150,8 +150,9 @@ _REFUSAL_BY_ERROR = {
 }
 
 
-def _observe_proposal(runtime, name, *, result=None, error=None):
+def _observe_proposal(runtime, name, arguments, *, result=None, error=None):
     try:
+        from core.managed_reference_observations import booking_reference_sources
         code = getattr(error, 'code', None)
         payload = getattr(result, 'tool_payload', None)
         if code is None and isinstance(payload, dict) and isinstance(payload.get('error'), dict):
@@ -166,6 +167,7 @@ def _observe_proposal(runtime, name, *, result=None, error=None):
         runtime.observe_business_diagnostic(
             stage='PROPOSAL', capability=name, refusal_category=refusal,
             proposal_present=proposal_present, operation_present=operation_present,
+            **booking_reference_sources(runtime, name, arguments),
         )
     except Exception:
         pass
@@ -215,14 +217,14 @@ async def call_capability(runtime, name, arguments, *, lookup_source='MODEL'):
         result = await _call_capability_impl(runtime, name, arguments)
     except BusinessSafetyError as error:
         if name in {'booking_create', 'business_propose'}:
-            _observe_proposal(runtime, name, error=error)
+            _observe_proposal(runtime, name, arguments, error=error)
         raise
     except Exception:
         if name in {'booking_create', 'business_propose'}:
-            _observe_proposal(runtime, name)
+            _observe_proposal(runtime, name, arguments)
         raise
     if name in {'booking_create', 'business_propose'}:
-        _observe_proposal(runtime, name, result=result)
+        _observe_proposal(runtime, name, arguments, result=result)
     return result
 
 
@@ -332,6 +334,8 @@ async def _call_capability_impl(runtime, name, arguments):
         # A failed read proves neither absence nor the historical status. End
         # this turn with an honest reply before the model can invent either.
         return BusinessToolResult(tool_payload=result, safe_draft=reply)
+    from core.managed_reference_observations import observe_read_references
+    observe_read_references(runtime, capability.id, result)
     return BusinessToolResult(tool_payload=result)
 
 
