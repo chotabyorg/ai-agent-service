@@ -157,3 +157,16 @@ proposal ID caused that failure. Native regressions, full CI and new functional
 booking/cancellation acceptance remain required. Measure provider schema adherence,
 prompt cache coverage and latency; no speedup or full model-quality result follows
 from the schema change alone.
+# Proposal refusals and spoken truth
+
+A definitive provider refusal before proposal reservation does not establish a
+proposal. Subsequent advisory reads may recover the selection, but their success
+does not change that fact. The runtime retains a turn-local refusal flag, buffers
+subsequent model prose, and replaces a final `NO_PLAN` answer with an honest
+code-owned reply. A subsequently prepared durable proposal still uses the normal
+authoritative summary and later customer consent. Existing UNKNOWN, retained
+effects, authority, deadline, permit and replay rules take precedence unchanged.
+The flag grants no authority, performs no retry, changes no arguments or request
+fingerprints, and is independent of diagnostic logging. Synthetic HTTP regressions
+cover both channels, both preparation tools, three refusal categories, ordinary
+and streamed false confirmation, and the existing successful recovery cases.

@@ -699,7 +699,8 @@ class LLMService:
                                      and reuse_expectation is None
                                      and required_proposal_id is None
                                      and not (runtime and runtime.business is not None
-                                         and getattr(runtime.business, 'buffer_cancellation_continuation', False) is True)
+                                         and (getattr(runtime.business, 'buffer_cancellation_continuation', False) is True
+                                              or getattr(runtime.business, 'buffer_preparation_refusal', False) is True))
                                      else None),
                             timing=completion_timing,
                         )
