@@ -170,3 +170,20 @@ The flag grants no authority, performs no retry, changes no arguments or request
 fingerprints, and is independent of diagnostic logging. Synthetic HTTP regressions
 cover both channels, both preparation tools, three refusal categories, ordinary
 and streamed false confirmation, and the existing successful recovery cases.
+
+# Reference provenance observations
+
+Proposal diagnostics distinguish refs returned by successful, guarded catalog
+and resource searches or SINGLE customer lookup in the same turn, refs seen
+under another entity kind, and refs not observed in that turn. Only closed
+category strings enter the managed log boundary. The
+turn-local observer retains at most 96 SHA-256 digests per kind, never raw refs;
+overflow is reported as an observation limit. Customer evidence requires a
+SINGLE lookup result. An empty or failed read supplies no evidence.
+
+These categories are not authority or freshness proofs. A ref from an earlier
+turn can be valid without appearing in the current observation set. Conversely,
+an observed ref can later fail provider validation. The observer performs no
+lookup, repair, retry, model call, reservation or effect and never participates
+in admission or confirmation. It diagnoses future occurrences; it cannot
+identify the original reference behind historical r25 NOT_FOUND.
