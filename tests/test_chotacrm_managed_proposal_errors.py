@@ -424,7 +424,12 @@ async def test_managed_proposal_provider_refusal_is_recoverable_before_reservati
     result = response.json()
     assert response.status_code == 200
     assert result["status"] == "DRAFT_READY"
-    assert result["draft_text"] == "Не удалось подобрать это время. Уточните другой вариант."
+    # A provider refusal cannot leave the final wording to untrusted model
+    # prose. Keep the typed feedback and the no-effect/recovery checks below.
+    assert result["draft_text"] == (
+        "Не удалось подготовить предложение для подтверждения. "
+        "Действие не выполнялось. Давайте уточним детали."
+    )
     tool_result = next(message for message in model.chat.completions.calls[1]["messages"]
                        if message.get("role") == "tool")
     assert json.loads(tool_result["content"]) == failure(error_code)
