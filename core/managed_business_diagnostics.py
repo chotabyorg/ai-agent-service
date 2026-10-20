@@ -10,7 +10,7 @@ _IDENTITY = object()
 _STAGES = frozenset({"PREPARATION", "LOOKUP", "PROPOSAL", "TERMINAL", "TOOL_INPUT", "TOOL_READ", "TOOL_GUARD"})
 _CAPABILITIES = frozenset({
     "booking.create", "booking_create", "business_propose",
-    "customer.find", "customer_find", "NOT_APPLICABLE",
+    "customer.find", "customer_find", "business_decide_proposal", "NOT_APPLICABLE",
 }) | frozenset(value for capability in CAPABILITIES for value in (capability.id, capability.tool_name))
 _REFUSALS = frozenset({
     "NONE", "IDENTITY_CONFLICT", "AMBIGUOUS_IDENTITY", "LOOKUP_UNAVAILABLE",
@@ -30,7 +30,8 @@ _SCHEMA_RULES = frozenset({"NOT_APPLICABLE", "schema", "type", "required", "addi
     "exclusiveMaximum", "multipleOf"})
 _SCHEMA_FIELDS = frozenset({"NOT_APPLICABLE", "ROOT", "OTHER", "query", "cursor", "limit",
     "actions", "arguments", "capability", "customer_ref", "customer", "identity", "display_name",
-    "offering_ref", "resource_ref", "start_at", "from", "to", "booking_ref", "expected_revision", "kind", "value"})
+    "offering_ref", "resource_ref", "start_at", "from", "to", "booking_ref", "expected_revision", "kind", "value",
+    "proposal_id", "intent", "tool_calls", "tool_call_id", "tool_name", "type", "assistant_message", "envelope"})
 
 
 def refusal_category(value):
