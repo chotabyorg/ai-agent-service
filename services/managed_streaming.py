@@ -354,6 +354,10 @@ async def stream_completion(
     if inspect.isawaitable(result):
         result = await result
     if _get(result, "choices") is not None:
+        if require_finish and _get(_choice(result), "finish_reason") is None:
+            from services.managed_tools import ManagedExecutionError
+
+            raise ManagedExecutionError("INVALID_RESULT")
         _observe_router(timing, result)
         return result
     text_parts: list[str] = []

@@ -144,6 +144,24 @@ async def test_compatible_client_never_receives_stored_cloud_key_or_router_heade
         await client.close()
 
 
+@pytest.mark.asyncio
+async def test_stream_request_buffered_fallback_requires_finish_before_admission():
+    response = SimpleNamespace(choices=[SimpleNamespace(finish_reason=None,
+        message=SimpleNamespace(content='Unfinished', tool_calls=None))])
+
+    async def create(**kwargs):
+        assert kwargs['stream'] is True
+        return response
+
+    async def partial(text):
+        raise AssertionError('Buffered fallback emitted an unvalidated partial')
+
+    with pytest.raises(ManagedExecutionError, match='INVALID_RESULT'):
+        await complete_with_partials(create, {}, on_text=partial, require_finish=True)
+    response.choices[0].finish_reason = 'stop'
+    assert await complete_with_partials(create, {}, on_text=partial, require_finish=True) is response
+
+
 @pytest.mark.integration
 async def test_neutral_managed_voice_uses_endpoint_credential_without_key_warmup(
         api_client, db_session, monkeypatch):
