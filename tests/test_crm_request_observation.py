@@ -2,10 +2,12 @@
 import asyncio
 import base64
 import json
+import sys
 from types import SimpleNamespace
 from uuid import uuid4
 
 import httpx
+import anyio
 import pytest
 
 from business_capabilities.chotacrm_client import ChotaCRMClient
@@ -21,6 +23,27 @@ PRIVATE = 'private-crm-path-header-body-claim'
 
 def runtime():
     return ManagedRuntime(10, request=SimpleNamespace(turn_id=uuid4()))
+
+
+async def finish(execution):
+    with anyio.CancelScope(shield=True) as lifecycle:
+        await execution.cleanup(lifecycle)
+
+
+@pytest.fixture(autouse=True)
+async def cleanup_test_runtimes(monkeypatch):
+    original, executions = runtime, []
+
+    def create():
+        execution = original()
+        executions.append(execution)
+        return execution
+
+    monkeypatch.setattr(sys.modules[__name__], 'runtime', create)
+    yield
+    for execution in executions:
+        if not execution._crm_http_closed:
+            await finish(execution)
 
 
 def capture_clients(monkeypatch):
@@ -65,7 +88,9 @@ async def test_request_and_fresh_assertions_survive_route_observation(
     for _ in range(2):
         assert await client.request(method, path, scope='fixture', claims=claims,
             body={'argument': PRIVATE}, execution=execution) == {'value': PRIVATE}
-    assert len(clients) == 2 and all(value.is_closed for value in clients)
+    assert len(clients) == 1 and not clients[0].is_closed
+    await finish(execution)
+    assert all(value.is_closed for value in clients)
     assert execution.deadline == deadline and execution.active_scope is None
     assert all(request.method == method and request.url.path.endswith('/' + path)
         and json.loads(request.content) == {'argument': PRIVATE} and 'cookie' not in request.headers
@@ -77,8 +102,8 @@ async def test_request_and_fresh_assertions_survive_route_observation(
     rows = observations(caplog)
     assert [(row.phase, row.state) for row in rows] == [
         (stage, state) for _ in range(2)
-        for stage in ('CRM_ASSERTION', 'CRM_CLIENT_SETUP', phase, 'CRM_CLIENT_CLOSE')
-        for state in ('START', 'COMPLETED')]
+        for stage in ('CRM_ASSERTION', 'CRM_CLIENT_SETUP', phase)
+        for state in ('START', 'COMPLETED')] + [('CRM_CLIENT_CLOSE', 'START'), ('CRM_CLIENT_CLOSE', 'COMPLETED')]
     assert [row.step for row in rows if row.phase == phase and row.state == 'START'] == [1, 2]
     assert_private(caplog)
 
@@ -108,7 +133,9 @@ async def test_transport_failure_is_not_retried_or_replaced_by_timing(
         assert raised.value is original
     else:
         assert raised.value.code == 'PROVIDER_UNAVAILABLE'
-    assert len(calls) == len(clients) == 1 and clients[0].is_closed
+    assert len(calls) == len(clients) == 1
+    await finish(execution)
+    assert clients[0].is_closed
     assert execution.deadline == deadline and execution.active_scope is None
     assert [row.state for row in observations(caplog) if row.phase == 'CRM_EXECUTE_HTTP'] == ['START', state]
     assert [row.state for row in observations(caplog) if row.phase == 'CRM_CLIENT_CLOSE'] == ['START', 'COMPLETED']
@@ -131,6 +158,7 @@ async def test_response_gates_and_close_stay_intact(crm_settings, monkeypatch, c
         assert raised.value.code == code
     else:
         assert await client.request('GET', 'context', scope='fixture', claims={}, execution=execution) is None
+    await finish(execution)
     assert clients[0].is_closed
     assert [row.state for row in observations(caplog) if row.phase == 'CRM_CLIENT_CLOSE'] == ['START', 'COMPLETED']
 
@@ -157,6 +185,7 @@ async def test_cancel_during_response_body_keeps_cleanup_and_original_cancellati
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
+    await finish(execution)
     assert closed.is_set() and clients[0].is_closed and execution.deadline == deadline
     assert [row.state for row in observations(caplog) if row.phase == 'CRM_CONTEXT_HTTP'] == ['START', 'CANCELLED']
     assert [row.state for row in observations(caplog) if row.phase == 'CRM_CLIENT_CLOSE'] == ['START', 'COMPLETED']

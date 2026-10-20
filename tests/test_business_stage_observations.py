@@ -1,6 +1,8 @@
 """Substage observations keep the real ledger/READ path and failure boundaries."""
 import asyncio
+import sys
 
+import anyio
 import pytest
 
 from core import managed_wait_diagnostics as diagnostics
@@ -9,6 +11,23 @@ from services.business_runtime import BusinessRuntime
 from services.managed_runtime import ManagedRuntime
 from tests.business_effect_helpers import FakeConversationEffectPort
 from tests.test_chotacrm_adapter import crm_settings, setup  # noqa: F401
+
+
+@pytest.fixture(autouse=True)
+async def finish_owned_runtimes(monkeypatch):
+    original, executions = ManagedRuntime, []
+
+    def create(*args, **kwargs):
+        execution = original(*args, **kwargs)
+        executions.append(execution)
+        return execution
+
+    monkeypatch.setattr(sys.modules[__name__], 'ManagedRuntime', create)
+    yield
+    for execution in executions:
+        if not execution._crm_http_closed:
+            with anyio.CancelScope(shield=True) as lifecycle:
+                await execution.cleanup(lifecycle)
 
 
 def read_stages(rows):
@@ -181,11 +200,16 @@ async def test_observer_failure_or_bound_does_not_prevent_guarded_read(
     second = await business.call_tool('catalog_search', {})
     assert first == second and first.tool_payload['status'] == 'OK'
     assert not read_stages(rows) and business._read_observation_step == 21
+    clients = list(business.execution._crm_http_clients.values())
+    assert len(clients) == 1 and not clients[0].is_closed
+    with anyio.CancelScope(shield=True) as lifecycle:
+        await business.execution.cleanup(lifecycle)
+    assert clients[0].is_closed and business.execution._crm_http_clients == {}
     # The outer READ observer and request-local CRM timers have independent
     # bounds. Saturating READ must not erase the nested HTTP measurements.
     assert [(row.phase, row.state) for row in rows] == [
         (phase, state) for request_phase in ('CRM_CONTEXT_HTTP', 'CRM_EXECUTE_HTTP')
-        for phase in ('CRM_ASSERTION', 'CRM_CLIENT_SETUP', request_phase, 'CRM_CLIENT_CLOSE')
-        for state in ('START', 'COMPLETED')]
+        for phase in ('CRM_ASSERTION', 'CRM_CLIENT_SETUP', request_phase)
+        for state in ('START', 'COMPLETED')] + [('CRM_CLIENT_CLOSE', 'START'), ('CRM_CLIENT_CLOSE', 'COMPLETED')]
     assert all(1 <= row.step <= 20 and row.attempt == 1 for row in rows)
     assert provider['posts'] == 0 and not business.collector.snapshot()

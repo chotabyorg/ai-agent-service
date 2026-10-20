@@ -39,6 +39,8 @@ class ManagedRuntime:
         self.knowledge_task = None
         self.started_stdio_count = 0
         self.managers = []
+        self._crm_http_clients = {}
+        self._crm_http_closed = False
 
     def signal_cancel(self):
         self.cancel_requested = True
@@ -74,6 +76,8 @@ class ManagedRuntime:
         return result
 
     async def cleanup(self, lifecycle):
+        # Do not admit a new pooled acquisition while existing callbacks join.
+        self._crm_http_closed = True
         # Change the existing outer scope: no new scope may cross SDK scope exits.
         lifecycle.deadline = anyio.current_time() + 6 * self.started_stdio_count + 2
         try:
@@ -85,6 +89,7 @@ class ManagedRuntime:
                 raise
             raise ManagedExecutionError("TOOL_CLEANUP_FAILED") from None
         finally:
+            self._crm_http_clients.clear()
             for manager in self.managers:
                 manager.stack = None
                 manager.session = None

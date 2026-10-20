@@ -2,6 +2,7 @@
 import base64
 import json
 import time
+from http.cookiejar import CookieJar, DefaultCookiePolicy
 from uuid import UUID, uuid4
 
 import httpx
@@ -15,6 +16,16 @@ from core.managed_wait_diagnostics import observe_managed_crm_wait
 
 def _b64(data: bytes) -> str:
     return base64.urlsafe_b64encode(data).rstrip(b'=').decode('ascii')
+
+
+class _NoResponseCookies(DefaultCookiePolicy):
+    """A reused application transport must not acquire browser credentials."""
+
+    def set_ok(self, cookie, request):
+        return False
+
+    def return_ok(self, cookie, request):
+        return False
 
 
 class ChotaCRMClient:
@@ -74,13 +85,42 @@ class ChotaCRMClient:
             headers['Cookie'] = cookie
             headers['X-User-Id'] = claims['owner_id']
         from services.managed_http_cleanup import own_managed_http, close_managed_helper
+        from services.managed_runtime import ManagedRuntime
+        from services.managed_tools import ManagedExecutionError
+        # Only the real Turn owner supplies a lifecycle for connection reuse.
+        # Configuration/browser requests and other trusted callers retain their
+        # existing one-request close. No grant, assertion, facts or result is cached.
+        pooled = isinstance(execution, ManagedRuntime) and cookie is None
+        if pooled and execution._crm_http_closed:
+            raise ManagedExecutionError('TOOL_CLEANUP_FAILED')
+        base_url = self.settings.business_crm_url.rstrip('/') + '/internal/agent/v1/'
+        timeout = self.settings.business_crm_timeout_seconds
+        key = (self, base_url, timeout, self.transport)
         with observe_managed_crm_wait(execution, 'CRM_CLIENT_SETUP'):
-            client = httpx.AsyncClient(base_url=self.settings.business_crm_url.rstrip('/') + '/internal/agent/v1/',
-                                       timeout=self.settings.business_crm_timeout_seconds,
-                                       transport=self.transport, follow_redirects=False, trust_env=False)
+            client = execution._crm_http_clients.get(key) if pooled else None
+            if client is not None and client.is_closed:
+                raise ManagedExecutionError('TOOL_CLEANUP_FAILED')
+            if client is None:
+                client = httpx.AsyncClient(base_url=base_url, timeout=timeout,
+                    transport=self.transport, follow_redirects=False, trust_env=False,
+                    cookies=CookieJar(policy=_NoResponseCookies()))
+        retained = False
         try:
             if execution is not None:
                 own_managed_http(client)
+            if pooled:
+                if key not in execution._crm_http_clients:
+                    execution._crm_http_clients[key] = client
+
+                    async def close_turn_client():
+                        try:
+                            with observe_managed_crm_wait(execution, 'CRM_CLIENT_CLOSE'):
+                                await close_managed_helper(client)
+                        finally:
+                            execution._crm_http_clients.pop(key, None)
+
+                    execution.stack.push_async_callback(close_turn_client)
+                retained = True
             with observe_managed_crm_wait(execution, self._http_phase(method, path)):
                 async with client.stream(method, path.lstrip('/'), headers=headers, json=body) as response:
                     chunks = bytearray()
@@ -98,11 +138,12 @@ class ChotaCRMClient:
         except (httpx.HTTPError, ValueError):
             raise BusinessRuntimeError('PROVIDER_UNAVAILABLE') from None
         finally:
-            with observe_managed_crm_wait(execution, 'CRM_CLIENT_CLOSE'):
-                if execution is not None:
-                    await close_managed_helper(client)
-                else:
-                    await client.aclose()
+            if not retained:
+                with observe_managed_crm_wait(execution, 'CRM_CLIENT_CLOSE'):
+                    if execution is not None:
+                        await close_managed_helper(client)
+                    else:
+                        await client.aclose()
 
     async def workspaces(self, owner_id: UUID, cookie: str):
         from business_capabilities.results import Workspaces
