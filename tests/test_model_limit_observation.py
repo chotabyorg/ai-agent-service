@@ -88,7 +88,8 @@ def test_http_date_is_observed_without_recording_it(seconds, expected):
 def test_sse_body_retains_metadata_without_inventing_http_headers():
     result = model_limit_observation(failure(stream=True, metadata={'provider_code': SECRET}))
     assert result == dict(limit_source='MISSING', provider_code_state='PRESENT',
-        rate_limit_headers='MISSING', retry_after_state='MISSING')
+        rate_limit_headers='MISSING', retry_after_state='MISSING',
+        error_kind='MISSING', provider_hint='MISSING')
     assert model_limit_observation(ValueError(SECRET)) == {}
 
 
@@ -97,7 +98,8 @@ def test_sse_body_retains_metadata_without_inventing_http_headers():
 async def test_actual_managed_failure_observes_evidence_then_recovers_once(
         api_client, db_session, monkeypatch, model, caplog, stream):
     _, value = await setup(api_client, db_session, monkeypatch, channel='VOICE')
-    error = failure(stream=stream, metadata={'provider_code': SECRET},
+    error = failure(stream=stream, metadata={'provider_code': SECRET,
+        'error_type': 'rate_limit_exceeded', 'provider_name': 'NextBit', 'raw': SECRET},
         headers={'Retry-After': '0', 'X-RateLimit-Limit': SECRET})
     model.chat.completions.queue(error, build_llm_response(content='Какое время вам удобно?'))
     with caplog.at_level(logging.INFO):
@@ -109,6 +111,7 @@ async def test_actual_managed_failure_observes_evidence_then_recovers_once(
     failed = [record for record in rows if record.branch == 'MODEL_FAILURE']
     assert len(failed) == 1 and failed[0].provider_code_state == 'PRESENT'
     assert failed[0].limit_source == 'MISSING'
+    assert failed[0].error_kind == 'RATE_LIMITED' and failed[0].provider_hint == 'NEXTBIT'
     assert failed[0].rate_limit_headers == ('MISSING' if stream else 'PARTIAL')
     assert failed[0].retry_after_state == ('MISSING' if stream else 'WITHIN_BUDGET')
     assert all(SECRET not in record.getMessage() and SECRET not in repr(record.__dict__) for record in caplog.records)
