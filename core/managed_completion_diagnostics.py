@@ -21,6 +21,14 @@ _LIMIT_FIELDS = {
     'provider_code_state': frozenset({'MISSING', 'PRESENT', 'INVALID'}),
     'rate_limit_headers': frozenset({'MISSING', 'PARTIAL', 'COMPLETE'}),
     'retry_after_state': frozenset({'MISSING', 'INVALID', 'WITHIN_BUDGET', 'OVER_BUDGET'}),
+    'error_kind': frozenset({'MISSING', 'OTHER', 'INVALID', 'RATE_LIMITED',
+        'PROVIDER_OVERLOADED', 'PROVIDER_UNAVAILABLE', 'CONTEXT_LENGTH_EXCEEDED',
+        'MAX_TOKENS_EXCEEDED', 'TOKEN_LIMIT_EXCEEDED', 'STRING_TOO_LONG',
+        'AUTHENTICATION', 'PERMISSION_DENIED', 'PAYMENT_REQUIRED', 'INVALID_REQUEST',
+        'INVALID_PROMPT', 'NOT_FOUND', 'PRECONDITION_FAILED', 'PAYLOAD_TOO_LARGE',
+        'UNPROCESSABLE', 'CONTENT_POLICY_VIOLATION', 'REFUSAL', 'SERVER', 'TIMEOUT', 'UNMAPPED'}),
+    'provider_hint': frozenset({'MISSING', 'OTHER', 'INVALID', 'MAKORA', 'NEXTBIT',
+        'CLOUDFLARE', 'OPENAI'}),
 }
 
 
@@ -46,6 +54,8 @@ class CompletionDiagnostic:
     provider_code_state: str | None = None
     rate_limit_headers: str | None = None
     retry_after_state: str | None = None
+    error_kind: str | None = None
+    provider_hint: str | None = None
 
 
 def emit_completion_diagnostic(diagnostic: CompletionDiagnostic) -> None:
