@@ -1,4 +1,4 @@
-"""Voice-only signing reuse and bounded phase timings; native test database."""
+"""Turn-owned signing reuse and bounded phase timings; native test database."""
 import asyncio
 import base64
 import json
@@ -16,7 +16,7 @@ from business_capabilities.context import BusinessRuntimeError
 from core.config import Settings, get_settings
 from core.managed_security import managed_logging, install_managed_log_boundary
 from core import voice_latency_diagnostics as diagnostic
-from services.voice_signing import voice_signing_scope, _current
+from services.voice_signing import managed_signing_scope, voice_signing_scope, _current
 from tests.fakes import build_llm_response, build_tool_call
 from tests.test_managed_business_fakes import install_business, plan_arguments
 from tests.test_managed_turns import setup, execute, model  # noqa: F401
@@ -130,10 +130,90 @@ def test_nested_and_exceptional_scope_restores_outer_without_retaining_inner(key
     assert original == {} and _current.get() is None
 
 
+def test_two_text_turn_owners_parse_separately_and_keep_fresh_claims(keys, monkeypatch):
+    counts = count_loads(monkeypatch)
+    client = ChotaCRMClient(settings(keys[0])); entries, claims = [], []
+    for turn in range(2):
+        owner = object()
+        with managed_signing_scope(owner):
+            entries.append(_current.get())
+            for scope in ('context', 'catalog.search', 'resource.search'):
+                claims.append(unpack(client.assertion(scope, {'session_id': str(turn)}, execution=owner), keys[0]))
+    assert len(counts) == 2 and all(entry == {} for entry in entries) and _current.get() is None
+    assert len({value['jti'] for value in claims}) == 6
+    assert [value['session_id'] for value in claims] == ['0']*3 + ['1']*3
+    assert [value['scope'] for value in claims] == ['context', 'catalog.search', 'resource.search']*2
+
+
+@pytest.mark.asyncio
+async def test_concurrent_turns_keep_distinct_key_material_and_cleanup(keys, monkeypatch):
+    counts = count_loads(monkeypatch)
+    ready = [asyncio.Event(), asyncio.Event()]; entries = []
+    async def run(index):
+        client = ChotaCRMClient(settings(keys[index])); owner = object()
+        with managed_signing_scope(owner):
+            entries.append(_current.get())
+            first = client.assertion('context', {'session_id': str(index)}, execution=owner)
+            ready[index].set()
+            await ready[1-index].wait()
+            second = client.assertion('catalog.search', {'session_id': str(index)}, execution=owner)
+            assert unpack(first, keys[index])['session_id'] == str(index)
+            assert unpack(second, keys[index])['session_id'] == str(index)
+    await asyncio.gather(run(0), run(1))
+    assert len(counts) == 2 and all(entry == {} for entry in entries) and _current.get() is None
+
+
+@pytest.mark.asyncio
+async def test_signing_material_is_cleared_by_actual_runtime_cancellation_cleanup(keys):
+    import anyio
+    from services.managed_runtime import ManagedRuntime
+    ready = asyncio.Event(); retained = []
+    async def owner():
+        runtime = ManagedRuntime(10); client = ChotaCRMClient(settings(keys[0]))
+        with anyio.CancelScope(shield=True) as lifecycle:
+            try:
+                runtime.stack.enter_context(managed_signing_scope(runtime))
+                entry = _current.get()
+                client.assertion('context', {}, execution=runtime)
+                retained.extend((runtime, entry))
+                ready.set()
+                await runtime.operation(asyncio.Event().wait())
+            finally:
+                await runtime.cleanup(lifecycle)
+    task = asyncio.create_task(owner())
+    await asyncio.wait_for(ready.wait(), 2)
+    retained[0].signal_cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, 2)
+    assert retained[1] == {} and _current.get() is None
+
+
 @pytest.mark.asyncio
 @pytest.mark.integration
-@pytest.mark.parametrize("channel,enabled,expected", [("VOICE", True, 1), ("VOICE", False, 2), ("TELEGRAM", True, 2)])
-async def test_managed_activation_is_exact_voice_only_and_cleanup_owned(
+async def test_text_scope_is_cleared_after_early_agent_key_failure(
+        api_client, db_session, monkeypatch, model, keys):
+    from services.llm_service import LLMService
+    _, value = await setup(api_client, db_session, monkeypatch, channel='WEBSITE_WIDGET')
+    client = ChotaCRMClient(settings(keys[0])); entries = []
+    def broken(self, agent):
+        entry = _current.get()
+        assert entry is not None
+        client.assertion('context', {}, execution=entry['owner'])
+        entries.append(entry)
+        raise RuntimeError('synthetic-key-lookup-failed')
+    monkeypatch.setattr(LLMService, '_get_agent_api_key', broken)
+    result = (await execute(api_client, value)).json()
+    assert result['status'] == 'FAILED' and result['error_code'] == 'AGENT_CONFIGURATION_ERROR'
+    assert not result['operation_refs'] and not model.chat.completions.calls
+    assert entries == [{}] and _current.get() is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.integration
+@pytest.mark.parametrize("channel,enabled,expected", [("VOICE", True, 1), ("VOICE", False, 2),
+    ("TELEGRAM", True, 1), ("TELEGRAM", False, 1), ("WEBSITE_WIDGET", True, 1),
+    ("INSTAGRAM", True, 1), ("WHATSAPP", True, 1)])
+async def test_managed_activation_keeps_voice_opt_out_and_cleanup_owned(
         api_client, db_session, monkeypatch, model, keys, channel, enabled, expected, caplog):
     agent, value = await setup(api_client, db_session, monkeypatch, channel=channel)
     selected = profile(value, agent["model_name"], True).model_copy(update={"reuse_signing_key": enabled})

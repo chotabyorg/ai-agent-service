@@ -167,9 +167,9 @@ async def execute_managed_owned(request, grant, runtime, db_provider, session_fa
             if not agent.is_active:
                 raise ManagedExecutionError("AGENT_INACTIVE")
             profile = service._managed_voice_profile(agent, request=request)
-            if profile is not None and profile.reuse_signing_key:
-                from services.voice_signing import voice_signing_scope
-                runtime.stack.enter_context(voice_signing_scope(runtime))
+            if request.channel != 'VOICE' or (profile is not None and profile.reuse_signing_key):
+                from services.voice_signing import managed_signing_scope
+                runtime.stack.enter_context(managed_signing_scope(runtime))
             try:
                 key = service._get_agent_api_key(agent)
             except Exception:
