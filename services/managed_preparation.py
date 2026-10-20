@@ -276,6 +276,15 @@ async def prepare_booking_customer_reuse(runtime, name, arguments):
     if customer is None:
         _observe_preparation(runtime, name=name)
         return None
+    return await lookup_booking_customer(runtime, customer, name=name)
+
+
+async def lookup_booking_customer(runtime, customer, *, name, return_lookup=False):
+    """Read an explicit booking contact through the existing identity gates.
+
+    The optional early READ returns the ordinary validated lookup to the model.
+    It never edits a booking call, caches a witness or creates a proposal.
+    """
 
     # This fresh gate preserves retained UNKNOWN/proposal evidence before any
     # lookup feedback can be returned to the model or customer.
@@ -393,7 +402,7 @@ async def prepare_booking_customer_reuse(runtime, name, arguments):
                                  lookup_mode=lookup_mode)
             return BusinessToolResult(safe_draft=_safe_lookup_draft('LOOKUP_INVALID'))
         _observe_preparation(runtime, name=name, lookup_result='NONE', lookup_mode=lookup_mode)
-        return None
+        return result if return_lookup else None
     if data.match != 'SINGLE' or len(data.candidates) != 1:
         _observe_preparation(runtime, name=name, lookup_result='ERROR', refusal='LOOKUP_INVALID',
                              lookup_mode=lookup_mode)
@@ -410,6 +419,8 @@ async def prepare_booking_customer_reuse(runtime, name, arguments):
         return BusinessToolResult(safe_draft=_safe_lookup_draft('IDENTITY_CONFLICT'))
 
     _observe_preparation(runtime, name=name, lookup_result='SINGLE', lookup_mode=lookup_mode)
+    if return_lookup:
+        return result
     return BusinessToolResult(tool_payload={
         'status': 'CUSTOMER_REUSE_REQUIRED',
         'customer_ref': candidate.ref,

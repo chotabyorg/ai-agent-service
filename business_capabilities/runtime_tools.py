@@ -52,7 +52,7 @@ def canonical_tools(runtime, controls):
         return result
     from services.booking_search_options import REQUIRED_CAPABILITIES, search_tool
     if REQUIRED_CAPABILITIES <= {c.id for c in readable}:
-        result.append(search_tool())
+        result.append(search_tool(include_customer='customer.find' in {c.id for c in readable}))
     if not runtime.effect_eligible:
         return result
     # Model never chooses a provider or arbitrary plan. The one supported bundle
