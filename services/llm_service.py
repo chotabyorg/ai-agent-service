@@ -420,7 +420,11 @@ class LLMService:
 
     async def _managed_completion_create(self, client, **kwargs):
         self.settings.managed_completion_adapter.validate_request(kwargs)
-        return await client.chat.completions.create(**kwargs)
+        response = await client.chat.completions.create(**kwargs)
+        if not kwargs.get('stream') and (not getattr(response, 'choices', None)
+                or getattr(response.choices[0], 'finish_reason', None) is None):
+            raise ManagedExecutionError('INVALID_RESULT')
+        return response
 
     def _create_llm_client(self, agent_api_key, privacy_session_id, *, managed=False):
         adapter = self.settings.managed_completion_adapter
@@ -731,6 +735,7 @@ class LLMService:
                                               or getattr(runtime.business, 'buffer_preparation_refusal', False) is True))
                                      else None),
                             timing=completion_timing,
+                            require_finish=runtime is not None and self.settings.managed_completion_adapter is not None,
                         )
                         try:
                             with observe_managed_wait(runtime, 'MODEL_HTTP', step=step_index + 1,

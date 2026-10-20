@@ -74,7 +74,7 @@ async def test_completion_contract(kind, case):
         request = dict(model='synthetic', messages=[{'role': 'user', 'content': 'test'}], tools=[TOOL],
                        parallel_tool_calls=False, max_tokens=32)
         pending = complete_with_partials(create, request,
-            on_text=partial if case in {'stream', 'broken_stream'} else None)
+            on_text=partial if case in {'stream', 'broken_stream'} else None, require_finish=True)
         if case == 'timeout':
             with pytest.raises(APITimeoutError):
                 await pending
@@ -84,11 +84,13 @@ async def test_completion_contract(kind, case):
             task.cancel()
             with pytest.raises(asyncio.CancelledError):
                 await task
+        elif case == 'broken_stream':
+            with pytest.raises(ManagedExecutionError, match='INVALID_RESULT'):
+                await pending
         else:
             result = await pending
             selected = select_managed_completion(result, lambda t: t.strip())
-            assert selected.branch == ('TOOL_CALLS' if case == 'tool' else
-                                       'INVALID_SHAPE' if case == 'broken_stream' else 'FINAL')
+            assert selected.branch == ('TOOL_CALLS' if case == 'tool' else 'FINAL')
             if case == 'absent_usage':
                 assert accounting_metrics(result.usage) == {}
             else:
