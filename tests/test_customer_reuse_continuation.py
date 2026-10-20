@@ -4,6 +4,7 @@ import json
 import pytest
 from sqlalchemy import func, select
 
+from business_capabilities.registry import DEFAULTS
 from models.business import BusinessOperation, BusinessPlan
 from schemas.managed_turn import ManagedTurnRequest
 from services.llm_service import LLMService
@@ -19,7 +20,8 @@ from tests.test_preparation_schema_correction import preparation
 async def fixture(api_client, db_session, monkeypatch, channel, tool):
     value, args, _, calls, effect, model = await install_managed_crm(
         api_client, db_session, monkeypatch, 200, {},
-        lookup_response=existing_customer_lookup(), allow_execute=True, channel=channel)
+        lookup_response=existing_customer_lookup(), allow_execute=True, channel=channel,
+        enabled_capabilities=[*DEFAULTS, 'deal.create'] if tool == 'business_propose' else None)
     corrected = {k: v for k, v in args.items() if k != 'customer'}
     corrected['customer_ref'] = 'customer_existing'
     initial = preparation(tool, preparation_arguments(tool, args), 'initial')
