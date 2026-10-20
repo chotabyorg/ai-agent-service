@@ -187,3 +187,20 @@ an observed ref can later fail provider validation. The observer performs no
 lookup, repair, retry, model call, reservation or effect and never participates
 in admission or confirmation. It diagnoses future occurrences; it cannot
 identify the original reference behind historical r25 NOT_FOUND.
+
+
+### Direct preparation after a concrete appointment choice
+
+The shared platform prompt now states the direct-preparation rule already used
+in the Voice presentation layer. When the service, specialist, exact time and
+customer facts are present, prepare a proposal directly. Availability search
+remains appropriate for choosing time options. Preparation still performs fresh
+facts/conflict checks; the proposal still needs consent in a later customer turn.
+No tool, schema, authority, effect, retry or request-identity behavior changes.
+
+AI121 retained text evidence used four model completions, including a separate
+advisory availability call; their measured total was 14.066 seconds. This prompt
+change is a hypothesis for removing that advisory model round. It does not fix
+historical NOT_FOUND or the separate CUSTOMER_REUSE_REQUIRED continuation.
+Fewer model calls and real task completion require post-change product QA;
+scripted native regressions prove runtime safeguards, not model selection or speed.
