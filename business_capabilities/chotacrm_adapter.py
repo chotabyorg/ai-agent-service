@@ -1,5 +1,4 @@
 """Typed Goal3 provider adapter. Config-only instance; each call owns its resources."""
-from uuid import UUID
 from sqlalchemy import select
 from pydantic import Field
 
@@ -34,17 +33,18 @@ class ChotaCRMAdapter:
     async def _context(self, scope, *, connection_id=None, live=True):
         async with self.session_factory() as db:
             if connection_id is None:
-                binding = await db.scalar(select(BusinessBinding).where(
+                # Reload binding and its connection in one statement. This is
+                # fresh on every adapter call; no authority crosses READs.
+                row = await db.scalar(select(BusinessConnection).join(
+                    BusinessBinding, BusinessBinding.connection_id == BusinessConnection.id).where(
                     BusinessBinding.agent_id == scope.agent_id,
                     BusinessBinding.agent_owner_id == scope.agent_owner_id,
                     BusinessBinding.owner_id == scope.owner_id,
                     BusinessBinding.integration_id == scope.integration_id,
                     BusinessBinding.channel == scope.channel,
                     BusinessBinding.active.is_(True)))
-                if binding is None:
-                    raise BusinessSafetyError('BINDING_UNAVAILABLE')
-                connection_id = binding.connection_id
-            row = await db.get(BusinessConnection, connection_id)
+            else:
+                row = await db.get(BusinessConnection, connection_id)
             if (row is None or row.agent_id != scope.agent_id or row.owner_id != scope.agent_owner_id
                     or row.grant_id is None or (live and (not row.active or row.pending_action))):
                 raise BusinessSafetyError('BINDING_UNAVAILABLE')

@@ -703,11 +703,16 @@ class BusinessRepository:
     async def result_gate(self, request, grant):
         async with self._session() as session:
             async with session.begin():
-                scope = await self._scope_query(session, request, grant)
+                # Acquire the same scope lock in the scoped lookup itself.
+                # The former unlocked lookup and immediate locked reload read
+                # this row twice at every pre/post READ guard.
+                scope = await session.scalar(select(BusinessScope).filter_by(
+                    **tenant_values(request, grant), conversation_id=request.conversation_id)
+                    .with_for_update(nowait=session.info.get('business_nowait', False))
+                    .execution_options(populate_existing=True))
                 if scope is None:
                     result = BusinessResultGate(False, None, False, "NO_PLAN", None, False)
                 else:
-                    scope = await self._lock_scope(session, scope.id)
                     context = await session.get(BusinessTurnContext, (scope.id, request.turn_id))
                     request_conflict = bool(context and context.request_fingerprint != request_fingerprint(request))
                     # Retained read permission survives a conflicting replay.

@@ -6,7 +6,8 @@ from dataclasses import replace
 import anyio
 import httpx
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import event, func, select
+from sqlalchemy.engine import Engine
 
 from business_capabilities.registry import CAPABILITIES, REGISTRY, WIRE_REGISTRY
 from models.business import BusinessOperation, BusinessPlan
@@ -87,6 +88,38 @@ async def test_two_sequential_real_reads_keep_refs_pages_guards_deadline_and_no_
     async with db_session() as db:
         assert await db.scalar(select(func.count()).select_from(BusinessPlan)) == 0
         assert await db.scalar(select(func.count()).select_from(BusinessOperation)) == 0
+
+
+@pytest.mark.asyncio
+async def test_compound_read_guards_lock_scope_once_and_adapter_context_is_one_fresh_query(
+        db_session, crm_settings, monkeypatch):
+    business, _, provider, _ = await local_runtime(db_session, crm_settings, monkeypatch)
+    install_reads(business)
+    statements=[];guard_queries=[];context_queries=[]
+    def observe(conn,cursor,statement,parameters,context,executemany):
+        statements.append(statement.lower())
+    guard=business.execution_guard
+    adapter=business.registration.adapter
+    context=adapter._context
+    async def guarded(**kwargs):
+        before=len(statements)
+        result=await guard(**kwargs)
+        guard_queries.append([s for s in statements[before:] if 'from business_scopes' in s])
+        return result
+    async def fresh_context(*args,**kwargs):
+        before=len(statements)
+        result=await context(*args,**kwargs)
+        context_queries.append(statements[before:])
+        return result
+    monkeypatch.setattr(business,'execution_guard',guarded)
+    monkeypatch.setattr(adapter,'_context',fresh_context)
+    event.listen(Engine,'before_cursor_execute',observe)
+    try:result=await business.call_tool('booking_search_options',ARGUMENTS)
+    finally:event.remove(Engine,'before_cursor_execute',observe)
+    assert result.tool_payload['status']=='OK' and provider['posts']==0
+    assert len(guard_queries)==4 and all(len(rows)==1 and 'for update' in rows[0] for rows in guard_queries)
+    assert len(context_queries)==2 and all(len(rows)==1 and 'business_bindings' in rows[0]
+        and 'business_connections' in rows[0] for rows in context_queries)
 
 
 @pytest.mark.asyncio
