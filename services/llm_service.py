@@ -675,14 +675,16 @@ class LLMService:
                         temperature=agent.temperature,
                         max_tokens=self.settings.llm_max_tokens,
                         messages=messages,
-                        # A read correction is a single, already-bounded schema
-                        # repair. Some Voice routes reject forced tool_choice;
-                        # remove distracting tools for that one completion instead.
-                        # Dispatch still checks the same tool, schema and fresh ID.
+                        # Narrow only this completion's advertised schemas. Keep
+                        # the canonical registry and conservative context budget
+                        # for ordinary continuations after the runtime decision.
+                        # Strict decision admission still rejects every other call.
                         tools=([tool for tool in openai_tools
                                 if tool['function']['name'] == preparation_correction]
                                if runtime and preparation_correction is not None
-                               else openai_tools) or None,
+                               else [tool for tool in openai_tools
+                                     if tool['function']['name'] == 'business_decide_proposal']
+                               if required_proposal_id is not None else openai_tools) or None,
                         parallel_tool_calls=self._managed_parallel_tool_calls(managed_request),
                         **({"tool_choice": tool_choice} if tool_choice is not None else {}),
                         **({"extra_body": model_extra_body} if model_extra_body else {}),
