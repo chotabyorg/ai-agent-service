@@ -660,7 +660,7 @@ class BusinessRuntime:
             return CurrentBookingPrompt(booking_ref=booking.ref,
                 **booking.model_dump(include={
                     'revision', 'status', 'start_at', 'end_at', 'timezone',
-                    'offering_name', 'resource_name'})).model_dump(mode='json')
+                    'offering_name', 'resource_name', 'resource_ref'})).model_dump(mode='json')
         except (ValueError, TypeError):
             return None
 

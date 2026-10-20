@@ -41,6 +41,7 @@ class CurrentBookingPrompt(BaseModel):
     timezone: str = Field(min_length=1, max_length=100)
     offering_name: str | None = Field(default=None, max_length=200)
     resource_name: str | None = Field(default=None, max_length=200)
+    resource_ref: str | None = Field(default=None, min_length=1, max_length=200)
 
 
 class RuntimeCapabilityContext(BaseModel):
@@ -186,6 +187,12 @@ class PromptComposer:
                 'Если речь о другой или неоднозначной записи, сначала уточни выбор. '
                 'Не спрашивай заново уже известный контакт и не ищи эту запись через контакт. '
                 'Подготовка повторно проверяет актуальные факты; выполнение возможно только после отдельного согласия.')
+            if current.resource_ref is not None:
+                instruction+=(' Для переноса именно этой записи без смены специалиста используй booking_reschedule: '
+                    'booking_ref, expected_revision и resource_ref возьми из свежих данных, start_at — из нового '
+                    'времени клиента. Не повторяй booking_get только ради уже известных полей. При смене '
+                    'специалиста сначала найди его актуальную ссылку разрешённым READ. Сначала подготовь '
+                    'предложение переноса, затем дождись отдельного согласия; не отменяй запись ради переноса.')
         elif current.status=='CANCELLED':
             instruction=('\nЭТА ЗАПИСЬ УЖЕ ОТМЕНЕНА: актуальный статус CANCELLED. Если клиент просит отменить её, '
                 'ответь, что она уже отменена. Для этой записи не вызывай booking_cancel или booking_reschedule '
