@@ -55,7 +55,7 @@ class BusinessRuntime:
             raise BusinessSafetyError("REGISTRY_INVALID")
         self = cls()
         self.request, self.grant = request, grant
-        self.repository = BusinessRepository(session_factory)
+        self.repository = BusinessRepository(session_factory, execution=execution)
         self.registry, self.execution = registry, execution
         if effect_port is None:
             from core.config import get_settings
