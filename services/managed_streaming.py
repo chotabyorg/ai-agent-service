@@ -12,6 +12,7 @@ retries, falls back to another model, or logs content.
 from __future__ import annotations
 
 import inspect
+import re
 from collections.abc import AsyncIterator, Awaitable, Callable
 from types import SimpleNamespace
 from typing import Any
@@ -32,6 +33,22 @@ MAX_STREAM_CHUNKS = 4096
 FIRST_CHUNK_MIN_CHARS = 24
 FIRST_CHUNK_MAX_CHARS = 72
 _CLAUSE_MARKS = (",", ";", ":", "—", "–", "\u2014")
+
+# Keep explicit spoken values together. A provider-side normalizer receives
+# each authorized fragment separately, so splitting a clock at its colon or
+# an amount before its currency loses the value's pronunciation context.
+_SPOKEN_NUMBER = re.compile(
+    r"(?<!\w)(?:\bв\s+|\b(?:BYN|USD|EUR|RUB)\s+)?\+?\d[\d.,:/+\-]*"
+    r"(?:[ \t\u00a0\u202f]+(?:\d[\d.,:/+\-]*|в(?:\s+\d[\d.,:/+\-]*)?"
+    r"|BYN\b|USD\b|EUR\b|RUB\b))*",
+    re.IGNORECASE,
+)
+_SPOKEN_PRICE_CONTEXT = re.compile(
+    r"\b(?:стоимость|цена|сумма|итого|оплата|стоит|ценой)\b"
+    r"[^0-9,.;:!?]{0,40}[:=—–-]?\s*(?:\d[\d.,]*|$)",
+    re.IGNORECASE,
+)
+_SPOKEN_VALUE_PREFIX = re.compile(r"\b(?:в|BYN|USD|EUR|RUB)\s*$", re.IGNORECASE)
 
 
 class StreamLimitExceeded(ValueError):
@@ -250,15 +267,27 @@ class SentenceAccumulator:
         if len(fresh) < self._first_max_chars:
             return []
         window = fresh[: self._first_max_chars]
-        cut = max(window.rfind(mark) for mark in _CLAUSE_MARKS)
-        if cut < self._first_min_chars - 1:
-            cut = window.rfind(" ")
-        if cut < self._first_min_chars - 1:
-            return []
-        end = cut + 1
-        while end < len(fresh) and fresh[end] in (" ", "\t", "\n", "\r"):
-            end += 1
-        return [fresh[:end]]
+        protected = [
+            match.span()
+            for pattern in (_SPOKEN_NUMBER, _SPOKEN_PRICE_CONTEXT, _SPOKEN_VALUE_PREFIX)
+            for match in pattern.finditer(fresh)
+        ]
+        clauses = [index for index, char in enumerate(window) if char in _CLAUSE_MARKS]
+        words = [index for index, char in enumerate(window) if char == " "]
+        for candidates in (clauses, words):
+            for cut in reversed(candidates):
+                if cut < self._first_min_chars - 1:
+                    break
+                end = cut + 1
+                while end < len(fresh) and fresh[end] in (" ", "\t", "\n", "\r"):
+                    end += 1
+                if any(start < end <= stop for start, stop in protected):
+                    continue
+                # The next delta may still add a currency or a date/time suffix.
+                if fresh[:end].rstrip()[-1:].isdigit():
+                    continue
+                return [fresh[:end]]
+        return []
 
 
 async def complete_with_partials(
