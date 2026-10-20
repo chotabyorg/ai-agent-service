@@ -7,7 +7,7 @@ from contextvars import ContextVar
 from typing import Annotated, Literal
 from uuid import UUID
 
-from pydantic import Field, SecretStr, field_validator
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, StrictBool, field_validator
 
 from schemas.managed_turn import Channel, ManagedValue, validate_owner
 from core.managed_completion_diagnostics import _trusted_completion_record
@@ -16,7 +16,11 @@ from core.managed_business_diagnostics import _trusted_business_record
 from core.managed_wait_diagnostics import _trusted_wait_record
 
 EXECUTION_NAMESPACE = "main-chota.conversation.v1"
-MANAGED_SECRET_ENV_KEYS = frozenset({"managed_ai_auth_principals", "business_conversation_token"})
+MANAGED_SECRET_ENV_KEYS = frozenset({
+    "managed_ai_auth_principals",
+    "internal_ai_auth_principals",
+    "business_conversation_token",
+})
 managed_logging: ContextVar[bool] = ContextVar("managed_logging", default=False)
 
 
@@ -43,6 +47,108 @@ class ManagedPrincipal(ManagedValue):
     caller: Literal["conversation-service"]
     execution_namespace: Literal["main-chota.conversation.v1"]
     grants: Annotated[list[ManagedGrant], Field(min_length=1, max_length=64)]
+
+
+class OwnershipCredential(BaseModel):
+    """One versioned ownership-check credential."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    version: Annotated[str, Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")]
+    token: SecretStr
+    revoked: StrictBool = False
+
+
+class OwnershipGrant(BaseModel):
+    """Exact owner and agent pair authorized for ownership checks."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    owner_id: UUID
+    agent_id: UUID
+
+    def scope(self):
+        return self.owner_id, self.agent_id
+
+
+class OwnershipPrincipal(BaseModel):
+    """Purpose-bound caller allowed to check bounded owner/agent pairs."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    principal_id: Annotated[str, Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")]
+    caller: Literal["control-plane-service", "knowledge-base-service"]
+    purpose: Literal["agent-ownership-check"]
+    current: OwnershipCredential
+    previous: OwnershipCredential | None = None
+    revoked: StrictBool = False
+    all_tenants: StrictBool = False
+    grants: Annotated[list[OwnershipGrant], Field(max_length=64)] = Field(default_factory=list)
+
+    def credentials(self) -> tuple[OwnershipCredential, ...]:
+        return (self.current,) if self.previous is None else (self.current, self.previous)
+
+    def allows(self, owner_id: UUID, agent_id: UUID) -> bool:
+        if self.all_tenants:
+            return True
+        return any(grant.scope() == (owner_id, agent_id) for grant in self.grants)
+
+
+def _unique_json_object(pairs):
+    value = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError
+        value[key] = item
+    return value
+
+
+def parse_ownership_principals(
+    raw: str,
+    other_tokens: tuple[str, ...],
+) -> tuple[OwnershipPrincipal, ...]:
+    """Parse a bounded purpose-specific registry without exposing rejected values."""
+    if not raw:
+        return ()
+    try:
+        values = json.loads(
+            raw,
+            object_pairs_hook=_unique_json_object,
+            parse_constant=lambda _: (_ for _ in ()).throw(ValueError()),
+        )
+        if not isinstance(values, list) or len(values) > 32:
+            raise ValueError
+        principals = tuple(OwnershipPrincipal.model_validate(value) for value in values)
+        ids: set[str] = set()
+        tokens: set[str] = set()
+        for principal in principals:
+            if principal.principal_id in ids:
+                raise ValueError
+            ids.add(principal.principal_id)
+
+            if principal.all_tenants == bool(principal.grants):
+                # Exactly one authorization mode must be selected.
+                raise ValueError
+
+            version_ids: set[str] = set()
+            for credential in principal.credentials():
+                token = credential.token.get_secret_value()
+                if (credential.version in version_ids
+                        or not valid_token(token)
+                        or token in tokens
+                        or token in other_tokens):
+                    raise ValueError
+                version_ids.add(credential.version)
+                tokens.add(token)
+
+            grants: set[tuple[UUID, UUID]] = set()
+            for grant in principal.grants:
+                if grant.scope() in grants:
+                    raise ValueError
+                grants.add(grant.scope())
+        return principals
+    except Exception:
+        raise ValueError("Invalid internal ownership authentication configuration") from None
 
 
 def parse_principals(raw: str, other_tokens: tuple[str, ...]) -> tuple[ManagedPrincipal, ...]:

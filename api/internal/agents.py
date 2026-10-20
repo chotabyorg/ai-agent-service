@@ -9,7 +9,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from api.dependencies import get_db, verify_service_token
+from api.dependencies import authorize_agent_ownership, get_db, verify_service_token
 from schemas.internal import (
     AgentOwnershipCheckRequest,
     AgentCountResponse,
@@ -21,7 +21,6 @@ from services.agent_service import AgentService
 
 router = APIRouter(
     tags=["internal"],
-    dependencies=[Depends(verify_service_token)],
 )
 agent_service = AgentService()
 DbSession = Annotated[AsyncSession, Depends(get_db)]
@@ -29,7 +28,9 @@ DbSession = Annotated[AsyncSession, Depends(get_db)]
 
 @router.post("/agents/ownership-check", status_code=status.HTTP_204_NO_CONTENT)
 async def internal_check_agent_ownership(
-    payload: AgentOwnershipCheckRequest,
+    payload: Annotated[
+        AgentOwnershipCheckRequest, Depends(authorize_agent_ownership)
+    ],
     db: DbSession,
 ) -> Response:
     """Confirm that an agent belongs to the requested owner, without disclosing either."""
@@ -48,6 +49,7 @@ async def internal_check_agent_ownership(
 
 @router.get("/agents/count", response_model=AgentCountResponse)
 async def internal_count_agents(
+    service_authorization: Annotated[None, Depends(verify_service_token)],
     db: DbSession,
     user_id: str = Query(..., description="User UUID"),
 ) -> AgentCountResponse:
@@ -66,6 +68,7 @@ async def internal_count_agents(
 
 @router.post("/agents/deactivate-all", response_model=DeactivateAllResponse)
 async def internal_deactivate_all_agents(
+    service_authorization: Annotated[None, Depends(verify_service_token)],
     payload: DeactivateAllRequest,
     db: DbSession,
 ) -> DeactivateAllResponse:
