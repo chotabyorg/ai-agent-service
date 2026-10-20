@@ -279,6 +279,31 @@ async def prepare_booking_customer_reuse(runtime, name, arguments):
     return await lookup_booking_customer(runtime, customer, name=name)
 
 
+async def preflight_booking_contact(runtime, customer, *, name):
+    """Reject an ungrounded Voice phone before unrelated booking reads.
+
+    Valid contacts do no I/O here. The later identity lookup keeps its own
+    fresh authority checks and never reuses this preflight as a witness.
+    """
+    identity = customer['identity']
+    if identity['kind'] != 'PHONE':
+        return None
+    from services.voice_contact import voice_phone_facts
+    request = getattr(runtime, 'request', None)
+    caller = getattr(getattr(runtime, 'execution', None), 'caller_phone', '')
+    phones = voice_phone_facts(request, caller)
+    if phones is None or (len(phones) == 1 and identity['value'] == phones[0]):
+        return None
+    gate = await _preflight_feedback_guard(runtime)
+    _observe_preparation(runtime, name=name, refusal='AUTHORITY_BLOCKED' if gate is not None
+                         else 'VALIDATION_ERROR', lookup_mode='IDENTITY_ONLY')
+    if gate is not None:
+        return gate
+    return BusinessToolResult(safe_draft=(
+        'Продиктуйте, пожалуйста, контактный номер по цифрам с кодом страны.'
+        if phones else 'Подскажите, пожалуйста, контактный номер для записи.'))
+
+
 async def lookup_booking_customer(runtime, customer, *, name, return_lookup=False):
     """Read an explicit booking contact through the existing identity gates.
 
@@ -293,18 +318,9 @@ async def lookup_booking_customer(runtime, customer, *, name, return_lookup=Fals
         _observe_preparation(runtime, name=name, refusal='AUTHORITY_BLOCKED')
         return gate
 
-    identity = customer['identity']
-    if identity['kind'] == 'PHONE':
-        from services.voice_contact import voice_phone_facts
-        request = getattr(runtime, 'request', None)
-        caller = getattr(getattr(runtime, 'execution', None), 'caller_phone', '')
-        phones = voice_phone_facts(request, caller)
-        if phones is not None and (len(phones) != 1 or identity['value'] != phones[0]):
-            _observe_preparation(runtime, name=name, refusal='VALIDATION_ERROR', lookup_mode='IDENTITY_ONLY')
-            # No argument repair, lookup, plan reservation or external effect.
-            return BusinessToolResult(safe_draft=(
-                'Продиктуйте, пожалуйста, контактный номер по цифрам с кодом страны.'
-                if phones else 'Подскажите, пожалуйста, контактный номер для записи.'))
+    contact = await preflight_booking_contact(runtime, customer, name=name)
+    if contact is not None:
+        return contact
 
     find_capability = runtime.registration.capability('customer.find')
     if (find_capability is None or runtime.binding is None

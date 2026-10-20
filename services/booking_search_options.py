@@ -60,6 +60,11 @@ async def search_options(runtime, arguments):
     if ('customer' in normalized and ('customer.find' not in runtime.binding.enabled_capabilities
             or runtime.registration.capability('customer.find') is None)):
         raise BusinessSafetyError('CAPABILITY_DISABLED')
+    if 'customer' in normalized:
+        from services.managed_preparation import preflight_booking_contact
+        contact = await preflight_booking_contact(runtime, normalized['customer'], name=TOOL_NAME)
+        if contact is not None:
+            return contact
     results = {}
     for key, tool in (('catalog', 'catalog_search'), ('resources', 'resource_search')):
         # Each existing call owns all of its pre/post guards, fresh authority,
