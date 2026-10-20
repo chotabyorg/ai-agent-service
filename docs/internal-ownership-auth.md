@@ -38,6 +38,12 @@ ownership admission. Strict configuration without any active ownership principal
 fails startup. Invalid supplied registry configuration fails startup in either
 mode; disabling enforcement never makes a malformed registry acceptable.
 
+Strict ownership removes the legacy token from ownership-check only. Any caller
+that still possesses `INTERNAL_API_TOKEN` retains management access, even after
+its ownership client switches to a narrow credential. Removing that broad
+distribution and rotating the management credential require a separate approved
+change; neither is performed by this PR.
+
 ## Receiver registry
 
 `INTERNAL_AI_AUTH_PRINCIPALS` is a secret JSON list, empty by default, with at most
@@ -113,7 +119,8 @@ admission as an automatic error or rollback response.
    credential through a separately approved change. Keep management, browser JWT,
    chat, managed execution, Business RSA/mTLS and provider credentials separate.
    Inventory all consumers, including databases, init containers and jobs; do not
-   expose the new values through omnibus Secrets or MCP environments.
+   expose the new values through omnibus Secrets or MCP environments. KB must
+   not receive gateway or user-assertion authority.
 3. Configure receiver-owned exact pairs or explicitly approve the multi-tenant
    lookup scope. Do not infer these grants from caller `X-User-Id` / role headers.
 4. In a separate KB PR replace the generic AI owner GET with the POST above;
