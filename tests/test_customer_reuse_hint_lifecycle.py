@@ -4,6 +4,7 @@ from copy import deepcopy
 import pytest
 from sqlalchemy import func, select
 
+from business_capabilities.registry import DEFAULTS
 from models.business import BusinessOperation, BusinessPlan
 from tests.test_chotacrm_managed_proposal_errors import (
     existing_customer_lookup, install_managed_crm, preparation_arguments,
@@ -21,7 +22,8 @@ async def test_consumed_reuse_hint_does_not_survive_refused_facts(
     value, arguments, _, calls, effects, model = await install_managed_crm(
         api_client, db_session, monkeypatch, 200,
         {'status': 'ERROR', 'error': {'code': error_code, 'message': 'synthetic', 'retry': 'NEVER'}},
-        recover_after_first=True, lookup_response=existing_customer_lookup(), channel=channel)
+        recover_after_first=True, lookup_response=existing_customer_lookup(), channel=channel,
+        enabled_capabilities=[*DEFAULTS, 'deal.create'] if tool == 'business_propose' else None)
     corrected = {key: val for key, val in arguments.items() if key != 'customer'}
     corrected['customer_ref'] = 'customer_existing'
     snapshots = []

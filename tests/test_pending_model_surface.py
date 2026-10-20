@@ -45,7 +45,8 @@ async def test_pending_only_advertises_decision_then_restores_ordinary_surface(
         assert len(calls)==1 and plan.operations[0].attempt_count==1
     else:
         assert len(calls)==2 and 'tool_choice' not in calls[1]
-        assert names(calls[1]['tools'])==(expected-{'business_decide_proposal'} if intent in {'CHANGE','REJECT'} else expected)
+        ordinary = expected-{'business_propose'}
+        assert names(calls[1]['tools'])==(ordinary-{'business_decide_proposal'} if intent in {'CHANGE','REJECT'} else ordinary)
 
 
 @pytest.mark.asyncio
@@ -69,7 +70,7 @@ async def test_unrelated_pending_reply_can_continue_with_a_guarded_read(
 
 
 @pytest.mark.asyncio
-async def test_no_pending_keeps_the_full_available_surface(db_session,crm_settings,monkeypatch):
+async def test_no_pending_keeps_all_actions_without_duplicate_generic_schema(db_session,crm_settings,monkeypatch):
     original,_,provider,_=await setup(db_session,crm_settings)
     runtime=ManagedRuntime(20,request=original.request)
     runtime.business=original
@@ -78,5 +79,5 @@ async def test_no_pending_keeps_the_full_available_surface(db_session,crm_settin
     model=ScriptedLLMClient()
     model.chat.completions.queue(build_llm_response(content='Обычный ответ.'))
     assert await run_core(db_session,runtime,model)=='Обычный ответ.'
-    assert names(model.chat.completions.calls[0]['tools'])==expected
+    assert names(model.chat.completions.calls[0]['tools'])==expected-{'business_propose'}
     assert 'tool_choice' not in model.chat.completions.calls[0] and provider['posts']==0

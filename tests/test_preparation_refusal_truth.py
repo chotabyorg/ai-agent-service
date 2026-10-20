@@ -2,6 +2,7 @@
 import pytest
 from sqlalchemy import func, select
 
+from business_capabilities.registry import DEFAULTS
 from models.business import BusinessOperation, BusinessPlan
 from services.llm_service import LLMService
 from tests.fakes import build_llm_response
@@ -23,7 +24,8 @@ async def test_refused_proposal_and_later_read_cannot_publish_false_confirmation
     value, arguments, _, calls, effects, model = await install_managed_crm(
         api_client, db_session, monkeypatch, 200,
         {'status': 'ERROR', 'error': {'code': error_code, 'message': 'synthetic', 'retry': 'NEVER'}},
-        lookup_response=existing_customer_lookup(), channel=channel)
+        lookup_response=existing_customer_lookup(), channel=channel,
+        enabled_capabilities=[*DEFAULTS, 'deal.create'] if tool == 'business_propose' else None)
     corrected = {key: val for key, val in arguments.items() if key != 'customer'}
     corrected['customer_ref'] = 'customer_existing'
     model.chat.completions.queue(

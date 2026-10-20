@@ -4,6 +4,7 @@ import json
 import httpx
 import pytest
 
+from business_capabilities.registry import DEFAULTS
 from core.config import get_settings
 from services.managed_runtime import ManagedRuntime
 from services.managed_tools import ManagedExecutionError
@@ -20,8 +21,9 @@ def preparation(name, args, call_id):
     return build_llm_response(tool_calls=[call])
 
 
-async def local_runtime(factory, settings, monkeypatch):
-    business, _, provider, args = await setup(factory, settings)
+async def local_runtime(factory, settings, monkeypatch, *, generic=False):
+    business, _, provider, args = await setup(factory, settings,
+        enabled_capabilities=[*DEFAULTS, 'deal.create'] if generic else None)
     runtime = ManagedRuntime(20, request=business.request)
     runtime.business, runtime.collector = business, business.collector
     business.execution = runtime
@@ -33,7 +35,8 @@ async def local_runtime(factory, settings, monkeypatch):
 @pytest.mark.parametrize('name', ['business_propose', 'booking_create'])
 async def test_stringified_actions_are_corrected_once_before_real_proposal_preparation(
         db_session, crm_settings, monkeypatch, name):
-    business, runtime, provider, args = await local_runtime(db_session, crm_settings, monkeypatch)
+    business, runtime, provider, args = await local_runtime(
+        db_session, crm_settings, monkeypatch, generic=name == 'business_propose')
     actions = [{'capability': 'booking.create', 'arguments': args}]
     model = ScriptedLLMClient()
     valid = {'actions': actions} if name == 'business_propose' else args
@@ -195,7 +198,8 @@ def test_customer_xor_remains_strict_and_feedback_does_not_coerce():
 @pytest.mark.parametrize('reuse_previous_id', [False, True])
 async def test_empty_customer_ref_with_inline_customer_after_reads_requires_fresh_correction_id(
         db_session, crm_settings, monkeypatch, reuse_previous_id):
-    business, runtime, provider, args = await local_runtime(db_session, crm_settings, monkeypatch)
+    business, runtime, provider, args = await local_runtime(
+        db_session, crm_settings, monkeypatch, generic=True)
     client = business.registration.adapter.client
     transport = client.transport
     async def handle(request):

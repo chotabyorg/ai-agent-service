@@ -516,10 +516,13 @@ class LLMService:
                 # business controls can enter the managed registry.
                 openai_tools = runtime.business.openai_tools() if runtime.business else []
                 from services.voice_booking_tools import booking_tools
-                voice_booking_only = bool(
-                    voice_profile is not None and voice_profile.concise_speech
-                    and getattr(getattr(runtime.business, 'registration', None), 'adapter_id', None) == 'chotacrm')
-                openai_tools = booking_tools(openai_tools, enabled=voice_booking_only)
+                booking_schema_dedup = bool(
+                    getattr(getattr(runtime.business, 'registration', None), 'adapter_id', None) == 'chotacrm'
+                    and (managed_request.channel != 'VOICE'
+                         or voice_profile is not None and voice_profile.concise_speech))
+                # Direct booking inputs already carry the same canonical schemas.
+                # Keep generic proposals when they also support another action/bundle.
+                openai_tools = booking_tools(openai_tools, enabled=booking_schema_dedup)
                 tool_registry = {tool["function"]["name"]: None for tool in openai_tools}
             else:
                 for credentials_record in credentials_records:
@@ -1091,7 +1094,7 @@ class LLMService:
                                 runtime.business.prompt_context())
                             prompt_context = RuntimeCapabilityContext.model_validate(refreshed_context)
                             openai_tools = [tool for tool in booking_tools(
-                                                runtime.business.openai_tools(), enabled=voice_booking_only)
+                                                runtime.business.openai_tools(), enabled=booking_schema_dedup)
                                             if tool["function"]["name"] not in retired_voice_tools]
                             tool_registry = {
                                 tool["function"]["name"]: None for tool in openai_tools
@@ -1131,7 +1134,7 @@ class LLMService:
                             # questions may use the ordinary guarded read tools.
                             # No second decision about it is available this turn.
                             openai_tools = [tool for tool in booking_tools(
-                                runtime.business.openai_tools(), enabled=voice_booking_only)
+                                runtime.business.openai_tools(), enabled=booking_schema_dedup)
                                 if tool['function']['name'] not in (
                                     retired_voice_tools | {'business_decide_proposal'})]
                             tool_registry = {tool['function']['name']: None for tool in openai_tools}
