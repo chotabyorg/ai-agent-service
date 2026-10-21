@@ -88,3 +88,26 @@ runner prints individual PASS assertions and only prints
 `REAL_CROSS_SERVICE_E2E_PASS` after the whole matrix passes. `summary.json` in the
 private evidence directory is the structured result. Do not publish raw model
 request logs or private config, even though all this harness's inputs are synthetic.
+
+## Native execution without a container daemon
+
+`python -m tests.business_v2_e2e.native` reuses the same `Harness.cases` and real
+service bootstrap. Supply absolute `--cs-root`, `--crm-root`, `--ai-python`,
+`--cs-python`, `--crm-python`, `--pg18-bin`, `--pg16-admin-input` and a new `--output`
+directory. AI/Conversation use their pinned Python 3.11 environments and an
+explicitly disposable native PostgreSQL16; CRM uses Python3.12 and its own freshly
+initialized PostgreSQL18 cluster. Install each repository's requirements into its
+own environment before running. All three source checkouts must be clean.
+
+The private PG16 JSON input has `disposable: "yes"`, `host: "127.0.0.1"`, `port`,
+`user` and `password` fields. It must refer only to a task-owned test cluster, never
+a production/shared application DSN. Only newly generated `native_e2e_*` roles and
+databases are created/dropped. The PG18 cluster and all child processes belong to
+this run. Child environments contain an OS allowlist plus generated synthetic
+fixture settings; network guards precede application imports. The model remains
+a loopback script. No runtime credentials or `.env` are loaded.
+
+`summary.json` records exact source revisions/trees, unchanged-source checks,
+scenario outcomes, cleanup and runtime-manifest hash. Other files are private
+synthetic fixture evidence, not public artifacts. This is a native full-stack
+protocol check; live Widget/Telegram/model/phone acceptance remains separate.

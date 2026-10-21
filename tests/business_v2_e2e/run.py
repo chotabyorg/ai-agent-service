@@ -21,7 +21,6 @@ from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from sqlalchemy.engine import make_url
-import docker
 
 ROOT = Path(__file__).resolve().parents[2]
 ROOTS = {'ai': ROOT,
@@ -513,6 +512,8 @@ class Harness:
 
 
 async def main():
+    import docker
+
     state=Path(tempfile.mkdtemp(prefix='business-v2-e2e-'))
     state.chmod(0o700)
     print('Private evidence: '+str(state),flush=True)
