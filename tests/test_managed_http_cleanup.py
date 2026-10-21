@@ -154,6 +154,7 @@ async def loopback_service(tmp_path, *, tls=False, proxy=False, post_tool=False,
                 pass
 
     server = await asyncio.start_server(serve, "127.0.0.1", 0, ssl=server_context if not proxy else None)
+    state.listener = server
     state.origin = ("https" if tls and not proxy else "http") + "://127.0.0.1:" + str(server.sockets[0].getsockname()[1])
     state.verify = verify
     try:
@@ -280,6 +281,12 @@ async def assert_released(state, server, before, db_probe):
     assert db_probe.sessions and all(not session.in_transaction() for session in db_probe.sessions)
     assert not db_probe.checkouts
     assert db_probe.drivers and all(driver.is_closed() for driver in db_probe.drivers)
+    # Peer EOF and every client resource were checked before fixture shutdown.
+    # Windows replaces its pending accept task after each accepted connection;
+    # finish the fixture's listener before comparing application-owned tasks.
+    server.listener.close()
+    await server.listener.wait_closed()
+    await asyncio.sleep(0)
     assert not (set(asyncio.all_tasks()) - before - {asyncio.current_task()})
 
 
@@ -338,6 +345,7 @@ async def stalled_tls_service(*, proxy=False):
             writer.close()
             await writer.wait_closed()
     server = await asyncio.start_server(serve, "127.0.0.1", 0)
+    state.listener = server
     state.origin = ("http" if proxy else "https") + "://127.0.0.1:" + str(server.sockets[0].getsockname()[1])
     try:
         yield state

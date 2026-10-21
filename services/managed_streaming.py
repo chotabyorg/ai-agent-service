@@ -297,6 +297,7 @@ async def complete_with_partials(
     *,
     on_text: Callable[[str], Awaitable[None]] | None = None,
     timing: CompletionTiming | None = None,
+    require_finish: bool = False,
 ) -> Any:
     """Buffered completion by default; streams only when on_text is set.
 
@@ -308,7 +309,8 @@ async def complete_with_partials(
         response = await create(**request_kwargs)
         _observe_router(timing, response)
         return response
-    return await stream_completion(create, request_kwargs, on_text=on_text, timing=timing)
+    return await stream_completion(create, request_kwargs, on_text=on_text, timing=timing,
+                                   require_finish=require_finish)
 
 
 def _observe_router(timing, response):
@@ -333,6 +335,7 @@ async def stream_completion(
     max_chars: int = MAX_STREAM_CHARS,
     max_chunks: int = MAX_STREAM_CHUNKS,
     timing: CompletionTiming | None = None,
+    require_finish: bool = False,
 ) -> Any:
     """Assemble one completion while forwarding cumulative text partials.
 
@@ -351,6 +354,10 @@ async def stream_completion(
     if inspect.isawaitable(result):
         result = await result
     if _get(result, "choices") is not None:
+        if require_finish and _get(_choice(result), "finish_reason") is None:
+            from services.managed_tools import ManagedExecutionError
+
+            raise ManagedExecutionError("INVALID_RESULT")
         _observe_router(timing, result)
         return result
     text_parts: list[str] = []
@@ -411,6 +418,9 @@ async def stream_completion(
         if timing is not None:
             timing.first_delta()
         await on_text("".join(text_parts))
+    if require_finish and finish_reason is None:
+        from services.managed_tools import ManagedExecutionError
+        raise ManagedExecutionError('INVALID_RESULT')
     full_text = "".join(text_parts)
     assembled_calls = [_tool_namespace(tools[index]) for index in sorted(tools)] or None
     return SimpleNamespace(
