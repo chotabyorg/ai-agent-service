@@ -42,7 +42,7 @@ async def test_combined_read_advertises_real_choices_without_mutating_canonical_
 @pytest.mark.parametrize('second_refs', [[], ['offering_second', 'offering_other']])
 async def test_new_catalog_search_replaces_choices_including_an_empty_result(
         api_client, db_session, monkeypatch, second_refs):
-    value, _, calls, model, _ = await install(api_client, db_session, monkeypatch)
+    value, _, calls, model, _ = await install(api_client, db_session, monkeypatch, 'VOICE')
     client = main.app.state.business_registry.get('chotacrm').adapter.client
     original = client.transport
     async def handle(request):
@@ -66,7 +66,7 @@ async def test_new_catalog_search_replaces_choices_including_an_empty_result(
 @pytest.mark.integration
 async def test_model_ignoring_choices_reaches_fresh_crm_without_argument_repair(
         api_client, db_session, monkeypatch):
-    value, arguments, calls, model, _ = await install(api_client, db_session, monkeypatch)
+    value, arguments, calls, model, _ = await install(api_client, db_session, monkeypatch, 'VOICE')
     client = main.app.state.business_registry.get('chotacrm').adapter.client
     original, facts = client.transport, []
     async def handle(request):
@@ -95,7 +95,7 @@ async def test_model_ignoring_choices_reaches_fresh_crm_without_argument_repair(
 
 @pytest.mark.integration
 async def test_choices_do_not_carry_into_a_later_turn(api_client, db_session, monkeypatch):
-    value, _, calls, model, _ = await install(api_client, db_session, monkeypatch)
+    value, _, calls, model, _ = await install(api_client, db_session, monkeypatch, 'VOICE')
     model.chat.completions.queue(tool('booking_search_options', ARGUMENTS, 'search'),
         build_llm_response(content='Какое время вам удобно?'))
     assert (await execute(api_client, value)).json()['status'] == 'DRAFT_READY'
@@ -108,7 +108,7 @@ async def test_choices_do_not_carry_into_a_later_turn(api_client, db_session, mo
 @pytest.mark.integration
 async def test_added_choice_bytes_are_budgeted_before_next_model_request(
         api_client, db_session, monkeypatch):
-    value, _, calls, model, _ = await install(api_client, db_session, monkeypatch)
+    value, _, calls, model, _ = await install(api_client, db_session, monkeypatch, 'VOICE')
     original = LLMService._check_managed_envelope
     checked = []
     def check(self, agent, messages, tools, **kwargs):
