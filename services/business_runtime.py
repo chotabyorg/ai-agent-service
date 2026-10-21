@@ -12,7 +12,7 @@ from schemas.business import (AttemptRejected, BusinessAction, BusinessSafetyErr
                               ProvenSucceeded, StillUnknown, SucceededReceipt, fingerprint)
 from schemas.conversation_effects import (ExternalEffectEligibilityRequest,
     ExternalEffectEligibilityResult, ExternalEffectPermitRequest, ExternalEffectPermitResult,
-    managed_request_fingerprint, sidecar_fingerprint)
+    managed_request_fingerprint, retained_managed_fingerprint_matches, sidecar_fingerprint)
 from schemas.managed_turn import OperationReference
 from services.business_registry import BusinessRegistry
 from services.business_repository import BusinessRepository
@@ -260,9 +260,9 @@ class BusinessRuntime:
         if (gate.selection_kind not in {"OWN", "CONFIRM"} or gate.plan is None
                 or gate.request_conflict):
             return False
-        current_digest = managed_request_fingerprint(self.request)
         return any(op.status == "RESERVED" and op.effect_request_turn_id == self.request.turn_id
-                   and op.effect_request_fingerprint and op.effect_managed_request_fingerprint == current_digest
+                   and op.effect_request_fingerprint and retained_managed_fingerprint_matches(
+                       op.effect_managed_request_fingerprint, self.request)
                    for op in gate.plan.operations)
 
     async def _normal_guard(self, gate, *, allow_incomplete=False, final_answer=False):
