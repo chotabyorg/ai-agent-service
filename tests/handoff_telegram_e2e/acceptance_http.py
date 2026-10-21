@@ -566,7 +566,7 @@ async def test_telegram_handoff_real_http_and_database_lifecycle(handoff):
         "WHERE turn_id=:turn_id",
         {"turn_id": post_return_turn[0]["id"]},
     )
-    assert stale_error == "TOOL_SETUP_FAILED"
+    assert stale_error == "TOOL_SETUP_FAILED", f"closed-code actual={stale_error or 'NONE'}"
     assert int(post_return_turn[0]["input_first_sequence"]) > int(
         await _scalar(
             handoff.engines["conversation"],
