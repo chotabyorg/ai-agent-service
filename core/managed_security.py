@@ -17,7 +17,10 @@ from core.managed_wait_diagnostics import _trusted_wait_record
 from core.business_sql_diagnostics import _trusted_business_sql_record
 
 EXECUTION_NAMESPACE = "main-chota.conversation.v1"
-MANAGED_SECRET_ENV_KEYS = frozenset({"managed_ai_auth_principals", "business_conversation_token"})
+MANAGED_SECRET_ENV_KEYS = frozenset({
+    "managed_ai_auth_principals", "business_conversation_token",
+    "handoff_ai_enrolled_scopes", "handoff_lifecycle_token",
+})
 managed_logging: ContextVar[bool] = ContextVar("managed_logging", default=False)
 
 
@@ -73,6 +76,28 @@ def parse_principals(raw: str, other_tokens: tuple[str, ...]) -> tuple[ManagedPr
         return principals
     except Exception:
         raise ValueError("Invalid managed AI authentication configuration") from None
+
+
+def parse_handoff_scopes(raw: str, principals: tuple[ManagedPrincipal, ...]) -> tuple:
+    """Accept only explicit Telegram scopes backed by a trusted managed grant."""
+    if not raw:
+        return ()
+    try:
+        from schemas.handoff import HandoffScope
+
+        values = json.loads(raw)
+        if not isinstance(values, list) or not 1 <= len(values) <= 256:
+            raise ValueError
+        scopes = tuple(HandoffScope.model_validate(value) for value in values)
+        keys = [scope.key() for scope in scopes]
+        if len(keys) != len(set(keys)):
+            raise ValueError
+        grants = {grant.scope(): grant for principal in principals for grant in principal.grants}
+        if any(key not in grants for key in keys):
+            raise ValueError
+        return scopes
+    except Exception:
+        raise ValueError("Invalid Handoff scope configuration") from None
 
 
 def install_managed_log_boundary() -> None:

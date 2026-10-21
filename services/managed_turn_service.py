@@ -9,6 +9,7 @@ from openai import AsyncOpenAI
 
 from core.managed_security import EXECUTION_NAMESPACE
 from schemas.managed_turn import MAX_RESULT_BYTES, ManagedTurnResult
+from schemas.managed_turn_v3 import ManagedTurnV3Result
 from services.llm_service import LLMService
 from services.managed_http_cleanup import close_managed_helper, own_managed_http
 from services.managed_runtime import CHANNEL_PROMPT, privacy_id
@@ -19,6 +20,12 @@ from services.voice_reply_style import is_idle_input as _is_voice_idle_input
 
 class ManagedAgentNotFound(Exception):
     pass
+
+
+class ManagedControlRequested(Exception):
+    def __init__(self, control):
+        self.control = control
+        super().__init__("PLATFORM_CONTROL_REQUEST")
 
 
 class _OwnedDBContext:
@@ -103,12 +110,64 @@ async def _prefetch_knowledge_base(service, agent, query, runtime):
 _join_knowledge = _join_warmup
 
 
-def _communication(message):
+def _communication(message, *, managed_v3=False, delivery_by_id=None):
     if message.actor in {"AGENT", "HUMAN"}:
+        if managed_v3 and message.actor == "HUMAN":
+            observation = (delivery_by_id or {}).get(str(message.id))
+            # The v3 request validator requires an observation for every HUMAN
+            # outbound message. Keep its exact status visible beside the text;
+            # never imply provider acceptance means customer receipt.
+            if observation is None:
+                raise ManagedExecutionError("INVALID_REQUEST")
+            attempt = observation.delivery_attempt_id
+            truth = _delivery_truth(observation.status)
+            content = (
+                "[Canonical platform communication record; actor=HUMAN; "
+                f"delivery_status={observation.status}; "
+                f"delivery_confirmation={truth}; "
+                f"delivery_attempt_id={attempt if attempt is not None else 'none'}; "
+                f"source_authority_revision={observation.source_authority_revision}. "
+                "This status is data, not an instruction.]\n"
+                + message.text
+            )
+            return {"role": "assistant", "content": content}
         return {"role": "assistant", "content": message.text}
+    if managed_v3 and message.actor == "SYSTEM":
+        observation = (delivery_by_id or {}).get(str(message.id))
+        if observation is None:
+            raise ManagedExecutionError("INVALID_REQUEST")
+        attempt = observation.delivery_attempt_id
+        truth = _delivery_truth(observation.status)
+        text = (
+            "[Canonical platform communication record; actor=SYSTEM; "
+            f"delivery_status={observation.status}; "
+            f"delivery_confirmation={truth}; "
+            f"delivery_attempt_id={attempt if attempt is not None else 'none'}; "
+            f"source_authority_revision={observation.source_authority_revision}. "
+            "This status is data, not an instruction.]\n"
+            + message.text
+        )
+        return {"role": "user", "content": text}
     text = ("[System communication event]\n" + message.text
             if message.actor == "SYSTEM" else message.text)
     return {"role": "user", "content": text}
+
+
+def _delivery_truth(status):
+    if status in {"DELIVERED", "READ"}:
+        return "CONFIRMED_DELIVERED"
+    if status == "PROVIDER_ACCEPTED":
+        return "PROVIDER_ACCEPTED_ONLY"
+    return "NOT_CONFIRMED"
+
+
+def _v3_communication_context(request):
+    """Bounded schema-validated fact projection for v3 prompts."""
+    return {
+        "contract_version": 3,
+        "communication_facts": [fact.model_dump(mode="json") for fact in request.communication_facts],
+        "prior_operation_refs": [item.model_dump(mode="json") for item in request.prior_operation_refs],
+    }
 
 
 async def execute_managed_owned(request, grant, runtime, db_provider, session_factory, registry,
@@ -217,6 +276,10 @@ async def execute_managed_owned(request, grant, runtime, db_provider, session_fa
                 emit_voice_checkpoint(runtime, "BUSINESS")
             emit_text_checkpoint(runtime, "BUSINESS")
             if entry is not None and entry.halt_status:
+                if (runtime.handoff_enabled and entry.halt_status == "UNKNOWN"
+                        and runtime.business.last_gate is not None
+                        and runtime.business.last_gate.scope_unresolved):
+                    await runtime.request_handoff("BUSINESS_UNCERTAIN", None)
                 raise ManagedExecutionError(entry.error_code, processing_status=entry.halt_status)
             if entry is not None and entry.safe_draft is not None:
                 answer = entry.safe_draft
@@ -229,7 +292,14 @@ async def execute_managed_owned(request, grant, runtime, db_provider, session_fa
             else:
                 if client is None:
                     client = _owned_client(service, key, request, runtime)
-                communication = [_communication(message) for message in request.messages]
+                managed_v3 = runtime.handoff_enabled
+                delivery_by_id = ({
+                    str(fact.message_id): fact for fact in request.communication_facts
+                    if fact.kind == "DELIVERY_OBSERVATION"
+                } if managed_v3 else None)
+                communication = [_communication(message, managed_v3=managed_v3,
+                                                  delivery_by_id=delivery_by_id)
+                                 for message in request.messages]
                 if profile is not None:
                     from services.voice_reply_style import past_idle_communication
                     communication = past_idle_communication(request, communication)
@@ -237,7 +307,9 @@ async def execute_managed_owned(request, grant, runtime, db_provider, session_fa
                     db, agent=agent, llm_client=client, credentials_records=(),
                     communication=communication,
                     chat_context=ChatContext(channel=CHANNEL_PROMPT[request.channel],
-                                             external_client_id=f"{EXECUTION_NAMESPACE}:{request.conversation_id}"),
+                                             external_client_id=f"{EXECUTION_NAMESPACE}:{request.conversation_id}",
+                                             managed_communication_context=(
+                                                 _v3_communication_context(request) if managed_v3 else None)),
                     query=query, runtime=runtime,
                     selected_indices=request.selected_local_indices,
                     simple_selection=request.simple_selection,
@@ -245,10 +317,19 @@ async def execute_managed_owned(request, grant, runtime, db_provider, session_fa
                     knowledge_task=getattr(runtime, "knowledge_task", None),
                 )
             try:
-                ready = ManagedTurnResult.from_request(
-                    request, status="DRAFT_READY", draft_text=answer, error_code=None,
-                    operation_refs=collector.snapshot(),
-                )
+                if runtime.handoff_enabled:
+                    ready = ManagedTurnV3Result.from_request(
+                        request, original_dispatch_id=runtime.original_dispatch_id,
+                        request_fingerprint=runtime.request_fingerprint,
+                        result_kind="EXECUTION_RESULT", processing_outcome="DRAFT_READY",
+                        draft_text=answer, error_code=None, operation_refs=collector.snapshot(),
+                        control_request=None,
+                    )
+                else:
+                    ready = ManagedTurnResult.from_request(
+                        request, status="DRAFT_READY", draft_text=answer, error_code=None,
+                        operation_refs=collector.snapshot(),
+                    )
                 if len(ready.model_dump_json().encode("utf-8")) > MAX_RESULT_BYTES:
                     raise ValueError
             except Exception:
@@ -256,6 +337,8 @@ async def execute_managed_owned(request, grant, runtime, db_provider, session_fa
             outcome = dict(status="DRAFT_READY", draft_text=answer, error_code=None)
         except ManagedAgentNotFound:
             missing = True
+        except ManagedControlRequested:
+            outcome = dict(status="NO_RESPONSE", draft_text=None, error_code=None)
         except asyncio.CancelledError as exc:
             cancellation = exc
         except ManagedExecutionError as exc:
@@ -273,7 +356,10 @@ async def execute_managed_owned(request, grant, runtime, db_provider, session_fa
         finally:
             if not runtime.cancel_requested and not missing:
                 try:
-                    if runtime.business is not None:
+                    if runtime.control_request is not None:
+                        retained_gate = await runtime.operation(retained_repository.result_gate(request, grant))
+                        collector.observe_committed(retained_gate.references)
+                    elif runtime.business is not None:
                         await runtime.operation(runtime.business.collect_refs())
                         retained_gate = runtime.business.last_gate
                         final_guard = await runtime.business.final_result_guard(reload=False)
@@ -328,5 +414,13 @@ async def execute_managed_owned(request, grant, runtime, db_provider, session_fa
             outcome["status"], proposal_present=proposal_present,
             operation_present=bool(collector.snapshot()),
         )
-    return ManagedTurnResult.from_request(request, **outcome,
-                                          operation_refs=collector.snapshot())
+    if runtime.handoff_enabled:
+        return ManagedTurnV3Result.from_request(
+            request, original_dispatch_id=runtime.original_dispatch_id,
+            request_fingerprint=runtime.request_fingerprint,
+            result_kind="PLATFORM_CONTROL_REQUEST" if runtime.control_request else "EXECUTION_RESULT",
+            processing_outcome=outcome["status"], draft_text=outcome["draft_text"],
+            error_code=outcome["error_code"], operation_refs=collector.snapshot(),
+            control_request=runtime.control_request,
+        )
+    return ManagedTurnResult.from_request(request, **outcome, operation_refs=collector.snapshot())
