@@ -100,7 +100,10 @@ def main():
         parser.add_argument("--" + name, type=Path, required=True)
     parser.add_argument("--tzdata-dir", type=Path)
     parser.add_argument("--channel", choices=("TELEGRAM", "WEBSITE_WIDGET"), default="TELEGRAM")
+    parser.add_argument("--managed-contract", choices=(2, 3), type=int, default=2)
     args = parser.parse_args()
+    if args.managed_contract == 3 and args.channel != "TELEGRAM":
+        parser.error("Managed v3 enrollment currently supports TELEGRAM only")
     roots = {"ai": ROOT, "cs": args.cs_root.resolve(), "crm": args.crm_root.resolve()}
     pythons = {name: getattr(args, name + "_python").resolve() for name in roots}
     state = args.output.resolve()
@@ -174,6 +177,8 @@ def main():
                 "main-chota.telegram.v1" if args.channel == "TELEGRAM" else "main-chota.website-widget.v1"))
             self.threads = {}
             self.message_number = 0
+            self.tokens.update(cp_lifecycle=secrets.token_urlsafe(36),
+                ai_lifecycle=secrets.token_urlsafe(36))
 
         def url(self, name):
             return "http://127.0.0.1:" + str(ports[name])
@@ -188,6 +193,8 @@ def main():
                 serialization.PublicFormat.SubjectPublicKeyInfo).decode()
             self.config = dict(self.ids, roots={k: str(v) for k, v in roots.items()},
                 state=str(state), ports=ports, native_runtime=True, channel=args.channel,
+                managed_contract=args.managed_contract, owner_id=self.grant["owner_id"],
+                cp_lifecycle_token=self.tokens["cp_lifecycle"],
                 allowlist=[("127.0.0.1", int(admin["port"])),
                     *(("127.0.0.1", port) for port in ports.values())])
             private(state / "config.json", self.config)
@@ -221,6 +228,15 @@ def main():
                 cs_env.update(WEBSITE_BINDINGS=json.dumps([dict(owner_id=self.grant["owner_id"],
                     integration_id=self.ids["integration"], agent_id=self.ids["agent"])]),
                     WEBSITE_WORKER_ENABLED="true", WEBSITE_WORKER_PRINCIPAL_ID="synthetic-worker")
+            if args.managed_contract == 3:
+                ai_env.update(HANDOFF_AI_ENROLLED_SCOPES=json.dumps([{
+                    key: grant[key] for key in ("owner_id", "integration_id", "channel", "agent_id")}]),
+                    HANDOFF_CONVERSATION_URL=self.url("cs"),
+                    HANDOFF_LIFECYCLE_TOKEN=self.tokens["ai_lifecycle"])
+                cs_env.update(TELEGRAM_HANDOFF_INTEGRATION_IDS=json.dumps([self.ids["integration"]]),
+                    USER_SERVICE_BASE_URL=self.url("model"), HANDOFF_CP_BASE_URL=self.url("model"),
+                    HANDOFF_AI_BASE_URL=self.url("ai"), INBOX_LIFECYCLE_TOKEN=self.tokens["cp_lifecycle"],
+                    HANDOFF_LIFECYCLE_TOKEN=self.tokens["ai_lifecycle"])
             crm_env = dict(DATABASE_URL=db_url("crm"), USER_SERVICE_URL=self.url("model"),
                 ALLOWED_ORIGINS='["https://chota.by"]', CRM_AGENT_PUBLIC_KEYS_JSON=json.dumps({"synthetic": pub}))
             self.envs = {name: base_env() | timezone_env | {"BUSINESS_E2E_CONFIG": str(state / "config.json")}
@@ -232,6 +248,13 @@ def main():
             for name in ("model", "crm", "ai", "cs"):
                 await self.start(name)
             await self.seed()
+            if args.managed_contract == 3:
+                provisioned = await self.request("cs", "POST", "/internal/v1/inbox-grants/provision",
+                    dict(contract_version=1, command_id=str(uuid4()), owner_id=self.grant["owner_id"],
+                        integration_id=self.ids["integration"], channel=args.channel,
+                        agent_id=self.ids["agent"], expected_binding_generation=1),
+                    {"X-Inbox-Lifecycle-Token": self.tokens["cp_lifecycle"]})
+                assert provisioned["active"] and provisioned["agent_lifecycle_generation"] == 1
 
         async def turn(self, message, steps, thread=None):
             await self.request("model", "POST", "/script", steps)
@@ -266,7 +289,7 @@ def main():
             result = await self.request("cs", "GET", "/internal/v1/turns/" + str(found[0]["turn_id"]),
                 headers=headers)
             assert result["status"] in {"COMPLETED", "FAILED"}
-            assert found[0]["managed_contract_version"] == 2
+            assert found[0]["managed_contract_version"] == args.managed_contract
             assert len(result["operation_refs"]) <= 32
             assert all(set(value) == {"origin", "operation_id", "outcome"}
                 and value["origin"] == "AI_AGENT_SERVICE" for value in result["operation_refs"])
@@ -306,7 +329,9 @@ def main():
         status="FAIL", external_provider_requests=0, production_mutations=False,
         live_model=False, real_crm=True, cases=[], owned_database_cleanup=False,
         explicit_timezone_sha256=timezone_digest, pg18_database_dropped=False,
-        controller_utf8_mode=bool(sys.flags.utf8_mode), channel=args.channel, admission_mode="MANAGED_V2_REAL_WORKER")
+        controller_utf8_mode=bool(sys.flags.utf8_mode), channel=args.channel,
+        admission_mode=f"MANAGED_V{args.managed_contract}_REAL_WORKER",
+        enrollment_proofs="SYNTHETIC_CP_REAL_AI" if args.managed_contract == 3 else "NOT_USED")
     pg_process = None
     pg_handle = None
     created = []

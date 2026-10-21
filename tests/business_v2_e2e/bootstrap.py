@@ -83,7 +83,8 @@ class Observe:
             buffered.append(message)
         await self.app(scope, read, collect)
         body = b''.join(chunks)
-        if SERVICE == 'ai' and scope['path'] == '/internal/v1/managed-turns/execute':
+        if SERVICE == 'ai' and scope['path'] in {
+                '/internal/v1/managed-turns/execute', '/internal/v3/managed-turns/execute'}:
             record('projections.jsonl', json.loads(body))
         if SERVICE == 'crm':
             status = next((m['status'] for m in buffered if m['type'] == 'http.response.start'), 0)
@@ -178,6 +179,23 @@ def model_app():
     async def script(request: Request):
         queue[:] = await request.json()
         return {'queued': len(queue)}
+    if CONFIG.get('managed_contract') == 3:
+        @app.post('/internal/v1/handoff/integration-proof')
+        async def integration_proof(request: Request):
+            # Only the CP identity proof is synthetic; AI proof, grant enrollment,
+            # channel admission, Turn execution, permits and CRM effects stay real.
+            body = await request.json()
+            expected = dict(contract_version=1, owner_id=CONFIG['owner_id'],
+                integration_id=CONFIG['integration'], channel='TELEGRAM',
+                agent_id=CONFIG['agent'], expected_binding_generation=1)
+            if (request.headers.get('X-Inbox-Lifecycle-Token') != CONFIG['cp_lifecycle_token']
+                    or set(body) != set(expected) | {'command_id'}
+                    or any(body.get(key) != value for key, value in expected.items())):
+                return JSONResponse(status_code=404, content={'detail': 'synthetic scope denied'})
+            UUID(body['command_id'])
+            return {key: body[key] for key in ('contract_version', 'owner_id',
+                'integration_id', 'channel', 'agent_id')} | {
+                    'account_id': CONFIG['owner'], 'binding_generation': 1}
     @app.post('/v1/chat/completions')
     async def complete(request: Request):
         body = await request.json()
@@ -236,13 +254,15 @@ if SERVICE == 'recover':
     from core.config import get_settings
     from db.database import AsyncSessionLocal
     from schemas.managed_turn import ManagedTurnRequest
+    from schemas.managed_turn_v3 import ManagedTurnV3Request
     from business_capabilities.registration import create_business_registry
     from services.business_runtime import BusinessRuntime
     async def recover():
         request = next(json.loads(line) for line in (STATE / 'projections.jsonl').read_text().splitlines()
                        if json.loads(line)['turn_id'] == sys.argv[2])
         settings = get_settings()
-        runtime = await open_business_runtime(ManagedTurnRequest.model_validate(request),
+        request_model = ManagedTurnV3Request if request.get('contract_version') == 3 else ManagedTurnRequest
+        runtime = await open_business_runtime(request_model.model_validate(request),
             settings.managed_principals[0].grants[0], AsyncSessionLocal,
             create_business_registry(settings, AsyncSessionLocal))
         plan = await runtime.repository.selected_plan(runtime.request, runtime.grant)
@@ -271,6 +291,7 @@ else:
                 db.add(AgentTemplate(id=UUID(CONFIG['agent']), user_id=UUID(CONFIG['owner']),
                     name='Synthetic Beauty', system_prompt='Вы администратор салона. Отвечайте кратко по-русски.',
                     model_name='synthetic', llm_provider='openrouter', temperature=0, is_active=True,
+                    handoff_lifecycle_generation=1 if CONFIG.get('managed_contract') == 3 else 0,
                     timezone='Europe/Minsk', encrypted_openrouter_key=EncryptionService().encrypt('synthetic-model-key')))
                 await db.commit()
     async def seed_and_close():
