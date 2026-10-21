@@ -20,7 +20,16 @@ from models.business import (BusinessBinding, BusinessOperation, BusinessPlan, B
                              BusinessTurnContext, BusinessTurnPlanLink, TENANT)
 from schemas.conversation_effects import (ExternalEffectPermitRequest,
                                           frozen_command_fingerprint, managed_request_fingerprint,
+                                          retained_managed_fingerprint_matches,
                                           sidecar_fingerprint)
+from schemas.managed_turn import (
+    DEFAULT_MAX_PARTIAL_CHARS,
+    DEFAULT_STREAM_PARTIALS,
+    STREAM_EXTENSION_FIELDS,
+    ManagedTurnRequest,
+    canonical_managed_request_fields,
+    managed_request_fields_with_extensions,
+)
 from schemas.business import (BusinessAction, BusinessSafetyError, BusinessScopeValue,
                               DefinitiveNoEffect, DispatchAttempt, ProviderDispatch, FrozenProviderCommand, MaterialFacts,
                               ProvenFailedNoEffect, ProvenSucceeded, SucceededReceipt,
@@ -166,12 +175,36 @@ def tenant_values(value, grant):
                 agent_id=value.agent_id, integration_id=value.integration_id, channel=value.channel)
 
 
-def request_fingerprint(request):
+def _business_request_fingerprint_fields(fields):
+    data = json.dumps(fields, ensure_ascii=False, allow_nan=False,
+                      sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256((EXECUTION_NAMESPACE + "\n" + data).encode()).hexdigest()
+
+
+def request_fingerprint(request: ManagedTurnRequest):
     # ManagedValue has already checked the full 256-message projection. Preserve
     # the owner's exact text rather than business-string NFC normalization.
-    data = json.dumps(request.model_dump(mode="json"), ensure_ascii=False,
-                      allow_nan=False, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256((EXECUTION_NAMESPACE + "\n" + data).encode()).hexdigest()
+    return _business_request_fingerprint_fields(canonical_managed_request_fields(request))
+
+
+def request_fingerprint_matches(stored_fingerprint: str, request: ManagedTurnRequest) -> bool:
+    """Match current identity, plus the old AI defaulted shape for legacy ledgers.
+
+    The extension-era fallback applies only to an incoming request that omitted
+    both extension fields. Explicit settings always use their exact complete
+    digest and are never stripped or replaced.
+    """
+    if stored_fingerprint == request_fingerprint(request):
+        return True
+    if any(name in request.model_fields_set for name in STREAM_EXTENSION_FIELDS):
+        return False
+    old_defaulted_hash = _business_request_fingerprint_fields(
+        managed_request_fields_with_extensions(
+            request, stream_partials=DEFAULT_STREAM_PARTIALS,
+            max_partial_chars=DEFAULT_MAX_PARTIAL_CHARS,
+        )
+    )
+    return stored_fingerprint == old_defaulted_hash
 
 
 def scope_value(row):
@@ -361,7 +394,7 @@ class BusinessRepository:
         row = await session.get(BusinessTurnContext, (scope.id, request.turn_id))
         digest = request_fingerprint(request)
         if row:
-            if row.request_fingerprint != digest:
+            if not request_fingerprint_matches(row.request_fingerprint, request):
                 raise BusinessSafetyError("TURN_CONFLICT")
             return row
         row = BusinessTurnContext(scope_id=scope.id, turn_id=request.turn_id,
@@ -465,7 +498,7 @@ class BusinessRepository:
             async with self._transaction(session, 'ADMISSION_PROBE'):
                 binding, scope = await self._authority(session, request, grant)
                 context = await session.get(BusinessTurnContext, (scope.id, request.turn_id))
-                if context and context.request_fingerprint != request_fingerprint(request):
+                if context and not request_fingerprint_matches(context.request_fingerprint, request):
                     raise BusinessSafetyError("TURN_CONFLICT")
                 link = await session.get(BusinessTurnPlanLink, (scope.id, request.turn_id))
                 selected_id = plan_id or (link.plan_id if link else None)
@@ -633,6 +666,15 @@ class BusinessRepository:
                             # Never invalidate acquisition evidence or an attempted effect.
                             raise BusinessSafetyError("AUTHORITY_DENIED")
                         command = self._command(scope, plan, operation)
+                        managed_digest = managed_request_fingerprint(request)
+                        if operation.effect_request_turn_id is not None:
+                            if (operation.effect_request_turn_id != request.turn_id
+                                    or not retained_managed_fingerprint_matches(
+                                        operation.effect_managed_request_fingerprint, request)):
+                                raise BusinessSafetyError("EFFECT_REQUEST_CONFLICT", processing_status="UNKNOWN")
+                            # Replay the retained authority request verbatim. Never
+                            # replace it with a fresh canonical hash after an upgrade.
+                            managed_digest = operation.effect_managed_request_fingerprint
                         effect_request = ExternalEffectPermitRequest(
                             contract_version=1,
                             conversation_id=request.conversation_id,
@@ -643,7 +685,7 @@ class BusinessRepository:
                             channel=request.channel,
                             agent_id=request.agent_id,
                             authority_revision=context.authority_revision,
-                            managed_request_fingerprint=managed_request_fingerprint(request),
+                            managed_request_fingerprint=managed_digest,
                             operation_namespace="main-chota.ai-business.v1",
                             operation_id=operation.id,
                             operation_fingerprint=frozen_command_fingerprint(command),
@@ -734,7 +776,8 @@ class BusinessRepository:
                     result = BusinessResultGate(False, None, False, "NO_PLAN", None, False)
                 else:
                     context = await session.get(BusinessTurnContext, (scope.id, request.turn_id))
-                    request_conflict = bool(context and context.request_fingerprint != request_fingerprint(request))
+                    request_conflict = bool(context and not request_fingerprint_matches(
+                        context.request_fingerprint, request))
                     # Retained read permission survives a conflicting replay.
                     # Preserve its genuine refs, but grant no ordinary draft.
                     link = await session.get(BusinessTurnPlanLink, (scope.id, request.turn_id))
@@ -1340,7 +1383,8 @@ class BusinessRepository:
                     if link.selection_kind not in {"OWN", "CONFIRM"}:
                         raise BusinessSafetyError("RECOVERY_READ_ONLY", processing_status="UNKNOWN")
                     context = await session.get(BusinessTurnContext, (scope.id, request.turn_id))
-                    if context is None or context.request_fingerprint != request_fingerprint(request):
+                    if context is None or not request_fingerprint_matches(
+                        context.request_fingerprint, request):
                         raise BusinessSafetyError("TURN_CONFLICT")
                     operations = (await session.scalars(select(BusinessOperation).where(
                         BusinessOperation.plan_id == plan_id).order_by(BusinessOperation.ordinal)

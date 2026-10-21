@@ -504,6 +504,12 @@ with a4096-byte strict JSON cap, without model/provider/recovery work. Conversat
 keeps only opaque refs, with an explicit manual pre-terminal crash-F recovery;
 already-terminal empty refs cannot be enriched by current APIs. Existing chat
 callers stay on `/v1/chat/completions`. No real provider/channel/deployment is enabled.
+The managed reader resolves both historical omitted-field fingerprints and the
+explicit profiles already emitted by current Conversation (`false/2000` for text
+and `true/2000` for Voice v2), without migrating rows. Roll out this AI reader
+first; the Conversation reader can then restore omitted historical bodies from
+their retained hashes. See the [managed-turn contract](docs/managed-turns.md) for
+the exact compatibility and Business-context fallback rules.
 
 Managed final completions require visible text after the existing thinking-tag
 removal; empty, missing, non-string or cleaned-empty model output returns the
