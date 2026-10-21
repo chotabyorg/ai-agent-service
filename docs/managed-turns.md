@@ -160,6 +160,17 @@ reader to restore omitted historical bodies from retained hashes. New AI Busines
 contexts store the canonical profile hash. This is a source-only compatibility
 change: no old Turn, Business context or evidence row is migrated or rewritten. A
 v1 and v2 projection of the same Turn remain distinct.
+
+Rollback must retain an AI reader compatible with omission-profile Business
+contexts. The prior reader only computes the defaulted digest and can reject a
+new omission-profile context during eligibility/recovery. Reverting the
+Conversation writer does not make those retained AI rows readable by the old AI
+binary. Stop new enrollment/writes if needed, preserve the compatible AI reader
+and reconcile retained operations through their original identities. Never
+rewrite hashes, delete contexts or retry UNKNOWN effects to permit a downgrade.
+An older AI reader is not an accepted rollback target without separate proof for
+every retained profile it may encounter.
+
 `OperationReference` and the read-only `ManagedEvidenceRequest`/Result remain v1
 with their existing fields, limits and scope. The evidence endpoint may read refs
 for a v2 execution through the existing v1 identity request.
