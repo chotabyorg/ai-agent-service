@@ -1,0 +1,793 @@
+{
+  "date": "2026-10-21 Europe/Minsk",
+  "main": "f570d1e3c6e23075b899379e0e23895df512947f",
+  "runtime_ci312": {
+    "python": "3.12.12 (main, Oct  9 2025, 11:07:00) [Clang 17.0.0 (clang-1700.6.3.2)]",
+    "packages": {
+      "fastapi": "0.156.2",
+      "starlette": "1.9.0",
+      "pydantic": "2.14.1",
+      "pydantic-settings": "2.16.1",
+      "pytest": "9.1.1",
+      "pytest-asyncio": "1.4.0",
+      "sqlalchemy": "2.1.5",
+      "asyncpg": "0.32.0",
+      "mcp": "1.26.0",
+      "anyio": "4.12.1",
+      "openai": "2.26.0",
+      "httpx": "0.28.1",
+      "httpcore": "1.0.9",
+      "ruff": "0.13.2"
+    }
+  },
+  "current_main_remote_quality": {
+    "main": "f570d1e3c6e23075b899379e0e23895df512947f",
+    "tested_sha": "39b525cc9c4979ed277cea3e139f8617cf3ca436",
+    "tree_hashes": {
+      "f570d1e3c6e23075b899379e0e23895df512947f": "3acf3799c6cc9a9792ac218ba310446f361a6e2b",
+      "39b525cc9c4979ed277cea3e139f8617cf3ca436": "3acf3799c6cc9a9792ac218ba310446f361a6e2b"
+    },
+    "trees_identical": true,
+    "run_id": 39522089124,
+    "run_url": "https://github.com/chotabyorg/ai-agent-service/actions/runs/39522089124",
+    "suite": "pytest -q",
+    "passed": 2223,
+    "failed": 0,
+    "local_rerun": false,
+    "dependencies": {
+      "fastapi": "0.156.4",
+      "starlette": "1.9.0",
+      "pydantic": "2.14.1",
+      "pytest": "9.1.1",
+      "sqlalchemy": "2.1.5"
+    }
+  },
+  "remote_updated_pr_checks": "Run after feature pushes; local receipts do not establish remote CI PASS",
+  "notes": [
+    "Separate invocations overlap: do not sum them into unique cases.",
+    "Local Python3.12.12/3.11.14 and macOS differ from original GitHub Python3.12.15/3.11.17 and Ubuntu.",
+    "Constraints are historical reproduction inventories only; production requirements/workflows unchanged.",
+    "All broad FAILs retained even if serial reruns pass."
+  ],
+  "application_sha": "8f2ec507cfe25b27307b6fbf78032dbcd511665b",
+  "equivalent_p1c_sha": "46d15d3e45e694010d102fd343c522054fa8947f",
+  "original_pr_head": "6a3e71cdc1ddf2f3034651d7359c18bc8a7e1122",
+  "original_ci_checkout": "7dfb92dca41fb741931364918a7ac0426d3d9d62",
+  "runs": [
+    {
+      "label": "pr141-original-native0",
+      "source_sha": "6a3e71cdc1ddf2f3034651d7359c18bc8a7e1122",
+      "image": "postgres:16-alpine@sha256:cf78e76683b9ca8c5733cbbdce6c9262b45b6767934dd0a95e671f9a0fc20685",
+      "exit_code": 1,
+      "total": 804,
+      "passed": 803,
+      "failures": [
+        "tests.test_gateway_owner_auth::test_guarded_route_inventory_is_exact"
+      ],
+      "errors": [],
+      "skipped": [],
+      "postgres_cleaned": true,
+      "elapsed_seconds": 407.01,
+      "source_clean_at_start": true,
+      "pytest_arguments": [
+        "-q",
+        "--junitxml=pr141-original-native0.xml",
+        "tests/test_agents_api.py",
+        "tests/test_booking_read_failure_reply.py",
+        "tests/test_booking_search_options_managed.py",
+        "tests/test_business_confirmation_waits.py",
+        "tests/test_business_runtime.py",
+        "tests/test_caller_phone.py",
+        "tests/test_chat_flow.py",
+        "tests/test_completed_confirmation_replay.py",
+        "tests/test_credentials_cipher.py",
+        "tests/test_crm_request_observation.py",
+        "tests/test_customer_reuse_hint_lifecycle.py",
+        "tests/test_gateway_owner_auth.py",
+        "tests/test_goal5_business_recovery.py",
+        "tests/test_google_workspace_auth.py",
+        "tests/test_google_workspace_contacts.py",
+        "tests/test_google_workspace_gmail_service.py",
+        "tests/test_google_workspace_schemas.py",
+        "tests/test_internal_auth_startup_privacy.py",
+        "tests/test_knowledge_base_prompt.py",
+        "tests/test_managed_business_diagnostics.py",
+        "tests/test_managed_completion.py",
+        "tests/test_managed_parity.py",
+        "tests/test_managed_stream_sse.py",
+        "tests/test_managed_wait_diagnostics.py",
+        "tests/test_model_catalog_migration.py",
+        "tests/test_models_api.py",
+        "tests/test_pending_proposal_decision.py",
+        "tests/test_prompt_composer.py",
+        "tests/test_recent_booking_context.py",
+        "tests/test_streaming_observation.py",
+        "tests/test_tools_api.py",
+        "tests/test_voice_latency.py",
+        "tests/test_voice_pending_prose_repair.py"
+      ],
+      "interpreter_environment": "ci311"
+    },
+    {
+      "label": "pr141-fixed-original-native0",
+      "source_sha": "8f2ec507cfe25b27307b6fbf78032dbcd511665b",
+      "image": "postgres:16-alpine@sha256:cf78e76683b9ca8c5733cbbdce6c9262b45b6767934dd0a95e671f9a0fc20685",
+      "exit_code": 1,
+      "total": 807,
+      "passed": 806,
+      "failures": [
+        "tests.test_goal5_business_recovery::test_goal5_i2_try_again_keeps_unknown_recovery_read_only"
+      ],
+      "errors": [],
+      "skipped": [],
+      "postgres_cleaned": true,
+      "elapsed_seconds": 381.88,
+      "source_clean_at_start": true,
+      "pytest_arguments": [
+        "-q",
+        "--junitxml=pr141-fixed-original-native0.xml",
+        "tests/test_agents_api.py",
+        "tests/test_booking_read_failure_reply.py",
+        "tests/test_booking_search_options_managed.py",
+        "tests/test_business_confirmation_waits.py",
+        "tests/test_business_runtime.py",
+        "tests/test_caller_phone.py",
+        "tests/test_chat_flow.py",
+        "tests/test_completed_confirmation_replay.py",
+        "tests/test_credentials_cipher.py",
+        "tests/test_crm_request_observation.py",
+        "tests/test_customer_reuse_hint_lifecycle.py",
+        "tests/test_gateway_owner_auth.py",
+        "tests/test_goal5_business_recovery.py",
+        "tests/test_google_workspace_auth.py",
+        "tests/test_google_workspace_contacts.py",
+        "tests/test_google_workspace_gmail_service.py",
+        "tests/test_google_workspace_schemas.py",
+        "tests/test_internal_auth_startup_privacy.py",
+        "tests/test_knowledge_base_prompt.py",
+        "tests/test_managed_business_diagnostics.py",
+        "tests/test_managed_completion.py",
+        "tests/test_managed_parity.py",
+        "tests/test_managed_stream_sse.py",
+        "tests/test_managed_wait_diagnostics.py",
+        "tests/test_model_catalog_migration.py",
+        "tests/test_models_api.py",
+        "tests/test_pending_proposal_decision.py",
+        "tests/test_prompt_composer.py",
+        "tests/test_recent_booking_context.py",
+        "tests/test_streaming_observation.py",
+        "tests/test_tools_api.py",
+        "tests/test_voice_latency.py",
+        "tests/test_voice_pending_prose_repair.py"
+      ],
+      "interpreter_environment": "ci311"
+    },
+    {
+      "label": "luna-pr141-original-native3",
+      "source_sha": "6a3e71cdc1ddf2f3034651d7359c18bc8a7e1122",
+      "image": "postgres:16-alpine@sha256:cf78e76683b9ca8c5733cbbdce6c9262b45b6767934dd0a95e671f9a0fc20685",
+      "exit_code": 1,
+      "total": 612,
+      "passed": 610,
+      "failures": [
+        "tests.test_five_booking_cycles::test_five_scoped_booking_cancel_cycles_keep_four_progressing_while_one_is_held[VOICE]",
+        "tests.test_managed_bounds::test_new_managed_secret_env_denylist_and_mapped_credentials"
+      ],
+      "errors": [],
+      "skipped": [],
+      "postgres_cleaned": true,
+      "elapsed_seconds": 414.94,
+      "source_clean_at_start": true,
+      "pytest_arguments": [
+        "-q",
+        "--junitxml=luna-pr141-original-native3.xml",
+        "tests/test_booking_identity_search.py",
+        "tests/test_booking_search_options.py",
+        "tests/test_business_concurrency.py",
+        "tests/test_business_natural_confirmation.py",
+        "tests/test_business_tool_protocol.py",
+        "tests/test_chat_auth.py",
+        "tests/test_chotacrm_managed_proposal_errors.py",
+        "tests/test_conversation_effects.py",
+        "tests/test_crm_read_contention.py",
+        "tests/test_customer_reuse_continuation.py",
+        "tests/test_five_booking_cycles.py",
+        "tests/test_goal5_business_pending_truth.py",
+        "tests/test_goal5_business_stale_retirement.py",
+        "tests/test_google_workspace_calendar_service.py",
+        "tests/test_google_workspace_gmail_schemas.py",
+        "tests/test_google_workspace_responses.py",
+        "tests/test_internal_agents_api.py",
+        "tests/test_knowledge_base_client.py",
+        "tests/test_managed_bounds.py",
+        "tests/test_managed_business_integration.py",
+        "tests/test_managed_native_close.py",
+        "tests/test_managed_runtime_cancellation.py",
+        "tests/test_managed_v2.py",
+        "tests/test_model_catalog_defaults.py",
+        "tests/test_model_response_recovery.py",
+        "tests/test_pending_model_surface.py",
+        "tests/test_prompt_builder.py",
+        "tests/test_read_tool_guidance.py",
+        "tests/test_spoken_numeric_boundaries.py",
+        "tests/test_text_booking_schema.py",
+        "tests/test_voice_contact_grounding.py",
+        "tests/test_voice_pending_format_lifecycle.py",
+        "tests/test_voice_tool_latency.py"
+      ],
+      "interpreter_environment": "ci311"
+    },
+    {
+      "label": "luna-pr141-fixed-original-cohort3",
+      "source_sha": "8f2ec507cfe25b27307b6fbf78032dbcd511665b",
+      "image": "postgres:16-alpine@sha256:cf78e76683b9ca8c5733cbbdce6c9262b45b6767934dd0a95e671f9a0fc20685",
+      "exit_code": 1,
+      "total": 613,
+      "passed": 612,
+      "failures": [
+        "tests.test_five_booking_cycles::test_five_scoped_booking_cancel_cycles_keep_four_progressing_while_one_is_held[VOICE]"
+      ],
+      "errors": [],
+      "skipped": [],
+      "postgres_cleaned": true,
+      "elapsed_seconds": 400.55,
+      "source_clean_at_start": true,
+      "pytest_arguments": [
+        "-q",
+        "--junitxml=luna-pr141-fixed-original-cohort3.xml",
+        "tests/test_booking_identity_search.py",
+        "tests/test_booking_search_options.py",
+        "tests/test_business_concurrency.py",
+        "tests/test_business_natural_confirmation.py",
+        "tests/test_business_tool_protocol.py",
+        "tests/test_chat_auth.py",
+        "tests/test_chotacrm_managed_proposal_errors.py",
+        "tests/test_conversation_effects.py",
+        "tests/test_crm_read_contention.py",
+        "tests/test_customer_reuse_continuation.py",
+        "tests/test_five_booking_cycles.py",
+        "tests/test_goal5_business_pending_truth.py",
+        "tests/test_goal5_business_stale_retirement.py",
+        "tests/test_google_workspace_calendar_service.py",
+        "tests/test_google_workspace_gmail_schemas.py",
+        "tests/test_google_workspace_responses.py",
+        "tests/test_internal_agents_api.py",
+        "tests/test_knowledge_base_client.py",
+        "tests/test_managed_bounds.py",
+        "tests/test_managed_business_integration.py",
+        "tests/test_managed_native_close.py",
+        "tests/test_managed_runtime_cancellation.py",
+        "tests/test_managed_v2.py",
+        "tests/test_model_catalog_defaults.py",
+        "tests/test_model_response_recovery.py",
+        "tests/test_pending_model_surface.py",
+        "tests/test_prompt_builder.py",
+        "tests/test_read_tool_guidance.py",
+        "tests/test_spoken_numeric_boundaries.py",
+        "tests/test_text_booking_schema.py",
+        "tests/test_voice_contact_grounding.py",
+        "tests/test_voice_pending_format_lifecycle.py",
+        "tests/test_voice_tool_latency.py"
+      ],
+      "interpreter_environment": "ci311"
+    },
+    {
+      "label": "integrated-full-ci",
+      "source_sha": "8f2ec507cfe25b27307b6fbf78032dbcd511665b",
+      "image": "postgres:16-alpine@sha256:cf78e76683b9ca8c5733cbbdce6c9262b45b6767934dd0a95e671f9a0fc20685",
+      "exit_code": 1,
+      "total": 2575,
+      "passed": 2574,
+      "failures": [
+        "tests.test_current_booking_reschedule_context::test_create_move_cancel_uses_fresh_resource_and_one_completion_per_turn[VOICE]"
+      ],
+      "errors": [],
+      "skipped": [],
+      "postgres_cleaned": true,
+      "elapsed_seconds": 1963.41,
+      "source_clean_at_start": true,
+      "pytest_arguments": [
+        "-q",
+        "--junitxml=integrated-full-ci.xml"
+      ],
+      "interpreter_environment": "ci312"
+    },
+    {
+      "label": "integrated-security-goal5",
+      "source_sha": "8f2ec507cfe25b27307b6fbf78032dbcd511665b",
+      "image": "postgres:16-alpine@sha256:cf78e76683b9ca8c5733cbbdce6c9262b45b6767934dd0a95e671f9a0fc20685",
+      "exit_code": 0,
+      "total": 439,
+      "passed": 439,
+      "failures": [],
+      "errors": [],
+      "skipped": [],
+      "postgres_cleaned": true,
+      "elapsed_seconds": 53.72,
+      "source_clean_at_start": true,
+      "pytest_arguments": [
+        "-q",
+        "--junitxml=integrated-security-goal5.xml",
+        "tests/test_gateway_owner_auth.py",
+        "tests/test_internal_purpose_auth.py",
+        "tests/test_internal_auth_startup_privacy.py",
+        "tests/test_chat_auth.py",
+        "tests/test_managed_bounds.py",
+        "tests/test_goal5_business_recovery.py",
+        "tests/test_business_runtime.py::test_definitive_sidecar_denial_is_retained_no_dispatch",
+        "tests/test_business_runtime.py::test_forged_receipt_cannot_claim_success",
+        "tests/test_business_runtime.py::test_stale_confirmation_never_dispatches",
+        "tests/test_business_concurrency.py::test_receipt_finalize_overlap_and_stale_token_cannot_overwrite",
+        "tests/test_business_concurrency.py::test_blind_unknown_restarts_keep_all_candidates_blocked",
+        "tests/test_completion_adapter_contract.py",
+        "tests/test_business_sql_transactions.py"
+      ],
+      "interpreter_environment": "ci312"
+    },
+    {
+      "label": "serial-original-main-failure-union",
+      "source_sha": "05d229c55cf141edfdc3ad72e066baf53cbae5ed",
+      "image": "postgres:16-alpine@sha256:cf78e76683b9ca8c5733cbbdce6c9262b45b6767934dd0a95e671f9a0fc20685",
+      "exit_code": 0,
+      "total": 9,
+      "passed": 9,
+      "failures": [],
+      "errors": [],
+      "skipped": [],
+      "postgres_cleaned": true,
+      "elapsed_seconds": 26.4,
+      "source_clean_at_start": true,
+      "pytest_arguments": [
+        "-q",
+        "--junitxml=serial-original-main-failure-union.xml",
+        "tests/test_crm_read_contention.py::test_five_conversations_share_agent_without_read_failures_or_operations",
+        "tests/test_current_booking_reschedule_context.py::test_create_move_cancel_uses_fresh_resource_and_one_completion_per_turn[VOICE]",
+        "tests/test_current_booking_reschedule_context.py::test_projection_retains_fresh_resource_without_inventing_a_missing_one[resource_test]",
+        "tests/test_five_booking_cycles.py::test_five_scoped_booking_cancel_cycles_keep_four_progressing_while_one_is_held[VOICE]",
+        "tests/test_goal5_business_recovery.py::test_goal5_i2_try_again_keeps_unknown_recovery_read_only",
+        "tests/test_managed_bounds.py::test_new_managed_secret_env_denylist_and_mapped_credentials",
+        "tests/test_managed_http_cleanup.py::test_direct_caller_cancel_joins_sdk_and_preserves_cancellation[request-True]",
+        "tests/test_managed_native_close.py::test_authenticated_native_buffered_close_joins_actual_owner[False-deadline-direct-False]",
+        "tests/test_managed_native_close.py::test_native_buffered_join_preserves_first_caller_cancellation[False]"
+      ],
+      "interpreter_environment": "ci312"
+    },
+    {
+      "label": "serial-original-main-goal5-module",
+      "source_sha": "05d229c55cf141edfdc3ad72e066baf53cbae5ed",
+      "image": "postgres:16-alpine@sha256:cf78e76683b9ca8c5733cbbdce6c9262b45b6767934dd0a95e671f9a0fc20685",
+      "exit_code": 0,
+      "total": 10,
+      "passed": 10,
+      "failures": [],
+      "errors": [],
+      "skipped": [],
+      "postgres_cleaned": true,
+      "elapsed_seconds": 12.85,
+      "source_clean_at_start": true,
+      "pytest_arguments": [
+        "-q",
+        "--junitxml=serial-original-main-goal5-module.xml",
+        "tests/test_goal5_business_recovery.py"
+      ],
+      "interpreter_environment": "ci312"
+    },
+    {
+      "label": "serial-current-main-failure-union",
+      "source_sha": "f570d1e3c6e23075b899379e0e23895df512947f",
+      "image": "postgres:16-alpine@sha256:cf78e76683b9ca8c5733cbbdce6c9262b45b6767934dd0a95e671f9a0fc20685",
+      "exit_code": 0,
+      "total": 9,
+      "passed": 9,
+      "failures": [],
+      "errors": [],
+      "skipped": [],
+      "postgres_cleaned": true,
+      "elapsed_seconds": 26.23,
+      "source_clean_at_start": true,
+      "pytest_arguments": [
+        "-q",
+        "--junitxml=serial-current-main-failure-union.xml",
+        "tests/test_crm_read_contention.py::test_five_conversations_share_agent_without_read_failures_or_operations",
+        "tests/test_current_booking_reschedule_context.py::test_create_move_cancel_uses_fresh_resource_and_one_completion_per_turn[VOICE]",
+        "tests/test_current_booking_reschedule_context.py::test_projection_retains_fresh_resource_without_inventing_a_missing_one[resource_test]",
+        "tests/test_five_booking_cycles.py::test_five_scoped_booking_cancel_cycles_keep_four_progressing_while_one_is_held[VOICE]",
+        "tests/test_goal5_business_recovery.py::test_goal5_i2_try_again_keeps_unknown_recovery_read_only",
+        "tests/test_managed_bounds.py::test_new_managed_secret_env_denylist_and_mapped_credentials",
+        "tests/test_managed_http_cleanup.py::test_direct_caller_cancel_joins_sdk_and_preserves_cancellation[request-True]",
+        "tests/test_managed_native_close.py::test_authenticated_native_buffered_close_joins_actual_owner[False-deadline-direct-False]",
+        "tests/test_managed_native_close.py::test_native_buffered_join_preserves_first_caller_cancellation[False]"
+      ],
+      "interpreter_environment": "ci312"
+    },
+    {
+      "label": "serial-current-main-goal5-module",
+      "source_sha": "f570d1e3c6e23075b899379e0e23895df512947f",
+      "image": "postgres:16-alpine@sha256:cf78e76683b9ca8c5733cbbdce6c9262b45b6767934dd0a95e671f9a0fc20685",
+      "exit_code": 0,
+      "total": 10,
+      "passed": 10,
+      "failures": [],
+      "errors": [],
+      "skipped": [],
+      "postgres_cleaned": true,
+      "elapsed_seconds": 12.6,
+      "source_clean_at_start": true,
+      "pytest_arguments": [
+        "-q",
+        "--junitxml=serial-current-main-goal5-module.xml",
+        "tests/test_goal5_business_recovery.py"
+      ],
+      "interpreter_environment": "ci312"
+    },
+    {
+      "label": "serial-pr138-fixed-failure-union",
+      "source_sha": "b7800468d85c80a85ef46b717dbc37991aa7432d",
+      "image": "postgres:16-alpine@sha256:cf78e76683b9ca8c5733cbbdce6c9262b45b6767934dd0a95e671f9a0fc20685",
+      "exit_code": 0,
+      "total": 10,
+      "passed": 10,
+      "failures": [],
+      "errors": [],
+      "skipped": [],
+      "postgres_cleaned": true,
+      "elapsed_seconds": 26.27,
+      "source_clean_at_start": true,
+      "pytest_arguments": [
+        "-q",
+        "--junitxml=serial-pr138-fixed-failure-union.xml",
+        "tests/test_crm_read_contention.py::test_five_conversations_share_agent_without_read_failures_or_operations",
+        "tests/test_current_booking_reschedule_context.py::test_create_move_cancel_uses_fresh_resource_and_one_completion_per_turn[VOICE]",
+        "tests/test_current_booking_reschedule_context.py::test_projection_retains_fresh_resource_without_inventing_a_missing_one[resource_test]",
+        "tests/test_five_booking_cycles.py::test_five_scoped_booking_cancel_cycles_keep_four_progressing_while_one_is_held[VOICE]",
+        "tests/test_goal5_business_recovery.py::test_goal5_i2_try_again_keeps_unknown_recovery_read_only",
+        "tests/test_managed_bounds.py::test_new_managed_secret_env_denylist_and_mapped_credentials",
+        "tests/test_managed_http_cleanup.py::test_direct_caller_cancel_joins_sdk_and_preserves_cancellation[request-True]",
+        "tests/test_managed_native_close.py::test_authenticated_native_buffered_close_joins_actual_owner[False-deadline-direct-False]",
+        "tests/test_managed_native_close.py::test_native_buffered_join_preserves_first_caller_cancellation[False]"
+      ],
+      "interpreter_environment": "ci312"
+    },
+    {
+      "label": "serial-pr138-fixed-goal5-module",
+      "source_sha": "b7800468d85c80a85ef46b717dbc37991aa7432d",
+      "image": "postgres:16-alpine@sha256:cf78e76683b9ca8c5733cbbdce6c9262b45b6767934dd0a95e671f9a0fc20685",
+      "exit_code": 0,
+      "total": 10,
+      "passed": 10,
+      "failures": [],
+      "errors": [],
+      "skipped": [],
+      "postgres_cleaned": true,
+      "elapsed_seconds": 12.59,
+      "source_clean_at_start": true,
+      "pytest_arguments": [
+        "-q",
+        "--junitxml=serial-pr138-fixed-goal5-module.xml",
+        "tests/test_goal5_business_recovery.py"
+      ],
+      "interpreter_environment": "ci312"
+    },
+    {
+      "label": "serial-integrated-failure-union",
+      "source_sha": "8f2ec507cfe25b27307b6fbf78032dbcd511665b",
+      "image": "postgres:16-alpine@sha256:cf78e76683b9ca8c5733cbbdce6c9262b45b6767934dd0a95e671f9a0fc20685",
+      "exit_code": 0,
+      "total": 11,
+      "passed": 11,
+      "failures": [],
+      "errors": [],
+      "skipped": [],
+      "postgres_cleaned": true,
+      "elapsed_seconds": 26.42,
+      "source_clean_at_start": true,
+      "pytest_arguments": [
+        "-q",
+        "--junitxml=serial-integrated-failure-union.xml",
+        "tests/test_crm_read_contention.py::test_five_conversations_share_agent_without_read_failures_or_operations",
+        "tests/test_current_booking_reschedule_context.py::test_create_move_cancel_uses_fresh_resource_and_one_completion_per_turn[VOICE]",
+        "tests/test_current_booking_reschedule_context.py::test_projection_retains_fresh_resource_without_inventing_a_missing_one[resource_test]",
+        "tests/test_five_booking_cycles.py::test_five_scoped_booking_cancel_cycles_keep_four_progressing_while_one_is_held[VOICE]",
+        "tests/test_gateway_owner_auth.py::test_guarded_route_inventory_is_exact",
+        "tests/test_goal5_business_recovery.py::test_goal5_i2_try_again_keeps_unknown_recovery_read_only",
+        "tests/test_managed_bounds.py::test_new_managed_secret_env_denylist_and_mapped_credentials",
+        "tests/test_managed_http_cleanup.py::test_direct_caller_cancel_joins_sdk_and_preserves_cancellation[request-True]",
+        "tests/test_managed_native_close.py::test_authenticated_native_buffered_close_joins_actual_owner[False-deadline-direct-False]",
+        "tests/test_managed_native_close.py::test_native_buffered_join_preserves_first_caller_cancellation[False]"
+      ],
+      "interpreter_environment": "ci312"
+    },
+    {
+      "label": "serial-integrated-goal5-module",
+      "source_sha": "8f2ec507cfe25b27307b6fbf78032dbcd511665b",
+      "image": "postgres:16-alpine@sha256:cf78e76683b9ca8c5733cbbdce6c9262b45b6767934dd0a95e671f9a0fc20685",
+      "exit_code": 0,
+      "total": 10,
+      "passed": 10,
+      "failures": [],
+      "errors": [],
+      "skipped": [],
+      "postgres_cleaned": true,
+      "elapsed_seconds": 12.86,
+      "source_clean_at_start": true,
+      "pytest_arguments": [
+        "-q",
+        "--junitxml=serial-integrated-goal5-module.xml",
+        "tests/test_goal5_business_recovery.py"
+      ],
+      "interpreter_environment": "ci312"
+    }
+  ],
+  "p0a_ai": {
+    "cases": [
+      {
+        "gap_id": "SEC002-OWNER-AI",
+        "nodeid": "::test_forged_owner_admin_headers_require_gateway_identity",
+        "phase": "call",
+        "seam": "asgi",
+        "status": "EXPECTED SECURITY GAP"
+      },
+      {
+        "gap_id": null,
+        "nodeid": "::test_internal_ownership_rejects_other_purpose_before_lookup[legacy]",
+        "phase": "call",
+        "seam": "asgi",
+        "status": "PASS"
+      },
+      {
+        "gap_id": null,
+        "nodeid": "::test_internal_ownership_rejects_other_purpose_before_lookup[missing]",
+        "phase": "call",
+        "seam": "asgi",
+        "status": "PASS"
+      },
+      {
+        "gap_id": null,
+        "nodeid": "::test_internal_ownership_valid_token_preserves_pair",
+        "phase": "call",
+        "seam": "asgi",
+        "status": "PASS"
+      },
+      {
+        "gap_id": null,
+        "nodeid": "::test_managed_exact_grant_positive_control[A]",
+        "phase": "call",
+        "seam": "asgi",
+        "status": "PASS"
+      },
+      {
+        "gap_id": null,
+        "nodeid": "::test_managed_exact_grant_positive_control[B]",
+        "phase": "call",
+        "seam": "asgi",
+        "status": "PASS"
+      },
+      {
+        "gap_id": null,
+        "nodeid": "::test_managed_grants_cannot_be_combined_across_tenants[agent_id]",
+        "phase": "call",
+        "seam": "asgi",
+        "status": "PASS"
+      },
+      {
+        "gap_id": null,
+        "nodeid": "::test_managed_grants_cannot_be_combined_across_tenants[channel]",
+        "phase": "call",
+        "seam": "asgi",
+        "status": "PASS"
+      },
+      {
+        "gap_id": null,
+        "nodeid": "::test_managed_grants_cannot_be_combined_across_tenants[integration_id]",
+        "phase": "call",
+        "seam": "asgi",
+        "status": "PASS"
+      },
+      {
+        "gap_id": null,
+        "nodeid": "::test_managed_grants_cannot_be_combined_across_tenants[mixed_tuple]",
+        "phase": "call",
+        "seam": "asgi",
+        "status": "PASS"
+      },
+      {
+        "gap_id": null,
+        "nodeid": "::test_managed_grants_cannot_be_combined_across_tenants[owner_id]",
+        "phase": "call",
+        "seam": "asgi",
+        "status": "PASS"
+      },
+      {
+        "gap_id": null,
+        "nodeid": "::test_managed_owner_mapping_cannot_change_between_grants",
+        "phase": "call",
+        "seam": "unit-registry",
+        "status": "PASS"
+      },
+      {
+        "gap_id": null,
+        "nodeid": "::test_managed_rejects_unauthenticated_before_parsing_body[duplicate]",
+        "phase": "call",
+        "seam": "asgi",
+        "status": "PASS"
+      },
+      {
+        "gap_id": null,
+        "nodeid": "::test_managed_rejects_unauthenticated_before_parsing_body[legacy]",
+        "phase": "call",
+        "seam": "asgi",
+        "status": "PASS"
+      },
+      {
+        "gap_id": null,
+        "nodeid": "::test_managed_rejects_unauthenticated_before_parsing_body[missing]",
+        "phase": "call",
+        "seam": "asgi",
+        "status": "PASS"
+      },
+      {
+        "gap_id": null,
+        "nodeid": "::test_managed_rejects_unauthenticated_before_parsing_body[wrong]",
+        "phase": "call",
+        "seam": "asgi",
+        "status": "PASS"
+      },
+      {
+        "gap_id": null,
+        "nodeid": "::test_owner_missing_or_malformed_identity_does_not_read[None]",
+        "phase": "call",
+        "seam": "asgi",
+        "status": "PASS"
+      },
+      {
+        "gap_id": null,
+        "nodeid": "::test_owner_missing_or_malformed_identity_does_not_read[malformed]",
+        "phase": "call",
+        "seam": "asgi",
+        "status": "PASS"
+      },
+      {
+        "gap_id": null,
+        "nodeid": "::test_ownership_credential_cannot_read_management_counts",
+        "phase": "call",
+        "seam": "asgi",
+        "status": "PASS"
+      },
+      {
+        "gap_id": null,
+        "nodeid": "::test_strict_legacy_chat_rejects_missing_wrong_and_other_purpose_tokens[management]",
+        "phase": "call",
+        "seam": "asgi",
+        "status": "PASS"
+      },
+      {
+        "gap_id": null,
+        "nodeid": "::test_strict_legacy_chat_rejects_missing_wrong_and_other_purpose_tokens[missing]",
+        "phase": "call",
+        "seam": "asgi",
+        "status": "PASS"
+      },
+      {
+        "gap_id": null,
+        "nodeid": "::test_strict_legacy_chat_rejects_missing_wrong_and_other_purpose_tokens[wrong]",
+        "phase": "call",
+        "seam": "asgi",
+        "status": "PASS"
+      },
+      {
+        "gap_id": null,
+        "nodeid": "::test_strict_legacy_chat_valid_token_preserves_owner_context",
+        "phase": "call",
+        "seam": "asgi",
+        "status": "PASS"
+      }
+    ],
+    "collected": 23,
+    "collection_errors": [],
+    "exit_code": 0,
+    "metrics_sha": "f0c8a94c035696260c2fb0ae1959d95aa36b2041",
+    "provisioning": "strict-p1a-ownership-principal",
+    "schema_version": 1,
+    "seam": "asgi",
+    "source_sha": "8f2ec507cfe25b27307b6fbf78032dbcd511665b"
+  },
+  "unavailable_union_selectors": {
+    "original-main": [
+      "tests/test_gateway_owner_auth.py::test_guarded_route_inventory_is_exact"
+    ],
+    "current-main": [
+      "tests/test_gateway_owner_auth.py::test_guarded_route_inventory_is_exact"
+    ],
+    "pr138-fixed": [
+      "tests/test_gateway_owner_auth.py::test_guarded_route_inventory_is_exact"
+    ],
+    "integrated": []
+  },
+  "functional_failure_union": [
+    "tests/test_crm_read_contention.py::test_five_conversations_share_agent_without_read_failures_or_operations",
+    "tests/test_current_booking_reschedule_context.py::test_create_move_cancel_uses_fresh_resource_and_one_completion_per_turn[VOICE]",
+    "tests/test_current_booking_reschedule_context.py::test_projection_retains_fresh_resource_without_inventing_a_missing_one[resource_test]",
+    "tests/test_five_booking_cycles.py::test_five_scoped_booking_cancel_cycles_keep_four_progressing_while_one_is_held[VOICE]",
+    "tests/test_gateway_owner_auth.py::test_guarded_route_inventory_is_exact",
+    "tests/test_goal5_business_recovery.py::test_goal5_i2_try_again_keeps_unknown_recovery_read_only",
+    "tests/test_managed_bounds.py::test_new_managed_secret_env_denylist_and_mapped_credentials",
+    "tests/test_managed_http_cleanup.py::test_direct_caller_cancel_joins_sdk_and_preserves_cancellation[request-True]",
+    "tests/test_managed_native_close.py::test_authenticated_native_buffered_close_joins_actual_owner[False-deadline-direct-False]",
+    "tests/test_managed_native_close.py::test_native_buffered_join_preserves_first_caller_cancellation[False]"
+  ],
+  "independent_code_review": {
+    "reviewer": "fresh independent Sol 6.1 xhigh",
+    "sources": {
+      "p1a": "b7800468d85c80a85ef46b717dbc37991aa7432d",
+      "p1c": "46d15d3e45e694010d102fd343c522054fa8947f",
+      "integrated": "8f2ec507cfe25b27307b6fbf78032dbcd511665b",
+      "main": "f570d1e3c6e23075b899379e0e23895df512947f"
+    },
+    "spec_correctness": "APPROVE for code update",
+    "supplemental_security": "APPROVE within scope",
+    "findings": [],
+    "independent_tests": [
+      {
+        "env": "CI312",
+        "suite": "auth,startup,managed target",
+        "passed": 351,
+        "integration_deselected": 2
+      },
+      {
+        "env": "old312",
+        "suite": "same",
+        "passed": 351,
+        "integration_deselected": 2
+      },
+      {
+        "env": "CI311",
+        "suite": "owner,managed target",
+        "passed": 300,
+        "integration_deselected": 1
+      },
+      {
+        "env": "CI312",
+        "suite": "profiles,SQL observer,bounds nonintegration",
+        "passed": 52,
+        "integration_deselected": 6
+      }
+    ],
+    "independently_reproduced": [
+      "original P1c inventory FAIL with FastAPI0.156.2, PASS with0.135.1",
+      "original P1a sentinel FAIL cold cache; updated2PASS with same cold hook"
+    ],
+    "production_preservation": "144 nonauth production Python files byte-identical to main; Voice/completion/managed validators, log sanitizer and SQL observer retained",
+    "root_pg_receipt_reviewed": "integrated-security-goal5.json:439PASS,0FAIL,0SKIP",
+    "limits": [
+      "overlapping independent runs must not be summed",
+      "no independent PostgreSQL run: inspected root receipt",
+      "full suite and remote CI pending",
+      "final documentation incremental review required",
+      "not overall SEC002 acceptance; no merge/deploy approval"
+    ]
+  },
+  "inherited_goal5_review": {
+    "scope": "Observed inherited Goal5 failure; no source changes",
+    "verdict": "No SEC002-induced security finding; overall acceptance pending",
+    "function": "BusinessRuntime._send",
+    "same_source_on": [
+      "05d229c",
+      "076e723",
+      "6a3e71c",
+      "f570d1e",
+      "8f2ec50"
+    ],
+    "source_sha256": "51a6627ee68807dbac9cd06d5a83276b26927f91be29ea45bdf93147be4e366f",
+    "reproduction": "Independent reviewer invoked actual unchanged method with ambiguous provider receipt and3s mark_unknown await; UnboundLocalError after2.00s, provider_execute1, mark_unknown1",
+    "cause": "plan unassigned before error; own2s CancelScope cancellation bypasses except Exception then scope suppresses cancellation, subsequent plan read unbound",
+    "risk": "Masks typed UNKNOWN handling and may leave uncertainty update unacknowledged. Previously committed DISPATCHING persists until lease recovery. No additional provider dispatch or success/retry fallback observed; managed outer processing status remains UNKNOWN from dispatch_attempted.",
+    "required": "Serial exact node/full Goal5 module/failure union on fresh DB for original main/current main/updated P1a/integration. Serial PASS does not repair deterministic inherited defect.",
+    "authorization": "Do not change Business semantics in this SEC002 CI task"
+  },
+  "latest_observed_main_ci_auth_focus": {
+    "fastapi": "0.156.4",
+    "passed": 383,
+    "integration_deselected": 7,
+    "scope": "Owner/P1a/startup/chat/bounds, same application snapshot; fresh separate environment"
+  }
+}

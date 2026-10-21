@@ -1,11 +1,11 @@
 # P1c: AI owner API gateway workload admission
 
-This is a dormant receiver change stacked on P1a commit
-`076e723af7b4771f1633bd9029bc833b89072d96`. The PR base is
-`security/p1a-internal-ownership-purpose`; it cannot merge before P1a and final
-main compatibility review. Current main at implementation start is
-`e44a3b0977523ae7ab73fef9a6e57c80c975a7d2`; P1a and main have diverged by two
-commits each from `05d229c55cf141edfdc3ad72e066baf53cbae5ed`.
+This is a dormant receiver change stacked on P1a PR #138. The PR base remains
+`security/p1a-internal-ownership-purpose`; merge P1a first and reconcile the child
+with the resulting main before merging it. The 21 October CI stabilization
+integrates main `f570d1e3c6e23075b899379e0e23895df512947f` into the parent without
+rewriting either original PR's history. Exact code sources, current checks and
+historical implementation results are in [validation](gateway-owner-validation.md).
 
 ## Receiver contract
 
@@ -95,17 +95,21 @@ Do not enable required mode until these separate gates pass:
    Then set `required` explicitly and repeat admission tests after restart.
 
 The disposable proof uses the exact production-pinned KrakenD 2.13.3 digest,
-raw non-JSON flexible template, validated `env`/`toJson`, request-only Martian
-header overwrite, no `FC_OUT`, and synthetic credentials only. It does not
-provide the production 21-route template. Native JSON fallback can start after
-template errors, and malformed Martian config can run without injection: the
-required receiver must still deny those requests. KrakenD's default ERROR
-logging can dump malformed modifier configuration including resolved secrets.
-The proof's explicit `CRITICAL` logging policy suppresses that dump at the cost
-of lower-level diagnostics; validated equivalent redaction is an alternative
-future implementation. Safe logging, template correctness and no secret
-response/config exports are required gateway rollout gates, not properties
-this receiver can enforce.
+native-invalid raw templates, no `FC_OUT`, and synthetic credentials only. The
+21 October [Gateway #43 proof](https://github.com/chotabyorg/chota-gateway/pull/43)
+at `79bf243` supersedes the original Martian/CRITICAL logging candidate with a
+trusted Lua request modifier that reads receiver-specific env at request time.
+Its synthetic runtime checks retain INFO/ERROR diagnostics without resolved
+credentials in the config. Lua's open OS/IO libraries are trusted code authority,
+not a sandbox; reviewed immutable code/config and performance acceptance remain
+rollout prerequisites. No actual 21-route production configuration is supplied.
+
+The original Martian negative control still demonstrates that malformed modifier
+configuration can dump resolved secrets at ERROR/INFO. Do not copy that candidate
+or infer safety from suppressing diagnostics. Template/runtime errors and missing
+injection must still fail closed at a required receiver. Safe logging, template
+correctness and no secret response/config exports remain separate gateway gates
+that this receiver cannot enforce.
 
 `OWNER_AI_TOKEN` and `OWNER_CP_TOKEN` are disposable proof names, not deployed
 Secret contracts. They, reserved `GATEWAY_AI_OWNER_TOKEN`, and receiver registry
