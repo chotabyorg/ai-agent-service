@@ -102,6 +102,11 @@ On Windows, invoke `python -X utf8 -m tests.business_v2_e2e.native` and supply
 `--tzdata-dir` pointing to an installed IANA zoneinfo data
 directory; this replaces Linux's system timezone database, not service packages.
 The fixture records the timezone file hash and does not download data at runtime.
+Use `--channel TELEGRAM` (default) or `--channel WEBSITE_WIDGET`. Native execution
+uses the actual channel admission HTTP API and one real Conversation worker poll
+per input. It verifies retained managed contract version2 and never fabricates
+admission, Turn ownership, permits or delivery evidence. No Telegram API or hosted
+Widget is called; customer-facing delivery remains outside this Business matrix.
 
 The private PG16 JSON input has `disposable: "yes"`, `host: "127.0.0.1"`, `port`,
 `user` and `password` fields. It must refer only to a task-owned test cluster, never

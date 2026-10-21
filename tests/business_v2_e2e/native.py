@@ -20,7 +20,7 @@ import sys
 import time
 import traceback
 from urllib.parse import quote
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 ROOT = Path(__file__).resolve().parents[2]
 SAFE_ENV = {"PATH", "SYSTEMROOT", "WINDIR", "COMSPEC", "TEMP", "TMP", "HOME", "LANG"}
@@ -45,6 +45,7 @@ def main():
                  "pg16-admin-input", "pg18-bin", "output"):
         parser.add_argument("--" + name, type=Path, required=True)
     parser.add_argument("--tzdata-dir", type=Path)
+    parser.add_argument("--channel", choices=("TELEGRAM", "WEBSITE_WIDGET"), default="TELEGRAM")
     args = parser.parse_args()
     roots = {"ai": ROOT, "cs": args.cs_root.resolve(), "crm": args.crm_root.resolve()}
     pythons = {name: getattr(args, name + "_python").resolve() for name in roots}
@@ -114,6 +115,10 @@ def main():
         def __init__(self):
             super().__init__(state, {name: db_url(name) for name in roots}, None, None, {})
             self.handles = []
+            self.grant.update(channel=args.channel, provider_namespace=(
+                "main-chota.telegram.v1" if args.channel == "TELEGRAM" else "main-chota.website-widget.v1"))
+            self.threads = {}
+            self.message_number = 0
 
         def url(self, name):
             return "http://127.0.0.1:" + str(ports[name])
@@ -127,12 +132,12 @@ def main():
             pub = key.public_key().public_bytes(serialization.Encoding.PEM,
                 serialization.PublicFormat.SubjectPublicKeyInfo).decode()
             self.config = dict(self.ids, roots={k: str(v) for k, v in roots.items()},
-                state=str(state), ports=ports, native_runtime=True,
+                state=str(state), ports=ports, native_runtime=True, channel=args.channel,
                 allowlist=[("127.0.0.1", int(admin["port"])),
                     *(("127.0.0.1", port) for port in ports.values())])
             private(state / "config.json", self.config)
             grant = dict(owner_id=self.grant["owner_id"], integration_id=self.ids["integration"],
-                channel="TELEGRAM", agent_id=self.ids["agent"], agent_owner_id=self.ids["owner"])
+                channel=args.channel, agent_id=self.ids["agent"], agent_owner_id=self.ids["owner"])
             ai_env = dict(POSTGRES_HOST="127.0.0.1", POSTGRES_PORT=str(admin["port"]),
                 POSTGRES_DB=databases["ai"], POSTGRES_USER=role, POSTGRES_PASSWORD=password,
                 POSTGRES_ECHO="false", ENCRYPTION_KEY=Fernet.generate_key().decode(),
@@ -153,7 +158,14 @@ def main():
                             provider_namespace="main-chota.conversation.v1")])]),
                 MANAGED_AI_BASE_URL=self.url("ai"), MANAGED_AI_BINDINGS=json.dumps([
                     dict(owner_id=self.grant["owner_id"], integration_id=self.ids["integration"],
-                        channel="TELEGRAM", agent_id=self.ids["agent"], service_token=self.tokens["ai"])]))
+                        channel=args.channel, agent_id=self.ids["agent"], service_token=self.tokens["ai"])]))
+            if args.channel == "TELEGRAM":
+                cs_env.update(TELEGRAM_CANARY_INTEGRATION_IDS=json.dumps([self.ids["integration"]]),
+                    TELEGRAM_WORKER_ENABLED="true", TELEGRAM_WORKER_PRINCIPAL_ID="synthetic-worker")
+            else:
+                cs_env.update(WEBSITE_BINDINGS=json.dumps([dict(owner_id=self.grant["owner_id"],
+                    integration_id=self.ids["integration"], agent_id=self.ids["agent"])]),
+                    WEBSITE_WORKER_ENABLED="true", WEBSITE_WORKER_PRINCIPAL_ID="synthetic-worker")
             crm_env = dict(DATABASE_URL=db_url("crm"), USER_SERVICE_URL=self.url("model"),
                 ALLOWED_ORIGINS='["https://chota.by"]', CRM_AGENT_PUBLIC_KEYS_JSON=json.dumps({"synthetic": pub}))
             self.envs = {name: base_env() | timezone_env | {"BUSINESS_E2E_CONFIG": str(state / "config.json")}
@@ -165,6 +177,46 @@ def main():
             for name in ("model", "crm", "ai", "cs"):
                 await self.start(name)
             await self.seed()
+
+        async def turn(self, message, steps, thread=None):
+            await self.request("model", "POST", "/script", steps)
+            headers = {"X-Service-Token": self.tokens["cs"]}
+            thread = thread or str(uuid4())
+            self.message_number += 1
+            identity = dict(owner_id=self.grant["owner_id"], integration_id=self.ids["integration"],
+                agent_id=self.ids["agent"])
+            if args.channel == "TELEGRAM":
+                if thread not in self.threads:
+                    self.threads[thread] = 4000000 + len(self.threads)
+                chat = self.threads[thread]
+                identity.update(provider_thread_id=str(chat), bot_id=123456,
+                    provider_event_id=f"b123456c{chat}m{self.message_number}")
+                body = identity | dict(text=message, desired_route="MANAGED", update_id=self.message_number,
+                    message_id=self.message_number, chat_id=chat, sender_id=chat)
+                route, table = "telegram", "telegram_admissions"
+            else:
+                identity.update(session_id=thread, message_id=str(uuid4()))
+                body = identity | dict(text=message, desired_route="MANAGED")
+                route, table = "website", "website_admissions"
+            admission = await self.request("cs", "POST", "/internal/v1/" + route + "/admissions", body, headers)
+            assert admission["route"] == "MANAGED" and not admission["replayed"]
+            await asyncio.to_thread(sync_process, [str(pythons["cs"]),
+                str(ROOT / "tests/business_v2_e2e/native_child.py"), "worker"], roots["cs"],
+                self.envs["cs"], "worker-" + str(self.message_number) + ".log", 90)
+            found = await self.sql("cs", "SELECT owned.turn_id, turn.managed_contract_version FROM " + table + " admitted "
+                "JOIN turn_input_messages owned ON owned.message_id=admitted.canonical_message_id "
+                "JOIN agent_turns turn ON turn.id=owned.turn_id "
+                "WHERE admitted.id=$1", UUID(admission["admission_id"]))
+            assert len(found) == 1
+            result = await self.request("cs", "GET", "/internal/v1/turns/" + str(found[0]["turn_id"]),
+                headers=headers)
+            assert result["status"] in {"COMPLETED", "FAILED"}
+            assert found[0]["managed_contract_version"] == 2
+            assert len(result["operation_refs"]) <= 32
+            assert all(set(value) == {"origin", "operation_id", "outcome"}
+                and value["origin"] == "AI_AGENT_SERVICE" for value in result["operation_refs"])
+            private(state / ("turn-" + result["id"] + ".json"), {"turn": result})
+            return result
 
         async def start(self, name):
             runtime = pythons["ai" if name == "model" else name]
@@ -209,7 +261,7 @@ def main():
         status="FAIL", external_provider_requests=0, production_mutations=False,
         live_model=False, real_crm=True, cases=[], owned_database_cleanup=False,
         explicit_timezone_sha256=timezone_digest, pg18_database_dropped=False,
-        controller_utf8_mode=bool(sys.flags.utf8_mode))
+        controller_utf8_mode=bool(sys.flags.utf8_mode), channel=args.channel, admission_mode="MANAGED_V2_REAL_WORKER")
     pg_process = None
     pg_handle = None
     created = []
