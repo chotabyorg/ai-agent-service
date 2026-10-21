@@ -10,6 +10,32 @@ ModelName = Annotated[str, Field(min_length=1, max_length=255, pattern=r"^[A-Za-
 ProviderName = Annotated[str, Field(min_length=1, max_length=100, pattern=r"^[A-Za-z0-9][A-Za-z0-9._/-]*$")]
 
 
+class VoiceRuntimeProfile(BaseModel):
+    """Provider-neutral scope, budgets and speech style; never authority."""
+    model_config = ConfigDict(extra='forbid', frozen=True)
+    owner_id: str
+    integration_id: UUID
+    agent_id: UUID
+    model: ModelName
+    completion_model: ModelName | None = None
+    reuse_signing_key: bool = False
+    concise_speech: bool = False
+    execution_seconds: float = Field(default=90, ge=1, le=240, allow_inf_nan=False)
+    context_bytes: int = Field(default=131072, ge=1024, le=1048576)
+    max_output_tokens: int = Field(default=1024, ge=1, le=32768)
+    knowledge_chunk_chars: int = Field(default=500, ge=1, le=8000)
+    knowledge_context_chars: int = Field(default=1200, ge=1, le=32768)
+    _owner = field_validator('owner_id')(validate_owner)
+
+    def matches(self, request, model):
+        return (type(request) is ManagedTurnRequest and request.channel == 'VOICE'
+                and (request.owner_id, request.integration_id, request.agent_id, model)
+                == (self.owner_id, self.integration_id, self.agent_id, self.model))
+
+    def extra_body(self):
+        return {}
+
+
 class VoiceLatencyProfile(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
