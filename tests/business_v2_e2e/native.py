@@ -27,7 +27,9 @@ SAFE_ENV = {"PATH", "SYSTEMROOT", "WINDIR", "COMSPEC", "TEMP", "TMP", "HOME", "L
 
 
 def git(root, *args):
-    return subprocess.check_output(["git", "-C", str(root), *args], text=True).strip()
+    return subprocess.run(["git", "-C", str(root), *args], check=True,
+                          stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                          encoding="utf-8", timeout=15).stdout.strip()
 
 
 def base_env():
@@ -59,7 +61,8 @@ def main():
         timezone_digest = hashlib.sha256((timezone_root / "Europe/Minsk").read_bytes()).hexdigest()
         timezone_env["PYTHONTZPATH"] = str(timezone_root)
     for name, root in roots.items():
-        if (root / ".env").exists() or git(root, "status", "--porcelain"):
+        if (Path(git(root, "rev-parse", "--show-toplevel")).resolve() != root
+                or (root / ".env").exists() or git(root, "status", "--porcelain")):
             raise SystemExit("Clean source candidates without .env are required")
         sources[name] = {"revision": git(root, "rev-parse", "HEAD"),
             "tree": git(root, "rev-parse", "HEAD^{tree}")}
