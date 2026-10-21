@@ -208,6 +208,7 @@ async def test_observer_failure_or_bound_does_not_prevent_guarded_read(
     # The outer READ observer and request-local CRM timers have independent
     # bounds. Saturating READ must not erase the nested HTTP measurements.
     assert [(row.phase, row.state) for row in rows] == [
+        ('TOOL_SURFACE', 'START'), ('TOOL_SURFACE', 'COMPLETED')] + [
         (phase, state) for request_phase in ('CRM_CONTEXT_HTTP', 'CRM_EXECUTE_HTTP')
         for phase in ('CRM_ASSERTION', 'CRM_CLIENT_SETUP', request_phase)
         for state in ('START', 'COMPLETED')] + [('CRM_CLIENT_CLOSE', 'START'), ('CRM_CLIENT_CLOSE', 'COMPLETED')]

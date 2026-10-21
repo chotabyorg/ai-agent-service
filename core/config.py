@@ -7,7 +7,8 @@ from pydantic import Field, PrivateAttr, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from config.llm_models import get_default_model_id
-from core.voice_latency import VoiceLatencyProfile
+from core.voice_latency import VoiceLatencyProfile, VoiceRuntimeProfile
+from core.completion_adapter import CompletionAdapterProfile
 
 
 class Settings(BaseSettings):
@@ -94,6 +95,9 @@ class Settings(BaseSettings):
     managed_text_parallel_tool_calls: bool = False
     # Empty by default; only authenticated managed VOICE requests can match.
     managed_voice_latency_profiles: list[VoiceLatencyProfile] = Field(default_factory=list, max_length=64)
+    managed_voice_profiles: list[VoiceRuntimeProfile] = Field(default_factory=list, max_length=64)
+    managed_completion_adapter: CompletionAdapterProfile | None = None
+    managed_completion_api_key: SecretStr = SecretStr("")
     _managed_principals: tuple = PrivateAttr(default=())
     _ownership_principals: tuple = PrivateAttr(default=())
     _gateway_principals: tuple = PrivateAttr(default=())
@@ -101,9 +105,26 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def validate_managed_reasoning_transport(self) -> "Settings":
         scopes = [(p.owner_id, p.integration_id, p.agent_id, p.model)
-                  for p in self.managed_voice_latency_profiles]
+                  for p in [*self.managed_voice_latency_profiles, *self.managed_voice_profiles]]
         if len(scopes) != len(set(scopes)):
             raise RuntimeError("Duplicate managed Voice profile scope")
+        adapter = self.managed_completion_adapter
+        if self.managed_voice_profiles and (adapter is None or self.privacy_filter_enabled):
+            raise RuntimeError('Neutral Voice profiles require an explicit direct completion adapter')
+        if adapter is not None:
+            parsed = urlsplit(self.llm_base_url)
+            if (parsed.scheme not in {'http', 'https'} or not parsed.hostname or parsed.username
+                    or parsed.password or parsed.query or parsed.fragment or self.privacy_filter_enabled):
+                raise RuntimeError('Invalid managed completion adapter transport')
+            direct_router = self.llm_base_url.rstrip('/') == 'https://openrouter.ai/api/v1'
+            if (adapter.kind == 'openrouter') != direct_router:
+                raise RuntimeError('Completion adapter does not match endpoint')
+            if (adapter.kind != 'openrouter' and (self.managed_voice_latency_profiles
+                    or self.managed_openrouter_disable_reasoning_models or self.managed_text_disable_reasoning)):
+                raise RuntimeError('OpenRouter controls require the OpenRouter adapter')
+            if (not adapter.reasoning and (self.managed_voice_latency_profiles
+                    or self.managed_openrouter_disable_reasoning_models or self.managed_text_disable_reasoning)):
+                raise RuntimeError('Configured reasoning controls require adapter support')
         if (self.managed_openrouter_disable_reasoning_models
                 or self.managed_voice_latency_profiles
                 or self.managed_text_disable_reasoning):

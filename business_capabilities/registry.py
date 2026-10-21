@@ -1,6 +1,8 @@
 """Explicit wire-name bijection and product risk/default policy."""
 from dataclasses import dataclass
+from copy import deepcopy
 from enum import StrEnum
+from functools import lru_cache
 import re
 from pydantic import BaseModel
 from business_capabilities import schemas as s
@@ -23,8 +25,15 @@ class Capability:
     default_enabled: bool = True
 
     def tool(self):
+        description = self.description
+        if self.id == 'booking.check_availability':
+            description += (
+                ' Use this advisory read to choose among alternative times. '
+                'When the customer requested an exact time and the booking details are known, '
+                'call booking_create directly: preparation already checks fresh availability. '
+                'Do not insert this read before that preparation.')
         return {'type': 'function', 'function': {'name': self.tool_name,
-                'description': self.description, 'parameters': tool_schema(self.input)}}
+                'description': description, 'parameters': tool_schema(self.input)}}
 
 
 CAPABILITIES = (
@@ -58,18 +67,42 @@ def normalize_arguments(capability: str, arguments: object) -> dict:
     return REGISTRY[capability].input.model_validate(arguments).model_dump(mode='json', by_alias=True, exclude_none=True)
 
 
+_TOOL_SCHEMA_MODELS = frozenset(c.input for c in CAPABILITIES)
+
+
 def tool_schema(model):
+    # Only immutable, code-owned model definitions enter this bounded cache.
+    # Callers receive independent trees. Live availability, authority, refs and
+    # proposal state are still selected by the runtime on every invocation.
+    if model in _TOOL_SCHEMA_MODELS:
+        return deepcopy(_canonical_tool_schema(model))
+    return _build_tool_schema(model)
+
+
+@lru_cache(maxsize=len(_TOOL_SCHEMA_MODELS))
+def _canonical_tool_schema(model):
+    return _build_tool_schema(model)
+
+
+def _build_tool_schema(model):
     """Inline local definitions and omit nullable alternatives we do not accept."""
     source = model.model_json_schema()
     definitions = source.get('$defs', {})
-    def visit(value):
+    def visit(value, *, property_map=False):
         if isinstance(value, list):
             return [visit(item) for item in value]
         if not isinstance(value, dict):
             return value
+        if property_map:
+            # Property names, including a real field named "title", are data.
+            return {name: visit(schema) for name, schema in value.items()}
         if '$ref' in value:
             return visit(definitions[value['$ref'].removeprefix('#/$defs/')])
-        result = {key: visit(item) for key, item in value.items() if key != '$defs' and not (key == 'default' and item is None)}
+        # Pydantic repeats field/class names in title annotations. They do not
+        # constrain input; keep every validation keyword and property name.
+        result = {key: visit(item, property_map=key == 'properties')
+                  for key, item in value.items()
+                  if key not in {'$defs', 'title'} and not (key == 'default' and item is None)}
         if 'anyOf' in result:
             branches = [branch for branch in result['anyOf'] if branch.get('type') != 'null']
             if len(branches) == 1:
@@ -111,4 +144,10 @@ def tool_schema(model):
         # Expose the existing runtime validator to the model without changing
         # the durable catalog schema fingerprint or its accepted input set.
         result['oneOf'] = [{'required': ['customer_ref']}, {'required': ['customer']}]
+        result['properties']['customer_ref']['description'] = (
+            'Verified existing customer ref. When using it, omit the customer key entirely; '
+            'do not copy the lookup customer object or add customer=null.')
+        result['properties']['customer']['description'] = (
+            'Supplied name and exact contact when no verified customer ref was selected. '
+            'When using this object, omit customer_ref entirely.')
     return result

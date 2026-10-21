@@ -245,6 +245,10 @@ async def test_blocked_guard_timeout_is_not_reported_as_model_wait(
         await run_core(db_session, runtime, model)
     rows = observations(caplog)
     assert [(row.phase, row.state) for row in rows] == [
+        ('BUSINESS_PROMPT_CONTEXT', 'START'),
+        ('BUSINESS_EFFECT_ELIGIBILITY', 'START'), ('BUSINESS_EFFECT_ELIGIBILITY', 'COMPLETED'),
         ('CONTEXT_REPOSITORY', 'START'), ('CONTEXT_REPOSITORY', 'COMPLETED'),
+        ('BUSINESS_PROMPT_CONTEXT', 'COMPLETED'),
+        ('TOOL_SURFACE', 'START'), ('TOOL_SURFACE', 'COMPLETED'),
         ('EXECUTION_GUARD', 'START'), ('EXECUTION_GUARD', 'TIMEOUT')]
     assert entered == [True] and model.chat.completions.calls == [] and provider['posts'] == 0

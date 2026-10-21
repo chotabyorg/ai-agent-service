@@ -55,7 +55,7 @@ class BusinessRuntime:
             raise BusinessSafetyError("REGISTRY_INVALID")
         self = cls()
         self.request, self.grant = request, grant
-        self.repository = BusinessRepository(session_factory)
+        self.repository = BusinessRepository(session_factory, execution=execution)
         self.registry, self.execution = registry, execution
         if effect_port is None:
             from core.config import get_settings
@@ -436,6 +436,13 @@ class BusinessRuntime:
         return observe_managed_wait(execution, phase, step=step)
 
     def openai_tools(self):
+        step = min(getattr(self, '_tool_surface_observation_step', 0) + 1, 21)
+        self._tool_surface_observation_step = step
+        execution = getattr(self, 'execution', None) if step <= 20 else None
+        with observe_managed_wait(execution, 'TOOL_SURFACE', step=step):
+            return self._openai_tools()
+
+    def _openai_tools(self):
         if self.registration is None or self.binding is None:
             return []
         if self.recovery_mode:
@@ -678,7 +685,11 @@ class BusinessRuntime:
             managed_request_fingerprint=managed_request_fingerprint(self.request),
         )
         try:
-            result = await self.effect_port.eligibility(request)
+            step = min(getattr(self, '_effect_observation_step', 0) + 1, 21)
+            self._effect_observation_step = step
+            execution = getattr(self, 'execution', None) if step <= 20 else None
+            with observe_managed_wait(execution, 'BUSINESS_EFFECT_ELIGIBILITY', step=step):
+                result = await self.effect_port.eligibility(request)
             if not isinstance(result, ExternalEffectEligibilityResult):
                 return None
             result = ExternalEffectEligibilityResult.model_validate(result.model_dump())
