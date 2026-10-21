@@ -409,6 +409,22 @@ No real channel, provider, deployment or GitOps state changes. Full relevant
 legacy/managed/business suites, additive migration/drift/import/package/Python3.11
 build and independent paired-process verification are separate required gates.
 
+## Retained effect acquisition across profile upgrades
+
+A historical omitted-field Turn may already have an immutable RESERVED operation
+whose effect request contains the old defaulted managed digest. Same-Turn
+continuation recognizes only the current digest or that finite historical default
+profile when both extension fields were omitted. Explicit settings and every
+semantic identity field remain significant.
+
+Continuation reconstructs the original complete permit request and checks its
+stored request/command fingerprints. It never substitutes a new canonical digest
+in retained authority. Conversation must still grant or replay that exact request;
+a denial records no dispatch, and a lost permit response retries only the same
+request identity. Bound permits retain their ID. UNKNOWN provider effects remain
+read-only recovery with no replacement send. Newly created acquisitions always
+use the current canonical digest.
+
 ## Reproducible compatibility pair
 
 The `Managed compatibility pair` workflow runs the exact AI PR head against the
