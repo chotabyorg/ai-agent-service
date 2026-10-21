@@ -20,6 +20,7 @@ from models.business import (BusinessBinding, BusinessOperation, BusinessPlan, B
                              BusinessTurnContext, BusinessTurnPlanLink, TENANT)
 from schemas.conversation_effects import (ExternalEffectPermitRequest,
                                           frozen_command_fingerprint, managed_request_fingerprint,
+                                          retained_managed_fingerprint_matches,
                                           sidecar_fingerprint)
 from schemas.managed_turn import (
     DEFAULT_MAX_PARTIAL_CHARS,
@@ -665,6 +666,15 @@ class BusinessRepository:
                             # Never invalidate acquisition evidence or an attempted effect.
                             raise BusinessSafetyError("AUTHORITY_DENIED")
                         command = self._command(scope, plan, operation)
+                        managed_digest = managed_request_fingerprint(request)
+                        if operation.effect_request_turn_id is not None:
+                            if (operation.effect_request_turn_id != request.turn_id
+                                    or not retained_managed_fingerprint_matches(
+                                        operation.effect_managed_request_fingerprint, request)):
+                                raise BusinessSafetyError("EFFECT_REQUEST_CONFLICT", processing_status="UNKNOWN")
+                            # Replay the retained authority request verbatim. Never
+                            # replace it with a fresh canonical hash after an upgrade.
+                            managed_digest = operation.effect_managed_request_fingerprint
                         effect_request = ExternalEffectPermitRequest(
                             contract_version=1,
                             conversation_id=request.conversation_id,
@@ -675,7 +685,7 @@ class BusinessRepository:
                             channel=request.channel,
                             agent_id=request.agent_id,
                             authority_revision=context.authority_revision,
-                            managed_request_fingerprint=managed_request_fingerprint(request),
+                            managed_request_fingerprint=managed_digest,
                             operation_namespace="main-chota.ai-business.v1",
                             operation_id=operation.id,
                             operation_fingerprint=frozen_command_fingerprint(command),
