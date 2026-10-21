@@ -28,7 +28,7 @@ class ManagedRuntime:
         # Stable trusted platform execution metadata is available to the shared
         # core/future receipt adapters; it is never a persistence/history owner.
         self.request = request
-        self.handoff_enabled = bool(request is not None and request.contract_version == 3)
+        self.handoff_enabled = getattr(request, "contract_version", None) == 3
         self.control_latch = control_latch
         self.request_fingerprint = request_fingerprint
         self.original_dispatch_id = original_dispatch_id
