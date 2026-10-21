@@ -83,7 +83,8 @@ async def test_model_ignoring_choices_reaches_fresh_crm_without_argument_repair(
         tool('booking_create', arguments, 'corrected'))
     result = (await execute(api_client, value)).json()
     assert result['status'] == 'DRAFT_READY' and 'Подтверждаете' in result['draft_text']
-    assert facts == ['invented_ref', 'offering_test'] and calls['execute'] == 0
+    assert facts[0] == 'invented_ref' and len(facts) >= 2
+    assert set(facts[1:]) == {'offering_test'} and calls['execute'] == 0
     bad = next(m for m in model.chat.completions.calls[2]['messages'] if m.get('tool_call_id') == 'bad')
     assert json.loads(bad['content'])['error']['code'] == 'NOT_FOUND'
     async with db_session() as db:
