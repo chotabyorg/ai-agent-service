@@ -16,6 +16,7 @@ import re
 import secrets
 import socket
 import subprocess
+import sys
 import time
 from urllib.parse import quote
 from uuid import uuid4
@@ -34,6 +35,8 @@ def base_env():
 
 
 def main():
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ("cs-root", "crm-root", "ai-python", "cs-python", "crm-python",
                  "pg16-admin-input", "pg18-bin", "output"):
