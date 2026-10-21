@@ -677,4 +677,3 @@ async def test_telegram_handoff_real_http_and_database_lifecycle(handoff):
     assert re_enrolled.json()["binding_generation"] == 6
     assert len(await handoff.permit_rows()) == 1
     assert (await handoff.provider_counts())[0].get("POST", 0) == 1
-
