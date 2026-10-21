@@ -12,6 +12,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import xml.etree.ElementTree as ET
 
@@ -82,6 +83,15 @@ def main() -> int:
                 junit_sha256=hashlib.sha256(report.read_bytes()).hexdigest(),
                 failing_cases=[case.get("classname", "") + "::" + case.get("name", "")
                     for case in failed])
+            # Report only code-owned relative traceback locations. Assertion
+            # values, exception messages, fixture locals and payloads stay private.
+            value["failure_locations"] = [
+                {"file": match[1], "line": int(match[2]), "error_type": match[3]}
+                for case in failed
+                for node in list(case) if node.tag in {"failure", "error"}
+                for match in re.finditer(
+                    r"(?m)^(tests/[A-Za-z0-9_/]+\.py):([0-9]+): ([A-Za-z0-9_.]+)$",
+                    node.text or "")]
             if code == 0 and cases and not failed and not skipped:
                 value["status"] = "PASS"
         record["checks"][name] = value
