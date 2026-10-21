@@ -75,6 +75,8 @@ async def test_handoff_is_selectable_while_proposal_decision_is_pending(
         await run_core(db_session, runtime, model)
 
     assert "tool_choice" not in model.chat.completions.calls[0]
+    assert "platform_request_human_handoff" in {
+        tool["function"]["name"] for tool in model.chat.completions.calls[0]["tools"]}
     assert len(controls) == 1
     assert controls[0][0].type == "HUMAN_HANDOFF"
     assert controls[0][0].request_id
@@ -105,6 +107,9 @@ async def test_handoff_is_selectable_during_one_shape_correction_before_any_effe
 
     assert len(model.chat.completions.calls) == 2
     assert all("tool_choice" not in call for call in model.chat.completions.calls)
+    assert all("platform_request_human_handoff" in {
+        tool["function"]["name"] for tool in call["tools"]}
+        for call in model.chat.completions.calls)
     assert len(controls) == 1
     assert provider["posts"] == 0
     assert await business.repository.selected_plan(business.request, business.grant) is None

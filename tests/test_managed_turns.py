@@ -629,7 +629,7 @@ async def test_boundary_auth_before_body_or_downstream(monkeypatch, provided):
     ([(b"content-type", b"application/json")], b"x"*1048577, 413),
     ([(b"content-type", b"application/json")], b'{"secret":"managed-secret-sentinel"}', 422),
     ([(b"content-type", b"application/json")], b'{"a":1,"a":2}', 422),
-])
+], ids=["unsupported-media", "compressed", "actual-byte-cap", "invalid-shape", "duplicate-key"])
 async def test_boundary_caps_actual_bytes_and_safe_errors(monkeypatch, headers, body, expected):
     configure(monkeypatch, payload(), uuid4())
     async def explode(*args):

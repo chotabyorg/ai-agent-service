@@ -531,7 +531,9 @@ class LLMService:
         def add_platform_control(tools):
             if not runtime or not runtime.handoff_enabled:
                 return tools
-            from services.managed_execution_receipts import control_tool_schema
+            from services.managed_execution_receipts import HANDOFF_TOOL_NAME, control_tool_schema
+            if any(tool["function"]["name"] == HANDOFF_TOOL_NAME for tool in tools):
+                return tools
             return [*tools, control_tool_schema()]
 
         set_chat_failure_stage(ChatFailureStage.MCP_SETUP)
@@ -714,6 +716,7 @@ class LLMService:
                         else [tool for tool in openai_tools
                               if tool['function']['name'] == 'business_decide_proposal']
                         if required_proposal_id is not None else openai_tools)
+                    advertised_tools = add_platform_control(advertised_tools)
                     if voice_profile is not None and offering_choices:
                         from services.voice_booking_tools import booking_offering_tools
                         advertised_tools = booking_offering_tools(advertised_tools, offering_choices)
