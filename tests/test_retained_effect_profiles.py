@@ -19,7 +19,7 @@ def extension_request(request):
     return ManagedTurnRequest.model_validate(fields)
 
 
-async def historical_acquisition(factory, monkeypatch, phase, *, damaged=None):
+async def historical_acquisition(factory, monkeypatch, phase, *, damaged=None, mode="LOOKUP"):
     business_hash = repository_module.request_fingerprint
     managed_hash = repository_module.managed_request_fingerprint
     with monkeypatch.context() as old_release:
@@ -30,7 +30,7 @@ async def historical_acquisition(factory, monkeypatch, phase, *, damaged=None):
                             managed_hash(extension_request(request)))
         if damaged == "command":
             old_release.setattr(repository_module, "frozen_command_fingerprint", lambda command: "f" * 64)
-        runtime, provider, registry, _ = await setup_business(factory)
+        runtime, provider, registry, _ = await setup_business(factory, mode=mode)
         plan = await runtime.freeze_plan(actions("12:00"))
         acquisition = await runtime.repository.prepare_effect_acquisition(
             runtime.request, runtime.grant, plan.id, plan.operations[0].id,
@@ -162,3 +162,28 @@ async def test_historical_acquisition_response_loss_stays_recover_only(db_sessio
     assert provider.posts == 1 and provider.lookups == 1
     assert reloaded.effect_port.permit_requests == calls
     assert all(request == acquisition.request for request in calls)
+
+
+@pytest.mark.asyncio
+async def test_historical_unknown_native_replay_keeps_original_permit_profile(db_session, monkeypatch):
+    original, restarted, provider, plan, acquisition, _ = await historical_acquisition(
+        db_session, monkeypatch, "BOUND", mode="NATIVE",
+    )
+    provider.lose_next = True
+    lost = await restarted.execute_plan(actions("12:00"))
+    assert lost.halt_status == "UNKNOWN" and provider.posts == 1
+    retained = await restarted.repository.selected_plan(restarted.request, restarted.grant)
+    permit_calls = list(restarted.effect_port.permit_requests)
+    reloaded = await open_business_runtime(
+        restarted.request, original.grant, db_session, restarted.registry,
+        effect_port=restarted.effect_port,
+    )
+    assert (await reloaded.execution_guard()).halt_status == "UNKNOWN"
+    recovered = await reloaded.replay_native(plan.operations[0].id)
+    assert recovered.operations[0].status == "SUCCEEDED"
+    assert provider.posts == 2 and len(provider.objects) == 1
+    assert provider.keys[0] == provider.keys[1]
+    assert recovered.operations[0].command == retained.operations[0].command
+    assert recovered.operations[0].effect_permit_id == retained.operations[0].effect_permit_id
+    assert recovered.operations[0].effect_managed_request_fingerprint == acquisition.request.managed_request_fingerprint
+    assert reloaded.effect_port.permit_requests == permit_calls
