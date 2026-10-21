@@ -150,7 +150,7 @@ def canonical_managed_request_fields(request: ManagedTurnRequest) -> dict:
     explicitly_set = request.model_fields_set
     if not any(name in explicitly_set for name in STREAM_EXTENSION_FIELDS):
         for name in STREAM_EXTENSION_FIELDS:
-            fields.pop(name)
+            fields.pop(name, None)
     else:
         if "stream_partials" not in explicitly_set:
             fields["stream_partials"] = DEFAULT_STREAM_PARTIALS

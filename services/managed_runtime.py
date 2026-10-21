@@ -23,10 +23,17 @@ def privacy_id(request):
 
 
 class ManagedRuntime:
-    def __init__(self, seconds: float, *, request=None):
+    def __init__(self, seconds: float, *, request=None, control_latch=None,
+                 request_fingerprint=None, original_dispatch_id=None):
         # Stable trusted platform execution metadata is available to the shared
         # core/future receipt adapters; it is never a persistence/history owner.
         self.request = request
+        self.handoff_enabled = getattr(request, "contract_version", None) == 3
+        self.control_latch = control_latch
+        self.request_fingerprint = request_fingerprint
+        self.original_dispatch_id = original_dispatch_id
+        self.control_request = None
+        self.terminal_latched = False
         self.execution_namespace = EXECUTION_NAMESPACE
         self.deadline = anyio.current_time() + seconds
         self.stack = AsyncExitStack()
@@ -74,6 +81,26 @@ class ManagedRuntime:
         if scope.cancel_called:
             raise ManagedExecutionError("EXECUTION_TIMEOUT")
         return result
+
+    async def request_handoff(self, reason: str, note: str | None):
+        if not self.handoff_enabled or self.control_latch is None or self.terminal_latched:
+            raise ManagedExecutionError("INVALID_RESULT")
+        from schemas.managed_turn_v3 import HandoffControlRequest
+        from services.managed_execution_receipts import handoff_request_id
+
+        control = HandoffControlRequest(
+            type="HUMAN_HANDOFF", request_id=handoff_request_id(self.request), reason=reason, note=note,
+        )
+        try:
+            await self.control_latch(control, self.collector.snapshot() if self.collector else [])
+        except ManagedExecutionError:
+            raise
+        except Exception:
+            raise ManagedExecutionError("INTERNAL_ERROR") from None
+        self.control_request = control
+        self.terminal_latched = True
+        from services.managed_turn_service import ManagedControlRequested
+        raise ManagedControlRequested(control)
 
     async def cleanup(self, lifecycle):
         # Do not admit a new pooled acquisition while existing callbacks join.
