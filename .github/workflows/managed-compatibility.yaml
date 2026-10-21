@@ -1,0 +1,67 @@
+name: Managed compatibility pair
+
+on:
+  pull_request:
+    paths:
+      - schemas/**
+      - services/**
+      - core/**
+      - tests/**
+      - requirements.txt
+      - .github/workflows/managed-compatibility.yaml
+
+permissions:
+  contents: read
+
+jobs:
+  paired-native:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      # Reviewed companion reader; no moving-main fallback is permitted.
+      CONVERSATION_REVISION: 301c5aa3818ecc42d01a9a0d3bbea7d245e20925
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: ai
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/checkout@v4
+        with:
+          repository: chotabyorg/conversation-service
+          ref: ${{ env.CONVERSATION_REVISION }}
+          path: conversation
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install separate pinned service environments
+        run: |
+          python -m venv ai/.venv
+          python -m venv conversation/.venv
+          ai/.venv/bin/python -m pip install -r ai/requirements.txt
+          conversation/.venv/bin/python -m pip install -r conversation/requirements-dev.txt
+          ai/.venv/bin/python -m pip check
+          conversation/.venv/bin/python -m pip check
+      - name: Start native disposable PostgreSQL 16
+        run: |
+          sudo systemctl start postgresql
+          sudo -u postgres psql -v ON_ERROR_STOP=1 -c "CREATE ROLE compatibility_ci LOGIN SUPERUSER PASSWORD 'isolated_compatibility_fixture';"
+      - name: Verify exact pair over real HTTP and Business permits
+        working-directory: ai
+        run: |
+          .venv/bin/python tests/run_managed_compatibility_ci.py \
+            --cs-root "$GITHUB_WORKSPACE/conversation" \
+            --expected-cs-revision "$CONVERSATION_REVISION" \
+            --pg-bin /usr/lib/postgresql/16/bin \
+            --output "$RUNNER_TEMP/managed-compatibility"
+      - name: Upload sanitized pair evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: managed-compatibility-${{ github.event.pull_request.head.sha }}
+          path: ${{ runner.temp }}/managed-compatibility/summary.json
+          if-no-files-found: error
+          retention-days: 30

@@ -397,3 +397,16 @@ through the real ledger; raw MCP resource regressions use direct component seams
 No real channel, provider, deployment or GitOps state changes. Full relevant
 legacy/managed/business suites, additive migration/drift/import/package/Python3.11
 build and independent paired-process verification are separate required gates.
+
+## Reproducible compatibility pair
+
+The `Managed compatibility pair` workflow runs the exact AI PR head against the
+explicit Conversation commit in its workflow. Each service has its own pinned
+Python environment. Native PostgreSQL 16 hosts three fresh disposable databases;
+the existing Goal5 network guards restrict provider seams to owned loopback peers.
+The job runs the Business/permit bridge, the four current/historical wire-profile
+HTTP cases, and the full companion Conversation suite. Cleanup is part of PASS.
+Only `summary.json` with source/tree identities, outcomes, counts and report hashes
+is uploaded. Private fixture credentials, process logs and payloads stay on the
+ephemeral runner. This gate does not send Telegram, Widget, telephony or CRM traffic
+to a hosted service and does not establish production acceptance.
