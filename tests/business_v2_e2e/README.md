@@ -108,6 +108,15 @@ per input. It verifies retained managed contract version2 and never fabricates
 admission, Turn ownership, permits or delivery evidence. No Telegram API or hosted
 Widget is called; customer-facing delivery remains outside this Business matrix.
 
+`--managed-contract 3 --channel TELEGRAM` runs the same CRM matrix through the
+enrolled v3 path. Enrollment uses a scope-checked synthetic Control Plane identity
+proof, the actual AI lifecycle proof and the actual Conversation grant API. It
+does not insert grants, Turns, permits or effects into application tables. The
+private configuration holds a generated fixture lifecycle token. Website v3 is
+rejected before starting resources until its channel contract is implemented.
+This option checks Business parity; the separate four-service Handoff matrix
+checks real Control Plane enrollment, human control and Telegram transport.
+
 The private PG16 JSON input has `disposable: "yes"`, `host: "127.0.0.1"`, `port`,
 `user` and `password` fields. It must refer only to a task-owned test cluster, never
 a production/shared application DSN. Only newly generated `native_e2e_*` roles and
