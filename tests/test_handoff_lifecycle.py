@@ -333,7 +333,7 @@ async def test_reactivation_cannot_rebind_proven_scope_to_replacement_account(
         assert unchanged.handoff_lifecycle_scope_snapshot == [{
             "owner_id": scope.owner_id,
             "integration_id": str(scope.integration_id),
-            "channel": "TELEGRAM",
+            "channel": scope.channel,
             "agent_id": str(scope.agent_id),
             "agent_owner_id": str(original_account_id),
         }]
