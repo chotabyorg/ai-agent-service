@@ -41,7 +41,8 @@ async def test_bulk_deactivation_attempts_every_agent_before_reporting_lifecycle
     ids = [uuid4() for _ in range(3)]
     async with db_session() as session:
         session.add_all([AgentTemplate(id=agent_id, user_id=account_id, name="bulk lifecycle",
-                                      is_active=True) for agent_id in ids])
+                                      system_prompt="fixture", llm_provider="fixture",
+                                      model_name="fixture", is_active=True) for agent_id in ids])
         await session.commit()
     service = AgentService()
     original = service.deactivate_agent
