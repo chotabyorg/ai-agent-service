@@ -26,7 +26,7 @@ jobs:
     timeout-minutes: 20
     env:
       # Reviewed companion reader; no moving-main fallback is permitted.
-      CONVERSATION_REVISION: 228ce6ea000ce7b083723778e94e2a19d68a2ab8
+      CONVERSATION_REVISION: 7c8f98e5e64924857a394d236f02d6133a527713
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:

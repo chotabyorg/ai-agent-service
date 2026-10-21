@@ -635,3 +635,46 @@ async def test_telegram_handoff_real_http_and_database_lifecycle(handoff):
         for item in handoff.telegram_peer.snapshot()["send_attempts"]
     )
     assert handoff_turn_id != origin_turn_id
+
+    # An authoritative revoke can already be ahead of CP's retained request
+    # (for example after a lost lifecycle acknowledgement). Reconcile through
+    # the same revoke port, then prove a strictly newer binding on reenrollment.
+    ahead_revoke = {
+        "contract_version": 1, "lifecycle_source": "CONTROL_PLANE_BINDING",
+        "command_id": str(uuid4()), "owner_id": handoff.grant["owner_id"],
+        "integration_id": handoff.ids["integration"], "channel": "TELEGRAM",
+        "agent_id": handoff.ids["agent"],
+        "source_binding_generation": 4, "target_binding_generation": 5,
+    }
+    ahead_ack = await handoff.client.post(
+        handoff.url("cs") + "/internal/v1/inbox-grants/revoke", json=ahead_revoke,
+        headers={"X-Inbox-Lifecycle-Token": handoff.tokens["cp_lifecycle"]},
+    )
+    assert ahead_ack.status_code == 200
+    owner_headers = {"X-User-Id": handoff.grant["owner_id"]}
+    cp_integration = handoff.url("cp") + f"/v1/integrations/{handoff.ids['integration']}"
+    deactivated = await handoff.client.post(
+        cp_integration + "/deactivate", headers=owner_headers,
+    )
+    assert deactivated.status_code == 200
+    assert deactivated.json()["is_active"] is False
+    cp_fence = await _rows(handoff.engines["control_plane"],
+        "SELECT state,binding_generation,grant_active,pending_request FROM inbox_integration_bindings "
+        "WHERE integration_id=:id", {"id": handoff.ids["integration"]})
+    assert cp_fence[0]["state"] == "INACTIVE"
+    assert cp_fence[0]["binding_generation"] == 5
+    assert not cp_fence[0]["grant_active"] and cp_fence[0]["pending_request"] is None
+    activated = await handoff.client.post(cp_integration + "/activate", headers=owner_headers)
+    assert activated.status_code == 200
+    re_enrolled = await handoff.client.post(
+        handoff.url("cp") + f"/internal/v1/handoff/integrations/{handoff.ids['integration']}/enroll",
+        json={"contract_version": 1, "command_id": str(uuid4()),
+              "account_id": handoff.ids["agent_owner"]},
+        headers={"X-Inbox-Enrollment-Token": handoff.tokens["enrollment"]},
+    )
+    assert re_enrolled.status_code == 200
+    assert re_enrolled.json()["active"] is True
+    assert re_enrolled.json()["binding_generation"] == 6
+    assert len(await handoff.permit_rows()) == 1
+    assert (await handoff.provider_counts())[0].get("POST", 0) == 1
+
