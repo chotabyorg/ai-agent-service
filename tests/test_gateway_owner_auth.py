@@ -18,6 +18,20 @@ from core.managed_security import MANAGED_SECRET_ENV_KEYS
 from main import app
 from mcp_clients.manager import MCPManager
 
+try:
+    # FastAPI >=0.137 keeps included routers rather than cloning their routes.
+    from fastapi.routing import iter_route_contexts
+except ImportError:
+    iter_route_contexts = None
+
+
+def effective_api_routes():
+    """Include inherited dependencies/prefixes, hidden and duplicate routes."""
+    if iter_route_contexts is None:
+        return [route for route in app.routes if isinstance(route, APIRoute)]
+    return [context for context in iter_route_contexts(app.routes)
+            if isinstance(context.original_route, APIRoute)]
+
 
 OWNER = UUID(int=1101)
 OTHER_OWNER = UUID(int=1102)
@@ -243,11 +257,21 @@ async def test_public_and_separate_auth_contracts_are_not_owner_gated(admission)
     for path in ("/health", "/v1/models", "/v1/mcp-services", "/openapi.json", "/docs"):
         response = await admission.client.get(path)
         assert response.status_code == 200
-    for route in app.routes:
-        if isinstance(route, APIRoute) and (
+    separate = set()
+    for route in effective_api_routes():
+        if (
             route.path.startswith("/internal/") or route.path == "/v1/chat/completions"
         ):
             assert all(dep.call is not require_owner_gateway for dep in route.dependant.dependencies)
+            separate.update((method, route.path) for method in route.methods)
+    assert separate == {
+        ("GET", "/internal/v1/agents/count"),
+        ("POST", "/internal/v1/agents/deactivate-all"),
+        ("POST", "/internal/v1/agents/ownership-check"),
+        ("POST", "/internal/v1/managed-turns/execute"),
+        ("POST", "/internal/v1/managed-turns/evidence"),
+        ("POST", "/v1/chat/completions"),
+    }
     assert admission.calls.db == 0
 
 
@@ -255,7 +279,7 @@ def test_guarded_route_inventory_is_exact():
     guarded = {
         (method, route.path.replace("{agent_id}", str(AGENT))
          .replace("{service_name}", "bitrix"))
-        for route in app.routes if isinstance(route, APIRoute)
+        for route in effective_api_routes()
         if any(dep.call is require_owner_gateway for dep in route.dependant.dependencies)
         for method in route.methods
     }
