@@ -85,15 +85,18 @@ async def test_handoff_is_selectable_while_proposal_decision_is_pending(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("tool_name", ["business_propose", "booking_create"])
 async def test_handoff_is_selectable_during_one_shape_correction_before_any_effect(
-        db_session, crm_settings, monkeypatch):
-    business, runtime, provider, args = await local_runtime(db_session, crm_settings, monkeypatch)
+        db_session, crm_settings, monkeypatch, tool_name):
+    business, runtime, provider, args = await local_runtime(
+        db_session, crm_settings, monkeypatch, generic=tool_name == "business_propose")
     controls = enable_handoff(runtime)
     actions = [{"capability": "booking.create", "arguments": args}]
-    invalid = {"actions": json.dumps(actions)}
+    invalid = ({"actions": json.dumps(actions)} if tool_name == "business_propose"
+               else {**args, "customer": None})
     model = ScriptedLLMClient()
     model.chat.completions.queue(
-        preparation("business_propose", invalid, "bad"),
+        preparation(tool_name, invalid, "bad"),
         build_llm_response(tool_calls=[handoff_call("handoff-after-correction")]),
     )
 
