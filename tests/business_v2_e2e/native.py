@@ -38,12 +38,19 @@ def main():
     for name in ("cs-root", "crm-root", "ai-python", "cs-python", "crm-python",
                  "pg16-admin-input", "pg18-bin", "output"):
         parser.add_argument("--" + name, type=Path, required=True)
+    parser.add_argument("--tzdata-dir", type=Path)
     args = parser.parse_args()
     roots = {"ai": ROOT, "cs": args.cs_root.resolve(), "crm": args.crm_root.resolve()}
     pythons = {name: getattr(args, name + "_python").resolve() for name in roots}
     state = args.output.resolve()
     state.mkdir(mode=0o700, parents=True, exist_ok=False)
     sources = {}
+    timezone_env = {}
+    timezone_digest = None
+    if args.tzdata_dir:
+        timezone_root = args.tzdata_dir.resolve()
+        timezone_digest = hashlib.sha256((timezone_root / "Europe/Minsk").read_bytes()).hexdigest()
+        timezone_env["PYTHONTZPATH"] = str(timezone_root)
     for name, root in roots.items():
         if (root / ".env").exists() or git(root, "status", "--porcelain"):
             raise SystemExit("Clean source candidates without .env are required")
@@ -143,7 +150,7 @@ def main():
                         channel="TELEGRAM", agent_id=self.ids["agent"], service_token=self.tokens["ai"])]))
             crm_env = dict(DATABASE_URL=db_url("crm"), USER_SERVICE_URL=self.url("model"),
                 ALLOWED_ORIGINS='["https://chota.by"]', CRM_AGENT_PUBLIC_KEYS_JSON=json.dumps({"synthetic": pub}))
-            self.envs = {name: base_env() | {"BUSINESS_E2E_CONFIG": str(state / "config.json")}
+            self.envs = {name: base_env() | timezone_env | {"BUSINESS_E2E_CONFIG": str(state / "config.json")}
                 | extra for name, extra in (("ai", ai_env), ("cs", cs_env), ("crm", crm_env), ("model", {}))}
             for name in roots:
                 await asyncio.to_thread(sync_process, [str(pythons[name]),
@@ -194,7 +201,8 @@ def main():
 
     record = dict(at_utc=datetime.now(timezone.utc).isoformat(), sources=sources,
         status="FAIL", external_provider_requests=0, production_mutations=False,
-        live_model=False, real_crm=True, cases=[], owned_database_cleanup=False)
+        live_model=False, real_crm=True, cases=[], owned_database_cleanup=False,
+        explicit_timezone_sha256=timezone_digest, pg18_database_dropped=False)
     pg_process = None
     pg_handle = None
     created = []
@@ -225,6 +233,13 @@ def main():
             if role_created:
                 await pg16.execute(f"DROP ROLE {role}")
             await pg16.close()
+            pg18 = await asyncpg.connect(host="127.0.0.1", port=ports["pg18"],
+                user=role, password=password, database="postgres", timeout=5)
+            try:
+                await pg18.execute(f"DROP DATABASE {databases['crm']} WITH (FORCE)")
+                record["pg18_database_dropped"] = True
+            finally:
+                await pg18.close()
             record["owned_database_cleanup"] = True
 
     try:
@@ -266,6 +281,11 @@ def main():
         # HTTP payloads, DSNs, credentials or arbitrary exception text.
         if isinstance(error, AssertionError) and re.fullmatch(r"[A-Za-z0-9_]+", str(error)):
             record["failing_case"] = str(error)
+        elif isinstance(error, AssertionError):
+            failed_request = re.match(r"^(ai|cs|crm|model) (/[^ ]+): ([0-9]{3}) ", str(error))
+            if failed_request:
+                record["failed_request"] = dict(service=failed_request[1], status=int(failed_request[3]),
+                    route=re.sub(r"[0-9a-f-]{36}", "{id}", failed_request[2]))
     finally:
         for listener in listeners:
             listener.close()
@@ -281,7 +301,8 @@ def main():
             and not git(root, "status", "--porcelain") for name, root in roots.items())
         record["runtime_manifest_sha256"] = (hashlib.sha256((state / "runtime-manifests.jsonl").read_bytes()).hexdigest()
             if (state / "runtime-manifests.jsonl").exists() else None)
-        if not all(record[key] for key in ("owned_database_cleanup", "pg18_stopped", "source_unchanged")):
+        if not all(record[key] for key in ("owned_database_cleanup", "pg18_database_dropped",
+                "pg18_stopped", "source_unchanged")):
             record["status"] = "FAIL"
         (state / "summary.json").write_text(json.dumps(record, indent=2))
     print(json.dumps(record, indent=2))
