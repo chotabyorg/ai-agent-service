@@ -18,10 +18,15 @@ if (ROOT / '.env').exists():
     raise RuntimeError('Disposable harness forbids runtime .env')
 sys.path.insert(0, str(ROOT))
 # Guard before application settings, SDK, or provider imports.
-spec = importlib.util.spec_from_file_location('e2e_network', Path(CONFIG['roots']['ai']) / 'tests/goal3_business_cross_service/network.py')
+guard_file = ('tests/goal5_business_bridge/network.py' if CONFIG.get('native_runtime')
+              else 'tests/goal3_business_cross_service/network.py')
+spec = importlib.util.spec_from_file_location('e2e_network', Path(CONFIG['roots']['ai']) / guard_file)
 network = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(network)
-network.install_guard(CONFIG['allowlist'])
+if CONFIG.get('native_runtime'):
+    network.install_guard(CONFIG['allowlist'], allow_bound_loopback=True)
+else:
+    network.install_guard(CONFIG['allowlist'])
 network.self_check()
 STATE = Path(CONFIG['state'])
 
@@ -92,6 +97,15 @@ class Observe:
                 except Exception:
                     pass
             record('crm-http.jsonl', event)
+            if scope['path'] == '/internal/agent/v1/execute/customer.find' and status == 200:
+                response_body = b''.join(m.get('body', b'') for m in buffered
+                                         if m['type'] == 'http.response.body')
+                payload = json.loads(response_body)
+                data = payload.get('data') or {}
+                record('customer-lookup-results.jsonl', {
+                    'status': payload.get('status'), 'match': data.get('match'),
+                    'candidate_count': len(data.get('candidates') or []),
+                })
             if (status == 200 and scope['method'] == 'POST'
                     and scope['path'] in {
                         '/internal/agent/v1/execute/booking.create',
@@ -285,7 +299,7 @@ if 'fds' in CONFIG:
 else:
     listener = socket.socket()
     listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    listener.bind(('0.0.0.0', CONFIG['ports'][SERVICE]))
+    listener.bind(('127.0.0.1' if CONFIG.get('native_runtime') else '0.0.0.0', CONFIG['ports'][SERVICE]))
     listener.listen(128)
 uvicorn.Server(uvicorn.Config(Observe(app), host='127.0.0.1', port=CONFIG['ports'][SERVICE],
     access_log=False, log_level='warning', timeout_graceful_shutdown=3)).run(sockets=[listener])
