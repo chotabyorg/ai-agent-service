@@ -23,7 +23,7 @@ def managed_signing_scope(owner):
 voice_signing_scope = managed_signing_scope
 
 
-def signing_key(owner, pem, load):
+def signing_key(owner, pem, load, *, shared_load=None):
     entry = _current.get()
     if owner is None or entry is None or entry.get("owner") is not owner:
         return load(pem)
@@ -31,6 +31,9 @@ def signing_key(owner, pem, load):
         return entry["key"]
     # Rotation, including an invalid new key, must never fall back to old material.
     entry["pem"], entry["key"] = None, None
-    key = load(pem)
+    # An application-owned client may share validated immutable key material.
+    # Only the explicitly enabled owner scope can reach this loader; ordinary
+    # callers, another owner and profiles without reuse retain their old path.
+    key = (shared_load or load)(pem)
     entry["pem"], entry["key"] = pem, key
     return key

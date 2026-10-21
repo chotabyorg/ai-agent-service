@@ -1,4 +1,4 @@
-"""Typed Goal3 provider adapter. Config-only instance; each call owns its resources."""
+"""Typed Goal3 adapter; only immutable signing material crosses call boundaries."""
 from sqlalchemy import select
 from pydantic import Field
 
@@ -27,7 +27,7 @@ def action_key(action):
 
 class ChotaCRMAdapter:
     def __init__(self, settings, session_factory, *, transport=None):
-        self.client = ChotaCRMClient(settings, transport=transport)
+        self.client = ChotaCRMClient(settings, transport=transport, share_signing_material=True)
         self.session_factory = session_factory
 
     async def _context(self, scope, *, connection_id=None, live=True):

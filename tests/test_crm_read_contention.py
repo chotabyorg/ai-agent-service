@@ -140,3 +140,36 @@ async def test_five_conversations_share_agent_without_read_failures_or_operation
         assert await db.scalar(select(func.count()).select_from(BusinessPlan)) == 0
         assert await db.scalar(select(func.count()).select_from(BusinessOperation)) == 0
     assert provider['posts'] == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('entity', [AgentTemplate, BusinessBinding, BusinessConnection])
+async def test_warm_shared_key_does_not_reuse_revoked_authority(db_session, crm_settings, monkeypatch, entity):
+    """A cached parsed key cannot authorize a second read after config revocation."""
+    import anyio
+    from services.managed_runtime import ManagedRuntime
+    from services.voice_signing import managed_signing_scope
+    runtime, _, provider, _ = await setup(db_session, crm_settings)
+    execution=ManagedRuntime(10)
+    runtime.execution=execution
+    reads=[]
+    adapter=runtime.registration.adapter
+    original=adapter.read
+    async def observe(*args, **kwargs):
+        reads.append(True)
+        return await original(*args, **kwargs)
+    monkeypatch.setattr(adapter,'read',observe)
+    with anyio.CancelScope(shield=True) as lifecycle:
+        try:
+            with managed_signing_scope(execution):
+                first=await runtime.call_tool('catalog_search',{})
+                assert first.halt_status is None and adapter.client._signing_material is not None
+                predicate=entity.id==runtime.request.agent_id if entity is AgentTemplate else entity.agent_id==runtime.request.agent_id
+                async with db_session() as db:
+                    await db.execute(update(entity).where(predicate).values(
+                        **({'is_active':False} if entity is AgentTemplate else {'active':False})))
+                    await db.commit()
+                second=await runtime.call_tool('catalog_search',{})
+                assert second.halt_status=='FAILED' and reads==[True] and provider['posts']==0
+        finally:
+            await execution.cleanup(lifecycle)
