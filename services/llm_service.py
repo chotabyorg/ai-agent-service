@@ -644,6 +644,7 @@ class LLMService:
                 )
             voice_search_counts: dict[str, int] = {}
             retired_voice_tools: set[str] = set()
+            offering_choices = ()
             model_retry_used = False
             partial_attempted = False
 
@@ -693,6 +694,20 @@ class LLMService:
                         if step_index == 0:
                             emit_voice_timing(VoiceTiming(runtime.request.turn_id, 0, "PREPARE",
                                 round((model_started - getattr(runtime, "voice_started_at", model_started)) * 1000)))
+                    advertised_tools = (
+                        [tool for tool in openai_tools
+                         if tool['function']['name'] == preparation_correction]
+                        if runtime and preparation_correction is not None
+                        else [tool for tool in openai_tools
+                              if tool['function']['name'] == 'business_decide_proposal']
+                        if required_proposal_id is not None else openai_tools)
+                    if voice_profile is not None and offering_choices:
+                        from services.voice_booking_tools import booking_offering_tools
+                        advertised_tools = booking_offering_tools(advertised_tools, offering_choices)
+                        # Include added enum bytes in the actual request budget,
+                        # as well as the conservative canonical surface above.
+                        self._check_managed_envelope(agent, messages, advertised_tools,
+                            tool_choice=tool_choice, request=managed_request)
                     completion_kwargs = dict(
                         model=(self._managed_model(agent, request=managed_request) if runtime
                                else agent.model_name or self.settings.llm_default_model),
@@ -704,12 +719,7 @@ class LLMService:
                         # the canonical registry and conservative context budget
                         # for ordinary continuations after the runtime decision.
                         # Strict decision admission still rejects every other call.
-                        tools=([tool for tool in openai_tools
-                                if tool['function']['name'] == preparation_correction]
-                               if runtime and preparation_correction is not None
-                               else [tool for tool in openai_tools
-                                     if tool['function']['name'] == 'business_decide_proposal']
-                               if required_proposal_id is not None else openai_tools) or None,
+                        tools=advertised_tools or None,
                         parallel_tool_calls=self._managed_parallel_tool_calls(managed_request),
                         **({"tool_choice": tool_choice} if tool_choice is not None else {}),
                         **({"extra_body": model_extra_body} if model_extra_body else {}),
@@ -1086,6 +1096,11 @@ class LLMService:
                             ensure_ascii=False, allow_nan=False)
                         messages.append({"role": "tool", "tool_call_id": tool_call.id,
                                          "name": func_name, "content": tool_result_text})
+                        if voice_profile is not None:
+                            from services.voice_booking_tools import catalog_offering_choices
+                            current_choices = catalog_offering_choices(func_name, business_result.tool_payload)
+                            if current_choices is not None:
+                                offering_choices = current_choices
                         if next_reuse is not None:
                             reuse_continuation_message = {'role': 'system', 'content':
                                 customer_reuse_instruction(func_name, next_reuse)}
