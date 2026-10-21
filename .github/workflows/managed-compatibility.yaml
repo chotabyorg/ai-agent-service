@@ -6,6 +6,13 @@ on:
       - schemas/**
       - services/**
       - core/**
+      - api/**
+      - business_capabilities/**
+      - db/**
+      - models/**
+      - migrations/**
+      - main.py
+      - alembic.ini
       - tests/**
       - requirements.txt
       - .github/workflows/managed-compatibility.yaml
