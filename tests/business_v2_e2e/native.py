@@ -118,7 +118,8 @@ def main():
                 allowlist=[("127.0.0.1", int(admin["port"])),
                     *(("127.0.0.1", port) for port in ports.values())])
             private(state / "config.json", self.config)
-            grant = dict(self.grant, agent_id=self.ids["agent"], agent_owner_id=self.ids["owner"])
+            grant = dict(owner_id=self.grant["owner_id"], integration_id=self.ids["integration"],
+                channel="TELEGRAM", agent_id=self.ids["agent"], agent_owner_id=self.ids["owner"])
             ai_env = dict(POSTGRES_HOST="127.0.0.1", POSTGRES_PORT=str(admin["port"]),
                 POSTGRES_DB=databases["ai"], POSTGRES_USER=role, POSTGRES_PASSWORD=password,
                 POSTGRES_ECHO="false", ENCRYPTION_KEY=Fernet.generate_key().decode(),
