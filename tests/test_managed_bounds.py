@@ -102,18 +102,84 @@ def test_classifier_success_does_not_scan_business_data(service,text):
     inspect_managed_tool_result(service,build_tool_result(text))
 
 
-def test_new_managed_secret_env_denylist_and_mapped_credentials(monkeypatch):
-    for key in ("MANAGED_AI_AUTH_PRINCIPALS", "managed_ai_auth_principals", "Managed_AI_AUTH_Principals"):
-        monkeypatch.setenv(key, SENTINEL)
-    env = MCPManager("bitrix",{"webhook_url":"synthetic-tool-credential"})._build_env()
-    assert all(key.lower() not in MANAGED_SECRET_ENV_KEYS for key in env)
-    assert env["B24_WEBHOOK_URL"] == "synthetic-tool-credential"
-    for mapping in ("env_mapping", "optional_env_mapping"):
-        monkeypatch.setattr(get_settings(),"mcp_services",{"bitrix":dict(script_path="none",env_mapping={}, **{
-            mapping: {"webhook_url":"mAnAgEd_AI_AUTH_PrInCiPaLs"}})}) if mapping == "optional_env_mapping" else monkeypatch.setattr(
-                get_settings(),"mcp_services",{"bitrix":dict(script_path="none",env_mapping={"webhook_url":"managed_ai_auth_principals"})})
-        with pytest.raises(RuntimeError, match="MCP environment configuration is invalid"):
-            MCPManager("bitrix",{"webhook_url":"synthetic"})._build_env()
+@pytest.mark.parametrize("cache_state", ["cold", "warm"])
+def test_new_managed_secret_env_denylist_and_mapped_credentials(monkeypatch, tmp_path, cache_state):
+    secret_keys = (
+        "MANAGED_AI_AUTH_PRINCIPALS",
+        "managed_ai_auth_principals",
+        "Managed_AI_AUTH_Principals",
+    )
+    managed_token = "managed-secret-sentinel-" + "x" * 32
+    registry = json.dumps([{
+        "principal_id": "synthetic-managed-env-test",
+        "token": managed_token,
+        "caller": "conversation-service",
+        "execution_namespace": "main-chota.conversation.v1",
+        "grants": [{
+            "owner_id": "Opaque-owner",
+            "integration_id": str(uuid4()),
+            "channel": "TELEGRAM",
+            "agent_id": str(uuid4()),
+            "agent_owner_id": str(uuid4()),
+        }],
+    }])
+
+    # Load settings from a clean working directory, independent of a local .env.
+    monkeypatch.chdir(tmp_path)
+    for key in secret_keys:
+        monkeypatch.delenv(key, raising=False)
+    for key in (
+        "INTERNAL_AI_AUTH_PRINCIPALS",
+        "internal_ai_auth_principals",
+        "Internal_AI_Auth_Principals",
+        "BUSINESS_CONVERSATION_URL",
+        "BUSINESS_CONVERSATION_TOKEN",
+        "INTERNAL_API_TOKEN",
+        "CHAT_S2S_TOKEN",
+        "INTERNAL_OWNERSHIP_AUTH_REQUIRED",
+        "CHAT_S2S_AUTH_REQUIRED",
+    ):
+        monkeypatch.delenv(key, raising=False)
+
+    get_settings.cache_clear()
+    try:
+        if cache_state == "warm":
+            cached_settings = get_settings()
+            assert cached_settings.managed_principals == ()
+
+        for key in secret_keys:
+            monkeypatch.setenv(key, registry)
+
+        settings = get_settings()
+        if cache_state == "cold":
+            assert len(settings.managed_principals) == 1
+            assert settings.managed_principals[0].token.get_secret_value() == managed_token
+        else:
+            assert settings is cached_settings
+            assert settings.managed_principals == ()
+
+        server_params = MCPManager(
+            "bitrix", {"webhook_url": "synthetic-tool-credential"}
+        )._build_server_params()
+        child_env = server_params.env
+        assert child_env is not None
+        assert all(key.lower() not in MANAGED_SECRET_ENV_KEYS for key in child_env)
+        assert all(key not in child_env for key in secret_keys)
+        assert registry not in child_env.values()
+        assert managed_token not in child_env.values()
+        assert child_env["B24_WEBHOOK_URL"] == "synthetic-tool-credential"
+
+        for mapping, env_key in (
+            ("env_mapping", "managed_ai_auth_principals"),
+            ("optional_env_mapping", "mAnAgEd_AI_AUTH_PrInCiPaLs"),
+        ):
+            config = {"script_path": "none", "env_mapping": {}}
+            config[mapping] = {"webhook_url": env_key}
+            monkeypatch.setattr(settings, "mcp_services", {"bitrix": config})
+            with pytest.raises(RuntimeError, match="MCP environment configuration is invalid"):
+                MCPManager("bitrix", {"webhook_url": "synthetic"})._build_server_params()
+    finally:
+        get_settings.cache_clear()
 
 
 def test_ai_budget_drops_whole_unselected_and_recomputes_selector(monkeypatch):
