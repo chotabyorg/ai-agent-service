@@ -29,7 +29,57 @@ SAFE_ENV = {"PATH", "SYSTEMROOT", "WINDIR", "COMSPEC", "TEMP", "TMP", "HOME", "L
 def git(root, *args):
     return subprocess.run(["git", "-C", str(root), *args], check=True,
                           stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                          env={k: v for k, v in os.environ.items()
+                               if not k.upper().startswith("GIT_")},
                           encoding="utf-8", timeout=15).stdout.strip()
+
+
+async def cleanup_step(errors, resource, action):
+    """Attempt each owned resource independently, retaining only safe diagnostics."""
+    try:
+        result = action()
+        if hasattr(result, "__await__"):
+            await result
+        return True
+    except (Exception, asyncio.CancelledError) as error:
+        errors.append(dict(resource=resource, error_type=type(error).__name__))
+        return False
+
+
+async def stop_process(process):
+    """Join an owned child, escalating from terminate to kill on timeout."""
+    if process.poll() is None:
+        try:
+            process.terminate()
+            await asyncio.to_thread(process.wait, timeout=10)
+        except (OSError, subprocess.TimeoutExpired):
+            if process.poll() is None:
+                process.kill()
+            await asyncio.to_thread(process.wait, timeout=10)
+
+
+async def close_resources(client, processes, handles, errors):
+    """A failed client or child cannot skip release of another owned resource."""
+    await cleanup_step(errors, "http_client", client.aclose)
+    for name, process in processes.items():
+        await cleanup_step(errors, "process_" + name, lambda p=process: stop_process(p))
+    for index, handle in enumerate(handles):
+        await cleanup_step(errors, "log_" + str(index), handle.close)
+
+
+def validate_pg18_binaries(directory):
+    """Reject incorrect local tools before initializing any disposable cluster."""
+    suffix = ".exe" if os.name == "nt" else ""
+    for name in ("initdb", "postgres", "pg_ctl"):
+        version = subprocess.run([str(directory / (name + suffix)), "--version"],
+            env=base_env(), check=True, capture_output=True, text=True, timeout=10).stdout
+        if not re.search(r"\(PostgreSQL\) 18(?:\.|\s|$)", version):
+            raise RuntimeError("PostgreSQL18 tools are required")
+
+
+async def require_server_major(connection, major):
+    if int(await connection.fetchval("SHOW server_version_num")) // 10000 != major:
+        raise RuntimeError("Unexpected disposable PostgreSQL major version")
 
 
 def base_env():
@@ -38,6 +88,8 @@ def base_env():
 
 
 def main():
+    if not __debug__:
+        raise SystemExit("Run the native acceptance runner without python -O")
     if os.name == "nt" and not sys.flags.utf8_mode:
         raise SystemExit("Use python -X utf8 -m tests.business_v2_e2e.native on Windows")
     if hasattr(sys.stdout, "reconfigure"):
@@ -248,17 +300,7 @@ def main():
             return json.loads((state / "recovery.jsonl").read_text().splitlines()[-1])
 
         async def close(self):
-            await self.client.aclose()
-            for process in self.processes.values():
-                if process.poll() is None:
-                    process.terminate()
-                    try:
-                        await asyncio.to_thread(process.wait, timeout=10)
-                    except subprocess.TimeoutExpired:
-                        process.kill()
-                        await asyncio.to_thread(process.wait, timeout=10)
-            for handle in self.handles:
-                handle.close()
+            await close_resources(self.client, self.processes, self.handles, cleanup_errors)
 
     record = dict(at_utc=datetime.now(timezone.utc).isoformat(), sources=sources,
         status="FAIL", external_provider_requests=0, production_mutations=False,
@@ -270,12 +312,30 @@ def main():
     created = []
     role_created = False
     harness = None
+    cleanup_errors = []
+    crm_created = False
+    cleanup_attempted = False
+    pwfile = state / "pg18-password.txt"
+    pgdata = state / "pg18-data"
+    exe = ".exe" if os.name == "nt" else ""
+
+    async def pg16_connect():
+        return await asyncpg.connect(host="127.0.0.1", port=int(admin["port"]),
+            user=admin["user"], password=admin["password"], database="postgres",
+            timeout=5, command_timeout=15)
+
+    async def validate_pg16():
+        connection = await pg16_connect()
+        try:
+            await require_server_major(connection, 16)
+        finally:
+            await connection.close()
 
     async def execute():
         nonlocal harness, role_created
-        pg16 = await asyncpg.connect(host="127.0.0.1", port=int(admin["port"]),
-            user=admin["user"], password=admin["password"], database="postgres", timeout=5)
+        pg16 = await pg16_connect()
         try:
+            await require_server_major(pg16, 16)
             await pg16.execute(f"CREATE ROLE {role} LOGIN PASSWORD '{password}'")
             role_created = True
             for name in ("ai", "cs"):
@@ -287,29 +347,63 @@ def main():
             record["cases"] = harness.results
             record["status"] = "PASS"
         finally:
-            if harness:
-                record["cases"] = harness.results
-                await harness.close()
-            for database in reversed(created):
-                await pg16.execute(f"DROP DATABASE {database} WITH (FORCE)")
-            if role_created:
-                await pg16.execute(f"DROP ROLE {role}")
-            await pg16.close()
-            pg18 = await asyncpg.connect(host="127.0.0.1", port=ports["pg18"],
-                user=role, password=password, database="postgres", timeout=5)
+            await cleanup_step(cleanup_errors, "pg16_execution_connection", pg16.close)
+
+    async def cleanup_databases():
+        nonlocal role_created
+        if created or role_created:
+            pg16 = await pg16_connect()
             try:
-                await pg18.execute(f"DROP DATABASE {databases['crm']} WITH (FORCE)")
+                await require_server_major(pg16, 16)
+                for database in list(reversed(created)):
+                    if await cleanup_step(cleanup_errors, "pg16_" + database,
+                            lambda db=database: pg16.execute(f"DROP DATABASE {db} WITH (FORCE)")):
+                        created.remove(database)
+                if role_created:
+                    role_created = not await cleanup_step(cleanup_errors, "pg16_role",
+                        lambda: pg16.execute(f"DROP ROLE {role}"))
+            finally:
+                await cleanup_step(cleanup_errors, "pg16_cleanup_connection", pg16.close)
+
+    async def cleanup_crm_database():
+        if crm_created:
+            connection = await asyncpg.connect(host="127.0.0.1", port=ports["pg18"],
+                user=role, password=password, database="postgres", timeout=5, command_timeout=15)
+            try:
+                await require_server_major(connection, 18)
+                await connection.execute(f"DROP DATABASE {databases['crm']} WITH (FORCE)")
                 record["pg18_database_dropped"] = True
             finally:
-                await pg18.close()
-            record["owned_database_cleanup"] = True
+                await cleanup_step(cleanup_errors, "pg18_cleanup_connection", connection.close)
+
+    async def cleanup():
+        await cleanup_step(cleanup_errors, "password_file", lambda: pwfile.unlink(missing_ok=True))
+        if harness:
+            record["cases"] = harness.results
+            await cleanup_step(cleanup_errors, "harness", harness.close)
+        await cleanup_step(cleanup_errors, "pg16_resources", cleanup_databases)
+        await cleanup_step(cleanup_errors, "pg18_database", cleanup_crm_database)
+        record["owned_database_cleanup"] = (
+            not created and not role_created and (not crm_created or record["pg18_database_dropped"]))
+        for index, listener in enumerate(listeners):
+            await cleanup_step(cleanup_errors, "listener_" + str(index), listener.close)
+        if pg_process and pg_process.poll() is None:
+            def stop_pg18():
+                subprocess.run([str(pg18_bin / ("pg_ctl" + exe)), "-D", str(pgdata),
+                    "stop", "-m", "fast", "-w", "-t", "15"], env=base_env(), check=True,
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=20)
+                pg_process.wait(timeout=10)
+            if not await cleanup_step(cleanup_errors, "pg18_stop", stop_pg18):
+                await cleanup_step(cleanup_errors, "pg18_stop_fallback", lambda: stop_process(pg_process))
+        if pg_handle:
+            await cleanup_step(cleanup_errors, "pg18_log", pg_handle.close)
+        record["pg18_stopped"] = pg_process is None or pg_process.poll() is not None
 
     try:
-        pwfile = state / "pg18-password.txt"
+        validate_pg18_binaries(pg18_bin)
+        asyncio.run(validate_pg16())
         pwfile.write_text(password)
         pwfile.chmod(0o600)
-        pgdata = state / "pg18-data"
-        exe = ".exe" if os.name == "nt" else ""
         sync_process([str(pg18_bin / ("initdb" + exe)), "-D", str(pgdata), "-U", role,
             "--pwfile=" + str(pwfile), "--auth=password", "--encoding=UTF8", "--locale=C"],
             state, base_env(), "pg18-init.log")
@@ -322,21 +416,32 @@ def main():
             stdout=pg_handle, stderr=subprocess.STDOUT)
 
         async def prepare_crm():
+            nonlocal crm_created
             deadline = time.monotonic() + 20
             while time.monotonic() < deadline:
                 try:
                     connection = await asyncpg.connect(host="127.0.0.1", port=ports["pg18"],
                         user=role, password=password, database="postgres", timeout=1)
                     try:
+                        await require_server_major(connection, 18)
                         await connection.execute(f"CREATE DATABASE {databases['crm']} OWNER {role} ENCODING 'UTF8'")
+                        crm_created = True
                     finally:
                         await connection.close()
                     return
                 except (OSError, asyncpg.PostgresError):
                     await asyncio.sleep(.1)
             raise RuntimeError("Disposable PostgreSQL18 readiness failed")
-        asyncio.run(prepare_crm())
-        asyncio.run(execute())
+        async def run_native():
+            nonlocal cleanup_attempted
+            try:
+                await prepare_crm()
+                await execute()
+            finally:
+                cleanup_attempted = True
+                await cleanup()
+
+        asyncio.run(run_native())
     except Exception as error:
         record["error_type"] = type(error).__name__
         record["error_frames"] = [dict(file=Path(frame.filename).name,
@@ -351,22 +456,22 @@ def main():
                 record["failed_request"] = dict(service=failed_request[1], status=int(failed_request[3]),
                     route=re.sub(r"[0-9a-f-]{36}", "{id}", failed_request[2]))
     finally:
-        for listener in listeners:
-            listener.close()
-        if pg_process and pg_process.poll() is None:
-            subprocess.run([str(pg18_bin / ("pg_ctl" + exe)), "-D", str(pgdata),
-                "stop", "-m", "fast", "-w", "-t", "15"], env=base_env(),
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=20)
-            pg_process.wait(timeout=10)
-        if pg_handle:
-            pg_handle.close()
-        record["pg18_stopped"] = pg_process is None or pg_process.poll() is not None
-        record["source_unchanged"] = all(git(root, "rev-parse", "HEAD") == sources[name]["revision"]
-            and not git(root, "status", "--porcelain") for name, root in roots.items())
-        record["runtime_manifest_sha256"] = (hashlib.sha256((state / "runtime-manifests.jsonl").read_bytes()).hexdigest()
-            if (state / "runtime-manifests.jsonl").exists() else None)
+        if not cleanup_attempted:
+            try:
+                asyncio.run(cleanup())
+            except Exception as error:
+                cleanup_errors.append(dict(resource="outer_cleanup", error_type=type(error).__name__))
+        record["source_unchanged"] = False
+        try:
+            record["source_unchanged"] = all(git(root, "rev-parse", "HEAD") == sources[name]["revision"]
+                and not git(root, "status", "--porcelain") for name, root in roots.items())
+            record["runtime_manifest_sha256"] = (hashlib.sha256((state / "runtime-manifests.jsonl").read_bytes()).hexdigest()
+                if (state / "runtime-manifests.jsonl").exists() else None)
+        except Exception as error:
+            cleanup_errors.append(dict(resource="source_evidence", error_type=type(error).__name__))
+        record["cleanup_errors"] = cleanup_errors
         if not all(record[key] for key in ("owned_database_cleanup", "pg18_database_dropped",
-                "pg18_stopped", "source_unchanged")):
+                "pg18_stopped", "source_unchanged")) or cleanup_errors:
             record["status"] = "FAIL"
         (state / "summary.json").write_text(json.dumps(record, indent=2))
     print(json.dumps(record, indent=2))
