@@ -1,13 +1,16 @@
 """Historical pre-dispatch authority keeps its original immutable identity."""
 
 import json
+from uuid import uuid4
 
 import pytest
 
 from schemas.managed_turn import ManagedTurnRequest
+from schemas.business import BusinessSafetyError
+from schemas.conversation_effects import managed_request_fingerprint, retained_managed_fingerprint_matches
 from services import business_repository as repository_module
 from tests.business_effect_helpers import open_business_runtime
-from tests.test_business_runtime import actions, setup_business
+from tests.test_business_runtime import actions, make_request, setup_business
 
 
 def extension_request(request):
@@ -16,14 +19,17 @@ def extension_request(request):
     return ManagedTurnRequest.model_validate(fields)
 
 
-async def historical_acquisition(factory, monkeypatch, phase):
+async def historical_acquisition(factory, monkeypatch, phase, *, damaged=None):
     business_hash = repository_module.request_fingerprint
     managed_hash = repository_module.managed_request_fingerprint
     with monkeypatch.context() as old_release:
         old_release.setattr(repository_module, "request_fingerprint",
                             lambda request: business_hash(extension_request(request)))
         old_release.setattr(repository_module, "managed_request_fingerprint",
-                            lambda request: managed_hash(extension_request(request)))
+                            lambda request: "f" * 64 if damaged == "managed" else
+                            managed_hash(extension_request(request)))
+        if damaged == "command":
+            old_release.setattr(repository_module, "frozen_command_fingerprint", lambda command: "f" * 64)
         runtime, provider, registry, _ = await setup_business(factory)
         plan = await runtime.freeze_plan(actions("12:00"))
         acquisition = await runtime.repository.prepare_effect_acquisition(
@@ -72,3 +78,87 @@ async def test_original_turn_resumes_exact_historical_acquisition(db_session, mo
     assert len(restarted.collector.snapshot()) == 1
     assert restarted.collector.snapshot()[0].operation_id == str(operation.id)
     assert restarted.collector.snapshot()[0].outcome == "SUCCEEDED"
+
+
+@pytest.mark.parametrize("change", ["owner", "integration", "agent", "conversation", "turn",
+                                   "input", "authority", "text", "stream", "limit", "contract"])
+def test_retained_profile_match_cannot_change_semantic_identity(change):
+    request = make_request(uuid4())
+    stored = managed_request_fingerprint(extension_request(request))
+    assert retained_managed_fingerprint_matches(stored, request)
+    fields = request.model_dump(mode="json", exclude_unset=True)
+    if change == "owner":
+        fields["owner_id"] += " changed"
+    elif change in {"integration", "agent", "conversation", "turn"}:
+        fields[change + "_id"] = str(uuid4())
+    elif change in {"input", "authority"}:
+        fields[change + "_revision"] += 1
+    elif change == "text":
+        fields["messages"][-1]["text"] += " changed"
+    elif change == "stream":
+        fields.update(contract_version=2, stream_partials=True)
+    elif change == "limit":
+        fields["max_partial_chars"] = 501
+    else:
+        fields["contract_version"] = 2
+    assert not retained_managed_fingerprint_matches(stored, ManagedTurnRequest.model_validate(fields))
+    # An explicit current profile may not fall back to the pre-extension digest.
+    assert not retained_managed_fingerprint_matches(
+        managed_request_fingerprint(request), extension_request(request),
+    )
+    assert not retained_managed_fingerprint_matches("f" * 64, request)
+    assert not retained_managed_fingerprint_matches(None, request)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("damaged", ["managed", "command"])
+async def test_unrecognized_retained_tuple_cannot_mint_replacement_authority(db_session, monkeypatch, damaged):
+    _, restarted, provider, plan, acquisition, _ = await historical_acquisition(
+        db_session, monkeypatch, "BEFORE_PERMIT", damaged=damaged,
+    )
+    with pytest.raises(BusinessSafetyError, match="EFFECT_REQUEST_CONFLICT"):
+        await restarted.repository.prepare_effect_acquisition(
+            restarted.request, restarted.grant, plan.id, plan.operations[0].id,
+            restarted.registration, restarted.facts_resolver(actions("12:00")),
+        )
+    retained = await restarted.repository.selected_plan(restarted.request, restarted.grant)
+    assert retained.operations[0].effect_request_fingerprint == repository_module.sidecar_fingerprint(acquisition.request)
+    assert retained.operations[0].status == "RESERVED" and retained.operations[0].effect_permit_id is None
+    assert provider.posts == 0 and not restarted.effect_port.permit_requests
+
+
+@pytest.mark.asyncio
+async def test_exact_historical_request_still_requires_positive_conversation_permit(db_session, monkeypatch):
+    _, restarted, provider, plan, acquisition, _ = await historical_acquisition(
+        db_session, monkeypatch, "BEFORE_PERMIT",
+    )
+    restarted.effect_port.eligible = False
+    result = await restarted.execute_plan(actions("12:00"))
+    assert result.tool_payload["status"] == "FAILED" and provider.posts == 0
+    assert restarted.effect_port.permit_requests == [acquisition.request]
+    retained = await restarted.repository.selected_plan(restarted.request, restarted.grant)
+    assert retained.id == plan.id and retained.operations[0].status == "FAILED"
+    assert retained.operations[0].effect_permit_id is None
+    assert retained.operations[0].effect_request_fingerprint == repository_module.sidecar_fingerprint(acquisition.request)
+
+
+@pytest.mark.asyncio
+async def test_historical_acquisition_response_loss_stays_recover_only(db_session, monkeypatch):
+    original, restarted, provider, plan, acquisition, _ = await historical_acquisition(
+        db_session, monkeypatch, "REPLY_LOST",
+    )
+    provider.lose_next = True
+    result = await restarted.execute_plan(actions("12:00"))
+    assert result.halt_status == "UNKNOWN" and provider.posts == 1
+    calls = list(restarted.effect_port.permit_requests)
+    reloaded = await open_business_runtime(
+        restarted.request, original.grant, db_session, restarted.registry,
+        effect_port=restarted.effect_port,
+    )
+    guard = await reloaded.execution_guard()
+    assert guard.halt_status == "UNKNOWN" and provider.posts == 1
+    reconciled = await reloaded.reconcile(plan.operations[0].id)
+    assert reconciled.operations[0].status == "SUCCEEDED"
+    assert provider.posts == 1 and provider.lookups == 1
+    assert reloaded.effect_port.permit_requests == calls
+    assert all(request == acquisition.request for request in calls)
