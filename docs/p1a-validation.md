@@ -1,4 +1,72 @@
-# P1a: реализация, проверки и ограничение приёмки
+# P1a validation — CI stabilization, 21 October 2026
+
+This update fixes the observed CI blocker without changing production auth or
+Business/Voice behavior. Current main
+`f570d1e3c6e23075b899379e0e23895df512947f` was merged into the original P1a history.
+Application snapshot: `b7800468d85c80a85ef46b717dbc37991aa7432d`; test fix:
+`006308caedd1feec81a818de42177362cb396f94`. Later validation commits contain docs
+and receipts only. Original head `076e723af7b4771f1633bd9029bc833b89072d96` is
+preserved; no rebase/force push, merge to main or deployment is required here.
+
+## Root cause and fix
+
+The native shard's preceding `internal_token` fixture clears `get_settings()`;
+the next KB client module does not warm it. The managed-env test then installed
+`managed-secret-sentinel` as a registry. A cold `Settings()` correctly rejects
+that malformed registry inside `MCPManager.__init__`, before any child env is
+built. Isolated collection imports main and warms settings, hiding the defect.
+The same cold-cache failure reproduces on original main `05d229c`; it is not a
+production credential-exclusion failure.
+
+The test now uses a valid synthetic managed registry and explicitly covers cold
+and warm caches, with cache cleanup in `finally`. It checks the actual
+`StdioServerParameters.env`, absence of registry keys/values/token, preserved B24
+mapping, and rejection of required/optional mapping reintroduction. No skip,
+xfail, production fallback, assertion reduction or dependency pin was added.
+
+## Current results
+
+| Source/check | Result |
+| --- | --- |
+| Original main `05d229c`, fresh full suite | 2163 PASS / 4 FAIL / 0 SKIP, 2167 cases |
+| Current main `f570d1e`, existing remote Quality | 2223 PASS; tested merge `39b525c` has exactly the same Git tree |
+| Original P1a HEAD, native shard 2 | 559 PASS / 1 managed-env FAIL |
+| Actual original CI checkout `e127c55`, original shard 2 | 585 PASS / 3 FAIL, including managed-env |
+| Updated P1a, identical original 33-module cohort/order | **589 PASS / 0 FAIL / 0 SKIP**; one extra cache-state case |
+| Updated P1a, full suite | **2276 PASS / 0 FAIL / 0 SKIP** |
+| Exact managed test selector, old local and CI Python 3.11/3.12 dependency sets | 2 PASS in each; forced-cache-clear replay also PASS |
+| Quiet serial observed-failure union, original/current main | 9 PASS each; P1c-only inventory absent, recorded as unavailable |
+| Same union, updated P1a | 10 PASS; second managed cache parameter adds one case |
+| Full Goal5 recovery module, original/current main/updated P1a | 10 PASS on each, separate fresh PostgreSQL |
+| Pinned P0a AI adapter on exact `b780046` | 22 PASS / 1 EXPECTED SECURITY GAP (legacy owner admission) |
+| Exact workflow Ruff 0.13.2 selectors and compilation | PASS |
+
+This is not an assertion that all suites/platform behavior are green. The
+original full run retains four failures (including Voice UNKNOWN); other broad
+P1c runs retain Voice/Goal5 failures. Serial PASS does not erase those failures.
+An independent reviewer also reproduced a pre-existing `_send` unbound-`plan`
+error when its uncertainty-write shield expires. The method is identical on
+original/current main and both PRs; Business code/timeouts remain unchanged.
+
+Machine-readable sources, selectors, failures and cleanup:
+[receipt](ci-stabilization/p1a-receipts.json). The
+[original CI constraints](ci-stabilization/p1a-original-ci-constraints.txt) are a
+historical reproduction inventory, not a production dependency lock. Actual
+original #138 CI used FastAPI 0.156.1, Starlette 1.9.0, Pydantic 2.14.1 and pytest
+9.1.1; #141 used FastAPI 0.156.2. Local Python 3.11.14/3.12.12 differs from GitHub
+3.11.17/3.12.15 and Ubuntu. Requirements/workflows were not changed. New-head
+remote checks run after the feature pushes; local receipts do not prove remote
+CI PASS. Check the current PR checks before merge.
+
+Fresh independent spec/correctness and supplemental security review approved
+the scoped test fix and current-main reconciliation. The reviewed receiver
+keeps 204/404/401 semantics, exact pair predicates, purpose separation and
+rotation/revocation behavior. It remains receiver-first, strict=false by default.
+The ownership credential is excluded from MCP env; legacy broader env inheritance
+and management-token holders remain separate residual risks. See P1c validation
+for the integrated real-child stdio probe and its limits.
+
+## Historical implementation validation — 20 October
 
 Дата: 20 октября 2026, Europe/Minsk. Изменён только `ai-agent-service`.
 База — `05d229c55cf141edfdc3ad72e066baf53cbae5ed`; проверенный application commit —
