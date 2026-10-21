@@ -98,7 +98,8 @@ directory. AI/Conversation use their pinned Python 3.11 environments and an
 explicitly disposable native PostgreSQL16; CRM uses Python3.12 and its own freshly
 initialized PostgreSQL18 cluster. Install each repository's requirements into its
 own environment before running. All three source checkouts must be clean.
-On Windows, also supply `--tzdata-dir` pointing to an installed IANA zoneinfo data
+On Windows, invoke `python -X utf8 -m tests.business_v2_e2e.native` and supply
+`--tzdata-dir` pointing to an installed IANA zoneinfo data
 directory; this replaces Linux's system timezone database, not service packages.
 The fixture records the timezone file hash and does not download data at runtime.
 

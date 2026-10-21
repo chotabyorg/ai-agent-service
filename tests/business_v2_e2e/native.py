@@ -35,6 +35,8 @@ def base_env():
 
 
 def main():
+    if os.name == "nt" and not sys.flags.utf8_mode:
+        raise SystemExit("Use python -X utf8 -m tests.business_v2_e2e.native on Windows")
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
     parser = argparse.ArgumentParser(description=__doc__)
@@ -205,7 +207,8 @@ def main():
     record = dict(at_utc=datetime.now(timezone.utc).isoformat(), sources=sources,
         status="FAIL", external_provider_requests=0, production_mutations=False,
         live_model=False, real_crm=True, cases=[], owned_database_cleanup=False,
-        explicit_timezone_sha256=timezone_digest, pg18_database_dropped=False)
+        explicit_timezone_sha256=timezone_digest, pg18_database_dropped=False,
+        controller_utf8_mode=bool(sys.flags.utf8_mode))
     pg_process = None
     pg_handle = None
     created = []
