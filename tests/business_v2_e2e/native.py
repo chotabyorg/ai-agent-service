@@ -18,6 +18,7 @@ import socket
 import subprocess
 import sys
 import time
+import traceback
 from urllib.parse import quote
 from uuid import uuid4
 
@@ -283,6 +284,8 @@ def main():
         asyncio.run(execute())
     except Exception as error:
         record["error_type"] = type(error).__name__
+        record["error_frames"] = [dict(file=Path(frame.filename).name,
+            line=frame.lineno, function=frame.name) for frame in traceback.extract_tb(error.__traceback__)[-6:]]
         # Assertion labels are code-owned scenario names; never expose repr or
         # HTTP payloads, DSNs, credentials or arbitrary exception text.
         if isinstance(error, AssertionError) and re.fullmatch(r"[A-Za-z0-9_]+", str(error)):

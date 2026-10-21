@@ -97,6 +97,15 @@ class Observe:
                 except Exception:
                     pass
             record('crm-http.jsonl', event)
+            if scope['path'] == '/internal/agent/v1/execute/customer.find' and status == 200:
+                response_body = b''.join(m.get('body', b'') for m in buffered
+                                         if m['type'] == 'http.response.body')
+                payload = json.loads(response_body)
+                data = payload.get('data') or {}
+                record('customer-lookup-results.jsonl', {
+                    'status': payload.get('status'), 'match': data.get('match'),
+                    'candidate_count': len(data.get('candidates') or []),
+                })
             if (status == 200 and scope['method'] == 'POST'
                     and scope['path'] in {
                         '/internal/agent/v1/execute/booking.create',
