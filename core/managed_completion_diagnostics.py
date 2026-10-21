@@ -14,6 +14,28 @@ _CONTENT = frozenset({"TEXT", "MISSING", "EMPTY", "WHITESPACE",
 _COUNTS = ("prompt_tokens", "completion_tokens", "total_tokens", "reasoning_tokens",
            "cached_tokens", "cache_write_tokens")
 _METRICS = _COUNTS + ("model_ms", "first_delta_ms")
+_ROUTER_FIELDS = {
+    'router_metadata_state': frozenset({'MISSING', 'VALID', 'INVALID'}),
+    'router_selected_hint': frozenset({'MISSING', 'UNSELECTED', 'INVALID', 'OTHER',
+        'MAKORA', 'NEXTBIT', 'CLOUDFLARE', 'OPENAI'}),
+    'router_attempt_bucket': frozenset({'MISSING', 'INVALID', 'ZERO', 'ONE', 'MULTIPLE'}),
+}
+_LIMIT_FIELDS = {
+    'limit_source': frozenset({'MISSING', 'OTHER', 'OPENROUTER_IN_FLIGHT_BUDGET',
+        'OPENROUTER_CREDITS', 'OPENROUTER_KEY_LIMIT', 'OPENROUTER_GUARDRAIL_BUDGET',
+        'OPENROUTER_WORKSPACE_BUDGET'}),
+    'provider_code_state': frozenset({'MISSING', 'PRESENT', 'INVALID'}),
+    'rate_limit_headers': frozenset({'MISSING', 'PARTIAL', 'COMPLETE'}),
+    'retry_after_state': frozenset({'MISSING', 'INVALID', 'WITHIN_BUDGET', 'OVER_BUDGET'}),
+    'error_kind': frozenset({'MISSING', 'OTHER', 'INVALID', 'RATE_LIMITED',
+        'PROVIDER_OVERLOADED', 'PROVIDER_UNAVAILABLE', 'CONTEXT_LENGTH_EXCEEDED',
+        'MAX_TOKENS_EXCEEDED', 'TOKEN_LIMIT_EXCEEDED', 'STRING_TOO_LONG',
+        'AUTHENTICATION', 'PERMISSION_DENIED', 'PAYMENT_REQUIRED', 'INVALID_REQUEST',
+        'INVALID_PROMPT', 'NOT_FOUND', 'PRECONDITION_FAILED', 'PAYLOAD_TOO_LARGE',
+        'UNPROCESSABLE', 'CONTENT_POLICY_VIOLATION', 'REFUSAL', 'SERVER', 'TIMEOUT', 'UNMAPPED'}),
+    'provider_hint': frozenset({'MISSING', 'OTHER', 'INVALID', 'MAKORA', 'NEXTBIT',
+        'CLOUDFLARE', 'OPENAI'}),
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,6 +56,15 @@ class CompletionDiagnostic:
     first_delta_ms: int | None = None
     http_status: int | None = None
     failure_category: str | None = None
+    limit_source: str | None = None
+    provider_code_state: str | None = None
+    rate_limit_headers: str | None = None
+    retry_after_state: str | None = None
+    error_kind: str | None = None
+    provider_hint: str | None = None
+    router_metadata_state: str | None = None
+    router_selected_hint: str | None = None
+    router_attempt_bucket: str | None = None
 
 
 def emit_completion_diagnostic(diagnostic: CompletionDiagnostic) -> None:
@@ -87,6 +118,23 @@ def _trusted_completion_record(record):
             if type(value.failure_category) is not str or value.failure_category not in FAILURE_CATEGORIES:
                 return None
             fields['failure_category'] = value.failure_category
+        for field, allowed in _LIMIT_FIELDS.items():
+            item = getattr(value, field)
+            if item is None:
+                continue
+            if value.branch != 'MODEL_FAILURE' or type(item) is not str or item not in allowed:
+                return None
+            fields[field] = item
+        if any(getattr(value, name) is not None for name in _ROUTER_FIELDS):
+            for field, allowed in _ROUTER_FIELDS.items():
+                item = getattr(value, field)
+                if type(item) is not str or item not in allowed:
+                    return None
+                fields[field] = item
+            if value.router_metadata_state in {'MISSING', 'INVALID'} and (
+                    value.router_selected_hint != value.router_metadata_state
+                    or value.router_attempt_bucket != value.router_metadata_state):
+                return None
     except Exception:
         return None
     template = "managed_completion_observed " + " ".join(name + "=%s" for name in fields)

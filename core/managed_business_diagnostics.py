@@ -10,7 +10,7 @@ _IDENTITY = object()
 _STAGES = frozenset({"PREPARATION", "LOOKUP", "PROPOSAL", "TERMINAL", "TOOL_INPUT", "TOOL_READ", "TOOL_GUARD"})
 _CAPABILITIES = frozenset({
     "booking.create", "booking_create", "business_propose",
-    "customer.find", "customer_find", "NOT_APPLICABLE",
+    "customer.find", "customer_find", "business_decide_proposal", "booking_search_options", "NOT_APPLICABLE",
 }) | frozenset(value for capability in CAPABILITIES for value in (capability.id, capability.tool_name))
 _REFUSALS = frozenset({
     "NONE", "IDENTITY_CONFLICT", "AMBIGUOUS_IDENTITY", "LOOKUP_UNAVAILABLE",
@@ -24,13 +24,16 @@ _LOOKUP_SOURCES = frozenset({"NOT_APPLICABLE", "MODEL", "BOOKING_PREFLIGHT"})
 _LOOKUP_MODES = frozenset({"NOT_APPLICABLE", "IDENTITY_ONLY", "NAME_FILTERED"})
 _LOOKUP_RESULTS = frozenset({"NOT_RUN", "NONE", "SINGLE", "AMBIGUOUS", "ERROR"})
 _FINAL_OUTCOMES = frozenset({"NOT_FINAL", "DRAFT_READY", "FAILED", "UNKNOWN"})
+_REFERENCE_SOURCES = frozenset({"NOT_APPLICABLE", "NOT_SUPPLIED", "READ_THIS_TURN",
+    "WRONG_KIND_THIS_TURN", "NOT_OBSERVED_THIS_TURN", "OBSERVATION_LIMIT", "UNAVAILABLE"})
 _SCHEMA_RULES = frozenset({"NOT_APPLICABLE", "schema", "type", "required", "additionalProperties",
     "oneOf", "anyOf", "allOf", "not", "const", "enum", "minLength", "maxLength", "pattern",
     "format", "minItems", "maxItems", "uniqueItems", "minimum", "maximum", "exclusiveMinimum",
     "exclusiveMaximum", "multipleOf"})
 _SCHEMA_FIELDS = frozenset({"NOT_APPLICABLE", "ROOT", "OTHER", "query", "cursor", "limit",
     "actions", "arguments", "capability", "customer_ref", "customer", "identity", "display_name",
-    "offering_ref", "resource_ref", "start_at", "from", "to", "booking_ref", "expected_revision", "kind", "value"})
+    "offering_ref", "resource_ref", "start_at", "from", "to", "booking_ref", "expected_revision", "kind", "value",
+    "proposal_id", "intent", "tool_calls", "tool_call_id", "tool_name", "type", "assistant_message", "envelope"})
 
 
 def refusal_category(value):
@@ -51,6 +54,9 @@ class ManagedBusinessDiagnostic:
     final_outcome: str = "NOT_FINAL"
     schema_rule: str = "NOT_APPLICABLE"
     schema_field: str = "NOT_APPLICABLE"
+    offering_ref_source: str = "NOT_APPLICABLE"
+    resource_ref_source: str = "NOT_APPLICABLE"
+    customer_ref_source: str = "NOT_APPLICABLE"
 
 
 def emit_business_diagnostic(diagnostic: ManagedBusinessDiagnostic) -> None:
@@ -82,6 +88,8 @@ def _trusted_business_record(record):
             ("lookup_mode", _LOOKUP_MODES), ("lookup_result", _LOOKUP_RESULTS),
             ("final_outcome", _FINAL_OUTCOMES),
             ("schema_rule", _SCHEMA_RULES), ("schema_field", _SCHEMA_FIELDS),
+            ("offering_ref_source", _REFERENCE_SOURCES), ("resource_ref_source", _REFERENCE_SOURCES),
+            ("customer_ref_source", _REFERENCE_SOURCES),
         ):
             item = getattr(value, field)
             if type(item) is not str or item not in allowed:
@@ -97,6 +105,9 @@ def _trusted_business_record(record):
             "operation_present": value.operation_present,
             "final_outcome": value.final_outcome,
             "schema_rule": value.schema_rule, "schema_field": value.schema_field,
+            "offering_ref_source": value.offering_ref_source,
+            "resource_ref_source": value.resource_ref_source,
+            "customer_ref_source": value.customer_ref_source,
         }
     except Exception:
         return None

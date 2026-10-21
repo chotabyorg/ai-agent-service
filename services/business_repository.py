@@ -9,6 +9,7 @@ from datetime import datetime, timedelta
 from uuid import UUID, uuid4
 
 import anyio
+from core.business_sql_diagnostics import BusinessSQLTrace
 
 from sqlalchemy import select, text
 from sqlalchemy.exc import DBAPIError, IntegrityError
@@ -234,8 +235,22 @@ def normalized_actions(registration, actions, facts):
 
 
 class BusinessRepository:
-    def __init__(self, session_factory):
+    def __init__(self, session_factory, *, execution=None):
         self.session_factory = session_factory
+        self.execution = execution
+
+    @asynccontextmanager
+    async def _transaction(self, session, stage):
+        with BusinessSQLTrace(self.execution, stage) as trace:
+            async with session.begin():
+                try:
+                    await trace.connect(session)
+                    yield session
+                except BaseException:
+                    trace.finish_body('ROLLBACK')
+                    raise
+                else:
+                    trace.finish_body('COMMIT')
 
     @asynccontextmanager
     async def _session(self, *, decisive=False):
@@ -431,6 +446,11 @@ class BusinessRepository:
         operations = (await session.scalars(select(BusinessOperation).where(
             BusinessOperation.plan_id == plan.id).order_by(BusinessOperation.ordinal)
             .execution_options(populate_existing=True))).all()
+        return self._snapshot_from_operations(scope, plan, operations, selection_kind=selection_kind)
+
+    def _snapshot_from_operations(self, scope, plan, operations, *, selection_kind=None):
+        # Reuse rows only while this transaction holds their FOR UPDATE locks.
+        # No authority, consent, provider facts or snapshot crosses transactions.
         if len(operations) != plan.action_count or [op.ordinal for op in operations] != list(range(plan.action_count)):
             raise BusinessSafetyError("INCOMPLETE_PLAN")
         return PlanSnapshot(plan.id, scope_value(scope), plan.origin_turn_id, plan.proposal_state,
@@ -474,7 +494,7 @@ class BusinessRepository:
 
     async def _probe_transaction(self, request, grant, plan_id=None):
         async with self._session() as session:
-            async with session.begin():
+            async with self._transaction(session, 'ADMISSION_PROBE'):
                 binding, scope = await self._authority(session, request, grant)
                 context = await session.get(BusinessTurnContext, (scope.id, request.turn_id))
                 if context and not request_fingerprint_matches(context.request_fingerprint, request):
@@ -487,10 +507,10 @@ class BusinessRepository:
                         .with_for_update().execution_options(populate_existing=True))
                     if plan is None:
                         raise BusinessSafetyError("PLAN_DENIED")
-                    await session.scalars(select(BusinessOperation).where(BusinessOperation.plan_id == plan.id)
+                    operations = (await session.scalars(select(BusinessOperation).where(BusinessOperation.plan_id == plan.id)
                         .order_by(BusinessOperation.ordinal).with_for_update()
-                        .execution_options(populate_existing=True))
-                    await self._snapshot(session, scope, plan)
+                        .execution_options(populate_existing=True))).all()
+                    self._snapshot_from_operations(scope, plan, operations)
                 await self._clock(session)
                 result = AdmissionProbe(self._binding_snapshot(binding), scope.id)
             return result
@@ -735,11 +755,16 @@ class BusinessRepository:
     async def result_gate(self, request, grant):
         async with self._session() as session:
             async with session.begin():
-                scope = await self._scope_query(session, request, grant)
+                # Acquire the same scope lock in the scoped lookup itself.
+                # The former unlocked lookup and immediate locked reload read
+                # this row twice at every pre/post READ guard.
+                scope = await session.scalar(select(BusinessScope).filter_by(
+                    **tenant_values(request, grant), conversation_id=request.conversation_id)
+                    .with_for_update(nowait=session.info.get('business_nowait', False))
+                    .execution_options(populate_existing=True))
                 if scope is None:
                     result = BusinessResultGate(False, None, False, "NO_PLAN", None, False)
                 else:
-                    scope = await self._lock_scope(session, scope.id)
                     context = await session.get(BusinessTurnContext, (scope.id, request.turn_id))
                     request_conflict = bool(context and not request_fingerprint_matches(
                         context.request_fingerprint, request))
@@ -1326,7 +1351,7 @@ class BusinessRepository:
     async def _claim_dispatch(self, request, grant, plan_id, operation_id, registration, facts, *,
                               effect_request: ExternalEffectPermitRequest, native_replay=False, probe):
         async with self._session(decisive=True) as session:
-            async with session.begin():
+            async with self._transaction(session, 'DISPATCH'):
                 try:
                     binding, scope = await self._authority(session, request, grant)
                 except BusinessSafetyError as error:
@@ -1435,7 +1460,7 @@ class BusinessRepository:
                                                       registration.execution_contract.revision)
                                 reason = "PERMITTED"
                     await session.flush()
-                    result = DispatchDecision(token, reason, await self._snapshot(session, scope, plan))
+                    result = DispatchDecision(token, reason, self._snapshot_from_operations(scope, plan, operations))
             return result
 
     @staticmethod
@@ -1480,10 +1505,10 @@ class BusinessRepository:
 
     async def _confirm_plan(self, request, grant, plan_id, registration, facts, *, probe, semantic=False):
         async with self._session(decisive=True) as session:
-            async with session.begin():
+            async with self._transaction(session, 'CONFIRM'):
                 binding, scope = await self._authority(session, request, grant)
                 self._check_probe(binding, scope, probe)
-                await self._turn(session, scope, request)
+                current_turn = await self._turn(session, scope, request)
                 plan = await session.scalar(select(BusinessPlan).where(
                     BusinessPlan.id == plan_id, BusinessPlan.scope_id == scope.id)
                     .with_for_update(nowait=session.info.get("business_nowait", False)).execution_options(populate_existing=True))
@@ -1495,7 +1520,6 @@ class BusinessRepository:
                 if plan.proposal_state not in {"PREPARED", "CONFIRMED"}:
                     raise BusinessSafetyError("STALE_CONFIRMATION")
                 origin = await session.get(BusinessTurnContext, (scope.id, plan.origin_turn_id))
-                current_turn = await session.get(BusinessTurnContext, (scope.id, request.turn_id))
                 if (origin is None or current_turn is None
                         or origin.authority_revision != request.authority_revision
                         or current_turn.authority_revision != request.authority_revision):
@@ -1513,7 +1537,7 @@ class BusinessRepository:
                 if await self._unresolved(session, scope.id):
                     raise BusinessSafetyError("BLOCKED_UNRESOLVED_EFFECT", processing_status="UNKNOWN")
                 now = await self._clock(session)
-                frozen = await self._snapshot(session, scope, plan)
+                frozen = self._snapshot_from_operations(scope, plan, operations)
                 current = (self._current(plan, binding, registration, facts, now, consent=False)
                            and all(op.command.capability in binding.enabled_capabilities for op in frozen.operations))
                 if not current:
@@ -1538,7 +1562,7 @@ class BusinessRepository:
                     if (request.turn_id == plan.origin_turn_id or request.input_first_sequence <= origin.input_last_sequence
                             or not valid or any(str(m.id) in origin.selected_input_message_ids for m in selected)):
                         raise BusinessSafetyError("CONFIRMATION_REQUIRED")
-                    frozen = await self._snapshot(session, scope, plan)
+                    frozen = self._snapshot_from_operations(scope, plan, operations)
                     if (not self._current(plan, binding, registration, facts, now, consent=False)
                             or any(op.command.capability not in binding.enabled_capabilities for op in frozen.operations)):
                         await self._invalidate(session, plan, now, "STALE_CONFIRMATION")

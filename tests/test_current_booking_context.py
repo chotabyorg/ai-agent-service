@@ -119,6 +119,12 @@ async def test_optional_read_is_bounded_but_parent_cancellation_propagates(
         db_session, crm_settings, monkeypatch, parent_cancel):
     """Distinguish the optional read's timeout from cancellation of the turn."""
     _,current,_,provider=await completed(db_session,crm_settings)
+    from core import managed_wait_diagnostics as diagnostics
+    from services.managed_runtime import ManagedRuntime
+    current.execution=ManagedRuntime(15,request=current.request)
+    deadline=current.execution.deadline
+    observed=[]
+    monkeypatch.setattr(diagnostics,'emit_managed_wait',observed.append)
     entered=asyncio.Event()
 
     async def stalled(method,*args):
@@ -137,6 +143,58 @@ async def test_optional_read_is_bounded_but_parent_cancellation_propagates(
         context=await asyncio.wait_for(task,4)
         assert set(context)=={'pending','recent_booking'}
     assert provider['posts']==1 and not current.collector.snapshot()
+    assert current.execution.deadline==deadline and current.execution.active_scope is None
+    stages=[row for row in observed if row.phase.startswith('CONTEXT_')]
+    assert [(row.phase,row.state) for row in stages]==[
+        ('CONTEXT_REPOSITORY','START'),('CONTEXT_REPOSITORY','COMPLETED'),
+        ('CONTEXT_RECEIPT','START'),('CONTEXT_RECEIPT','COMPLETED'),
+        ('CONTEXT_BOOKING_READ','START'),('CONTEXT_BOOKING_READ','CANCELLED')]
+    # CANCELLED observes the inner read. Only the caller's existing scope knows
+    # whether it was the optional bound or the entire turn being cancelled.
+
+
+@pytest.mark.asyncio
+async def test_context_timings_preserve_fresh_reads_and_distinguish_repeated_projection(
+        db_session,crm_settings,monkeypatch):
+    from core import managed_wait_diagnostics as diagnostics
+    from services.managed_runtime import ManagedRuntime
+    _,current,_,provider=await completed(db_session,crm_settings)
+    current.execution=ManagedRuntime(15,request=current.request)
+    deadline=current.execution.deadline
+    observed=[]
+    monkeypatch.setattr(diagnostics,'emit_managed_wait',observed.append)
+    first=await current.prompt_context()
+    second=await current.prompt_context()
+    assert first==second and first['current_booking']['status']=='CONFIRMED'
+    assert provider['posts']==1 and provider['booking_reads']==2
+    assert not current.collector.snapshot()
+    assert await current.repository.selected_plan(current.request,current.grant) is None
+    assert current.execution.deadline==deadline and current.execution.active_scope is None
+    stages=[row for row in observed if row.phase.startswith('CONTEXT_')]
+    assert len(stages)==12
+    for step in (1,2):
+        rows=[row for row in stages if row.step==step]
+        assert [(row.phase,row.state) for row in rows]==[
+            ('CONTEXT_REPOSITORY','START'),('CONTEXT_REPOSITORY','COMPLETED'),
+            ('CONTEXT_RECEIPT','START'),('CONTEXT_RECEIPT','COMPLETED'),
+            ('CONTEXT_BOOKING_READ','START'),('CONTEXT_BOOKING_READ','COMPLETED')]
+        assert all(row.turn_id==current.request.turn_id and row.attempt==1 for row in rows)
+    assert all(value not in repr(stages) for value in ('booking_test','customer_test','Окрашивание'))
+
+
+@pytest.mark.asyncio
+async def test_broken_context_observer_cannot_change_the_read_result(db_session,crm_settings,monkeypatch):
+    from core import managed_wait_diagnostics as diagnostics
+    from services.managed_runtime import ManagedRuntime
+    _,current,_,provider=await completed(db_session,crm_settings)
+    current.execution=ManagedRuntime(15,request=current.request)
+    def broken(value):
+        raise RuntimeError('private-diagnostic-sentinel')
+    monkeypatch.setattr(diagnostics,'emit_managed_wait',broken)
+    context=await current.prompt_context()
+    assert context['current_booking']['booking_ref']=='booking_test'
+    assert provider['posts']==provider['booking_reads']==1
+    assert not current.collector.snapshot()
 
 
 def test_current_projection_cannot_cross_reference_or_include_authority():

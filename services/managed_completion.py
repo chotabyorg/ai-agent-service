@@ -10,6 +10,7 @@ from core.managed_completion_diagnostics import CompletionDiagnostic, emit_compl
 from schemas.managed_turn import ManagedTurnRequest
 from services.completion_timing import CompletionTiming
 from services.completion_accounting import accounting_metrics
+from services.router_metadata_observation import RouterObservation, error_router_observation
 
 
 _MISSING = object()
@@ -82,6 +83,8 @@ def observe_managed_completion(response, selected, *, request, step, timing=None
                 value = getattr(timing, name)
                 if type(value) is int and 0 <= value <= 2147483647:
                     counts[name] = value
+            if type(timing.router_observation) is RouterObservation:
+                counts.update(timing.router_observation.fields())
         emit_completion_diagnostic(CompletionDiagnostic(turn_id=request.turn_id, step=step,
             branch=selected.branch, finish=category,
             visible_content=selected.visible_content, **counts))
@@ -97,11 +100,14 @@ def observe_model_failure(error, *, request, step, timing):
         if type(request) is not ManagedTurnRequest or not isinstance(error, APIError):
             return
         from services.model_retry import classify_model_failure
+        from services.model_limit_observation import model_limit_observation
         failure = classify_model_failure(error)
         timing.complete()
+        route = (error_router_observation(error).fields()
+                 if type(timing) is CompletionTiming and timing.router_observation is not None else {})
         emit_completion_diagnostic(CompletionDiagnostic(turn_id=request.turn_id, step=step,
             branch='MODEL_FAILURE', finish='MISSING', visible_content='NOT_INSPECTED',
             model_ms=timing.model_ms, http_status=failure.http_status,
-            failure_category=failure.category))
+            failure_category=failure.category, **model_limit_observation(error), **route))
     except Exception:
         pass

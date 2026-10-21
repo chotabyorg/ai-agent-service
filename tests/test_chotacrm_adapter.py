@@ -32,15 +32,16 @@ def crm_settings():
                     business_crm_private_key=pem, business_crm_url='http://synthetic.local')
 
 
-async def setup(factory, settings):
+async def setup(factory, settings, *, enabled_capabilities=None):
     """Build a scoped runtime with an inspectable synthetic CRM provider."""
+    enabled_capabilities = list(DEFAULTS if enabled_capabilities is None else enabled_capabilities)
     owner, agent, connection, workspace, grant_id = (uuid4() for _ in range(5))
     async with factory() as db:
         db.add(AgentTemplate(id=agent, user_id=owner, name='Synthetic', system_prompt='test',
             llm_provider='openai', model_name='test', temperature=0, is_active=True))
         db.add(BusinessConnection(id=connection, agent_id=agent, owner_id=owner,
             workspace_id=workspace, workspace_name='Synthetic', timezone='Europe/Minsk',
-            grant_id=grant_id, grant_revision=1, generation=1, active=True, enabled_capabilities=list(DEFAULTS)))
+            grant_id=grant_id, grant_revision=1, generation=1, active=True, enabled_capabilities=enabled_capabilities))
         await db.commit()
     records = dict(posts=0, lost=False, receipts={})
     start = (datetime.now(timezone.utc) + timedelta(days=2)).replace(hour=15, minute=0, second=0, microsecond=0).isoformat()
@@ -51,7 +52,7 @@ async def setup(factory, settings):
         path = request.url.path
         if path.endswith('/context'):
             return httpx.Response(200, json=dict(workspace_id=str(workspace), grant_id=str(grant_id),
-                revision=1, capabilities=list(DEFAULTS), timezone='Europe/Minsk'))
+                revision=1, capabilities=enabled_capabilities, timezone='Europe/Minsk'))
         if path.endswith('/execute/catalog.search'):
             return httpx.Response(200, json=dict(status='OK', data={'items':[]}))
         if path.endswith('/execute/booking.get'):

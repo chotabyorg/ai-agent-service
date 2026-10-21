@@ -411,6 +411,7 @@ async def test_managed_proposal_provider_refusal_is_recoverable_before_reservati
 ):
     value, arguments, _, calls, effect_port, model = await install_managed_crm(
         api_client, db_session, monkeypatch, status, body,
+        enabled_capabilities=[*DEFAULTS, 'deal.create'],
     )
     action = {"capability": "booking.create", "arguments": arguments}
     model.chat.completions.queue(
@@ -424,7 +425,12 @@ async def test_managed_proposal_provider_refusal_is_recoverable_before_reservati
     result = response.json()
     assert response.status_code == 200
     assert result["status"] == "DRAFT_READY"
-    assert result["draft_text"] == "Не удалось подобрать это время. Уточните другой вариант."
+    # A provider refusal cannot leave the final wording to untrusted model
+    # prose. Keep the typed feedback and the no-effect/recovery checks below.
+    assert result["draft_text"] == (
+        "Не удалось подготовить предложение для подтверждения. "
+        "Действие не выполнялось. Давайте уточним детали."
+    )
     tool_result = next(message for message in model.chat.completions.calls[1]["messages"]
                        if message.get("role") == "tool")
     assert json.loads(tool_result["content"]) == failure(error_code)
@@ -445,7 +451,7 @@ async def test_provider_refusal_can_be_corrected_into_prepared_proposal_without_
     value, arguments, _, calls, effect_port, model = await install_managed_crm(
         api_client, db_session, monkeypatch, 200,
         {"status": "ERROR", "error": {"code": "BOOKING_CONFLICT", "message": "synthetic", "retry": "NEVER"}},
-        recover_after_first=True,
+        recover_after_first=True, enabled_capabilities=[*DEFAULTS, 'deal.create'],
     )
     corrected = dict(arguments)
     corrected["start_at"] = (datetime.fromisoformat(arguments["start_at"]) + timedelta(hours=1)).isoformat()

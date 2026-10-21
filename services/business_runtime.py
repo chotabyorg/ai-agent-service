@@ -6,6 +6,7 @@ from uuid import UUID
 
 import anyio
 
+from core.managed_wait_diagnostics import observe_managed_wait
 from schemas.business import (AttemptRejected, BusinessAction, BusinessSafetyError, BusinessToolResult,
                               DefinitiveNoEffect, MaterialFacts, ProvenFailedNoEffect,
                               ProvenSucceeded, StillUnknown, SucceededReceipt, fingerprint)
@@ -54,7 +55,7 @@ class BusinessRuntime:
             raise BusinessSafetyError("REGISTRY_INVALID")
         self = cls()
         self.request, self.grant = request, grant
-        self.repository = BusinessRepository(session_factory)
+        self.repository = BusinessRepository(session_factory, execution=execution)
         self.registry, self.execution = registry, execution
         if effect_port is None:
             from core.config import get_settings
@@ -63,12 +64,15 @@ class BusinessRuntime:
         self.effect_port = effect_port
         self.collector = collector if collector is not None else CommittedReferenceCollector()
         from business_capabilities.connections import sync_business_binding
-        await sync_business_binding(request, grant, session_factory, registry)
-        context = await self.repository.open_context(request, grant, registry)
+        with observe_managed_wait(execution, 'BUSINESS_BINDING_SYNC', step=1):
+            await sync_business_binding(request, grant, session_factory, registry)
+        with observe_managed_wait(execution, 'BUSINESS_OPEN_CONTEXT', step=1):
+            context = await self.repository.open_context(request, grant, registry)
         self.scope, self.binding, self.registration = context if context else (None, None, None)
         # Explicit same-scope normalization, never a new provider command.
         if self.scope is not None:
-            await self.repository.recover_attempts(request, grant)
+            with observe_managed_wait(execution, 'BUSINESS_RECOVER_ATTEMPTS', step=1):
+                await self.repository.recover_attempts(request, grant)
         self.last_gate = None
         self._booking_workflow_started = False
         self._business_diagnostics_used = False
@@ -77,6 +81,8 @@ class BusinessRuntime:
         self._business_diagnostic_observations = 0
         self.business_scope_seen = self.scope is not None
         self._proposal_decision = None
+        self._retired_cancel_intent = None
+        self._proposal_preparation_refused = False
         self.effect_eligible = False
         self.effect_origin_turn_id = None
         self._prompt_context_prepared = False
@@ -88,22 +94,28 @@ class BusinessRuntime:
         self._stale_split_change_request_fingerprint = None
         self.recovery_mode = False
         self.recovery_plan_id = None
-        await self.collect_refs()
+        with observe_managed_wait(execution, 'BUSINESS_COLLECT_REFS', step=1):
+            await self.collect_refs()
         if self.scope is not None:
-            await self.repository.invalidate_stale_proposal(request, grant)
-            recovery = await self.repository.select_unresolved_recovery(request, grant)
+            with observe_managed_wait(execution, 'BUSINESS_INVALIDATE_PROPOSAL', step=1):
+                await self.repository.invalidate_stale_proposal(request, grant)
+            with observe_managed_wait(execution, 'BUSINESS_SELECT_RECOVERY', step=1):
+                recovery = await self.repository.select_unresolved_recovery(request, grant)
             if recovery is not None and recovery.selection_kind == "RECOVERY":
                 self.recovery_mode = True
                 self.recovery_plan_id = recovery.id
-                await self.repository.close_recovery_acquisition(request, grant)
-                await self.collect_refs()
+                with observe_managed_wait(execution, 'BUSINESS_CLOSE_RECOVERY', step=1):
+                    await self.repository.close_recovery_acquisition(request, grant)
+                with observe_managed_wait(execution, 'BUSINESS_COLLECT_REFS', step=2):
+                    await self.collect_refs()
         return self
 
     def observe_business_diagnostic(self, *, stage, capability, refusal_category="NONE",
                                     lookup_source="NOT_APPLICABLE", lookup_mode="NOT_APPLICABLE",
                                     lookup_result="NOT_RUN", proposal_present=None,
                                     operation_present=None, schema_rule="NOT_APPLICABLE",
-                                    schema_field="NOT_APPLICABLE"):
+                                    schema_field="NOT_APPLICABLE", offering_ref_source="NOT_APPLICABLE",
+                                    resource_ref_source="NOT_APPLICABLE", customer_ref_source="NOT_APPLICABLE"):
         """Emit a bounded observation using only closed runtime categories."""
         try:
             if getattr(self, "_business_diagnostic_observations", 0) >= 16:
@@ -140,6 +152,8 @@ class BusinessRuntime:
                 refusal_category=normalize_refusal(refusal_category), lookup_source=lookup_source,
                 lookup_mode=lookup_mode, lookup_result=lookup_result,
                 proposal_present=proposal_present, operation_present=operation_present,
+                offering_ref_source=offering_ref_source, resource_ref_source=resource_ref_source,
+                customer_ref_source=customer_ref_source,
             )
             from core.managed_business_diagnostics import emit_business_diagnostic
             self._business_diagnostic_observations += 1
@@ -232,6 +246,16 @@ class BusinessRuntime:
 
     final_result_guard = guard_result
 
+    @property
+    def buffer_cancellation_continuation(self):
+        """A retired cancellation proposal is not a booking-effect receipt."""
+        return getattr(self, '_retired_cancel_intent', None) == 'CHANGE'
+
+    @property
+    def buffer_preparation_refusal(self):
+        """A later successful READ is not a successfully prepared proposal."""
+        return getattr(self, '_proposal_preparation_refused', False) is True
+
     def _original_acquisition(self, gate):
         if (gate.selection_kind not in {"OWN", "CONFIRM"} or gate.plan is None
                 or gate.request_conflict):
@@ -246,7 +270,19 @@ class BusinessRuntime:
             return self._halt(True)
         if gate.disposition == "NO_PLAN" and self.collector.snapshot():
             return self._halt(True)
+        if gate.disposition == "NO_PLAN" and final_answer and self.buffer_preparation_refusal:
+            # A definitive pre-reservation refusal permits ordinary recovery
+            # reads. Only a durable replacement plan can supply a proposal;
+            # untrusted prose cannot invent one after those reads.
+            return BusinessToolResult(safe_draft='Не удалось подготовить предложение для подтверждения. '
+                'Действие не выполнялось. Давайте уточним детали.')
         if gate.disposition in {"NO_PLAN", "ALL_SUCCEEDED"}:
+            if final_answer and self.buffer_cancellation_continuation:
+                # CHANGE may still prepare a replacement through ordinary tools.
+                # If it finishes with prose instead, do not let that prose claim
+                # that retiring the old proposal cancelled the CRM appointment.
+                return BusinessToolResult(safe_draft='Отмену записи не выполняю. '
+                    'Уточните, пожалуйста, что вы хотите изменить.')
             return None
         if gate.disposition == "AWAITING_CONFIRMATION":
             try:
@@ -389,7 +425,24 @@ class BusinessRuntime:
             return await self._facts(actions, allow_disabled=allow_disabled)
         return resolve
 
+    def _business_wait(self, phase):
+        """Bounded per-phase ordinals; observe the existing task and deadline."""
+        steps = getattr(self, '_business_wait_steps', None)
+        if steps is None:
+            steps = self._business_wait_steps = {}
+        step = steps.get(phase, 0) + 1
+        steps[phase] = step
+        execution = getattr(self, 'execution', None) if step <= 20 else None
+        return observe_managed_wait(execution, phase, step=step)
+
     def openai_tools(self):
+        step = min(getattr(self, '_tool_surface_observation_step', 0) + 1, 21)
+        self._tool_surface_observation_step = step
+        execution = getattr(self, 'execution', None) if step <= 20 else None
+        with observe_managed_wait(execution, 'TOOL_SURFACE', step=step):
+            return self._openai_tools()
+
+    def _openai_tools(self):
         if self.registration is None or self.binding is None:
             return []
         if self.recovery_mode:
@@ -554,18 +607,25 @@ class BusinessRuntime:
         empty = {"pending": None}
         if self.registration.adapter_id != 'chotacrm':
             return empty
-        plan = await self.repository.latest_completed_booking(self.request, self.grant, self.registration)
+        # Distinguish repeated projections within one turn without adding content
+        # to diagnostics. The existing observer drops steps outside its bound.
+        step = getattr(self, '_context_observation_step', 0) + 1
+        self._context_observation_step = step
+        execution = getattr(self, 'execution', None)
+        with observe_managed_wait(execution, 'CONTEXT_REPOSITORY', step=step):
+            plan = await self.repository.latest_completed_booking(self.request, self.grant, self.registration)
         if plan is None:
             return empty
         operation = plan.operations[0]
         try:
-            from business_capabilities.runtime_tools import completed_booking_reply
-            receipt = SucceededReceipt.model_validate(operation.receipt_evidence)
-            _, digest = self.repository._evidence(receipt, operation.command)
-            if (digest != operation.receipt_fingerprint or receipt.receipt_id != operation.receipt_id
-                    or receipt.object_id != operation.object_id):
-                return empty
-            summary = completed_booking_reply(operation, receipt)
+            with observe_managed_wait(execution, 'CONTEXT_RECEIPT', step=step):
+                from business_capabilities.runtime_tools import completed_booking_reply
+                receipt = SucceededReceipt.model_validate(operation.receipt_evidence)
+                _, digest = self.repository._evidence(receipt, operation.command)
+                if (digest != operation.receipt_fingerprint or receipt.receipt_id != operation.receipt_id
+                        or receipt.object_id != operation.object_id):
+                    return empty
+                summary = completed_booking_reply(operation, receipt)
         except Exception:
             return empty
         context = {"pending": None, "recent_booking": {
@@ -573,12 +633,12 @@ class BusinessRuntime:
         # One bounded, ordinary READ avoids asking the model to rediscover its
         # own just-confirmed booking among unrelated cancelled appointments.
         # No historical revision or provider effect is reused here.
-        current = await self._current_booking_prompt_context(receipt.object_id)
+        current = await self._current_booking_prompt_context(receipt.object_id, diagnostic_step=step)
         if current is not None:
             context['current_booking'] = current
         return context
 
-    async def _current_booking_prompt_context(self, booking_ref):
+    async def _current_booking_prompt_context(self, booking_ref, *, diagnostic_step=1):
         """Hydrate only a validated own reference through the normal READ guards."""
         from business_capabilities.results import Booking
         from services.prompt_composer import CurrentBookingPrompt
@@ -588,7 +648,9 @@ class BusinessRuntime:
         # budget. Parent cancellation and managed deadlines still propagate.
         try:
             with anyio.move_on_after(2) as bounded:
-                result = await self.call_tool('booking_get', {'booking_ref': booking_ref})
+                with observe_managed_wait(getattr(self, 'execution', None),
+                                          'CONTEXT_BOOKING_READ', step=diagnostic_step):
+                    result = await self.call_tool('booking_get', {'booking_ref': booking_ref})
         except ManagedExecutionError:
             raise
         except Exception:
@@ -605,7 +667,7 @@ class BusinessRuntime:
             return CurrentBookingPrompt(booking_ref=booking.ref,
                 **booking.model_dump(include={
                     'revision', 'status', 'start_at', 'end_at', 'timezone',
-                    'offering_name', 'resource_name'})).model_dump(mode='json')
+                    'offering_name', 'resource_name', 'resource_ref'})).model_dump(mode='json')
         except (ValueError, TypeError):
             return None
 
@@ -623,7 +685,11 @@ class BusinessRuntime:
             managed_request_fingerprint=managed_request_fingerprint(self.request),
         )
         try:
-            result = await self.effect_port.eligibility(request)
+            step = min(getattr(self, '_effect_observation_step', 0) + 1, 21)
+            self._effect_observation_step = step
+            execution = getattr(self, 'execution', None) if step <= 20 else None
+            with observe_managed_wait(execution, 'BUSINESS_EFFECT_ELIGIBILITY', step=step):
+                result = await self.effect_port.eligibility(request)
             if not isinstance(result, ExternalEffectEligibilityResult):
                 return None
             result = ExternalEffectEligibilityResult.model_validate(result.model_dump())
@@ -738,8 +804,19 @@ class BusinessRuntime:
                         raise BusinessSafetyError("PLAN_DENIED")
                     await self._ensure_effect_eligibility(pending.origin_turn_id)
                     await self.repository.cancel_proposal(self.request, self.grant, proposal_id, self.registration)
-                    return BusinessToolResult(tool_payload={"status": "CANCELLED", "intent": arguments["intent"],
-                                                            "new_confirmation_required": arguments["intent"] == "CHANGE"})
+                    payload = {"status": "CANCELLED", "intent": arguments["intent"],
+                               "new_confirmation_required": arguments["intent"] == "CHANGE"}
+                    if (self.registration.adapter_id == 'chotacrm' and len(pending.operations) == 1
+                            and pending.operations[0].command.capability == 'booking.cancel'):
+                        self._retired_cancel_intent = arguments['intent']
+                        payload.update(cancelled_object='PROPOSAL_ONLY', booking_effect='NOT_EXECUTED')
+                        gate = await self.execution_guard(allow_incomplete=True)
+                        if gate is not None:
+                            return gate
+                        if arguments['intent'] == 'REJECT':
+                            return BusinessToolResult(tool_payload=payload,
+                                safe_draft='Отмену записи не выполняю.')
+                    return BusinessToolResult(tool_payload=payload)
                 # Unrelated text grants no effect or selected operation refs.
                 pending = await self.repository.pending_proposal(self.request, self.grant, self.registration)
                 if pending is None or pending.id != proposal_id:
@@ -796,7 +873,8 @@ class BusinessRuntime:
                 raise BusinessSafetyError("CAPABILITY_DISABLED")
             normalized.append(BusinessAction(capability=action.capability,
                                              arguments=capability.normalize(action.arguments)))
-        facts = await self._adapter_call("resolve_facts", self.scope, tuple(normalized))
+        with self._business_wait('BUSINESS_FACTS_ADAPTER'):
+            facts = await self._adapter_call("resolve_facts", self.scope, tuple(normalized))
         if not isinstance(facts, MaterialFacts):
             raise BusinessSafetyError("FACTS_INVALID")
         return facts
@@ -912,9 +990,10 @@ class BusinessRuntime:
                 return self._halt(any(op.status in {"SUCCEEDED", "DISPATCHING", "UNKNOWN"} for op in plan.operations))
             actions = [BusinessAction(capability=op.command.capability, arguments=op.command.arguments)
                        for op in plan.operations]
-            acquisition = await self.repository.prepare_effect_acquisition(
-                self.request, self.grant, plan.id, operation.id, self.registration,
-                self.facts_resolver(actions))
+            with self._business_wait('BUSINESS_EFFECT_ACQUIRE'):
+                acquisition = await self.repository.prepare_effect_acquisition(
+                    self.request, self.grant, plan.id, operation.id, self.registration,
+                    self.facts_resolver(actions))
             self.collector.observe_committed(acquisition.plan.references)
             plan = acquisition.plan
             candidate = next(op for op in plan.operations if op.id == identity)
@@ -931,10 +1010,11 @@ class BusinessRuntime:
             permit_id = acquisition.permit_id
             if permit_id is None:
                 try:
-                    permit = await self.effect_port.permit(effect_request)
-                    if (not isinstance(permit, ExternalEffectPermitResult)
-                            or permit.request_fingerprint != sidecar_fingerprint(effect_request)):
-                        raise ValueError
+                    with self._business_wait('BUSINESS_EFFECT_PERMIT'):
+                        permit = await self.effect_port.permit(effect_request)
+                        if (not isinstance(permit, ExternalEffectPermitResult)
+                                or permit.request_fingerprint != sidecar_fingerprint(effect_request)):
+                            raise ValueError
                 except Exception as error:
                     from services.conversation_effects import DefinitiveEffectDenial
                     if isinstance(error, DefinitiveEffectDenial):
@@ -948,8 +1028,9 @@ class BusinessRuntime:
                     raise BusinessSafetyError("EFFECT_ACQUISITION_UNKNOWN",
                                               processing_status="UNKNOWN") from None
                 permit_id = permit.permit_id
-                plan = await self.repository.bind_effect_permit(
-                    self.request, self.grant, plan.id, operation.id, effect_request, permit_id)
+                with self._business_wait('BUSINESS_EFFECT_BIND'):
+                    plan = await self.repository.bind_effect_permit(
+                        self.request, self.grant, plan.id, operation.id, effect_request, permit_id)
                 self.collector.observe_committed(plan.references)
                 candidate = next(op for op in plan.operations if op.id == identity)
                 if candidate.status == "SUCCEEDED":
@@ -957,9 +1038,10 @@ class BusinessRuntime:
                 if candidate.status != "RESERVED":
                     return self._halt(any(op.status in {"SUCCEEDED", "DISPATCHING", "UNKNOWN"}
                                           for op in plan.operations))
-            decision = await self.repository.claim_dispatch(self.request, self.grant, plan.id, operation.id,
-                                                            self.registration, self.facts_resolver(actions),
-                                                            effect_request=effect_request)
+            with self._business_wait('BUSINESS_DISPATCH_CLAIM'):
+                decision = await self.repository.claim_dispatch(self.request, self.grant, plan.id, operation.id,
+                                                                self.registration, self.facts_resolver(actions),
+                                                                effect_request=effect_request)
             self.collector.observe_committed(decision.plan.references)
             plan = decision.plan
             candidate = next(op for op in plan.operations if op.id == identity)
@@ -987,7 +1069,8 @@ class BusinessRuntime:
         if self.execution is not None:
             self.execution.tool_dispatch_attempted = True
         try:
-            receipt = await self._adapter_call("execute", token.dispatch)
+            with self._business_wait('BUSINESS_PROVIDER_EXECUTE'):
+                receipt = await self._adapter_call("execute", token.dispatch)
             if isinstance(receipt, AttemptRejected):
                 if receipt.binding != token.command.receipt_binding() or receipt.attempt != token.dispatch.attempt:
                     raise BusinessSafetyError("RECEIPT_CONFLICT", processing_status="UNKNOWN")
@@ -998,7 +1081,8 @@ class BusinessRuntime:
                 return plan
             if not isinstance(receipt, (SucceededReceipt, DefinitiveNoEffect)):
                 raise BusinessSafetyError("PROVIDER_UNKNOWN", processing_status="UNKNOWN")
-            plan = await self.repository.finalize(self.request, self.grant, token, receipt)
+            with self._business_wait('BUSINESS_RECEIPT_FINALIZE'):
+                plan = await self.repository.finalize(self.request, self.grant, token, receipt)
             self.collector.observe_committed(plan.references)
             return plan
         except BaseException as error:
@@ -1028,8 +1112,9 @@ class BusinessRuntime:
             raise BusinessSafetyError("PLAN_DENIED")
         await self._ensure_effect_eligibility(plan.origin_turn_id)
         actions = [BusinessAction(capability=op.command.capability, arguments=op.command.arguments) for op in plan.operations]
-        plan = await self.repository.confirm_plan(self.request, self.grant, plan.id, self.registration,
-                                                   self.facts_resolver(actions), semantic=semantic)
+        with self._business_wait('BUSINESS_CONFIRM_REPOSITORY'):
+            plan = await self.repository.confirm_plan(self.request, self.grant, plan.id, self.registration,
+                                                       self.facts_resolver(actions), semantic=semantic)
         self.collector.observe_committed(plan.references)
         result = await self._execute_frozen(plan)
         if (not semantic or self.registration.adapter_id != "chotacrm"

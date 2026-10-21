@@ -97,6 +97,9 @@ async def test_voice_pending_decision_does_not_require_provider_forced_choice(
     assert result['status'] == 'DRAFT_READY'
     assert 'tool_choice' not in captured[0]
     assert [tool['function']['name'] for tool in captured[0]['tools']] == ['business_decide_proposal']
+    properties = captured[0]['tools'][0]['function']['parameters']['properties']
+    assert properties['proposal_id']['enum'] == [proposal_id]
+    assert set(properties['intent']['enum']) == {'CONFIRM', 'CHANGE', 'REJECT', 'UNRELATED'}
     assert calls['execute'] == effects
     assert len(effect.permit_requests) == effects
     async with db_session() as db:

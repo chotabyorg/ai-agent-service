@@ -23,12 +23,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from mcp_clients.manager import MCPManager, MCPPreAcquisitionError
 from core.managed_security import managed_logging
+from core.managed_wait_diagnostics import observe_managed_wait
 from services.managed_tools import (ManagedExecutionError, inspect_managed_tool_result,
                                     parse_managed_tool_arguments, _bounded_json)
 from services.managed_http_cleanup import close_managed_helper, own_managed_http
 from services.managed_reasoning import managed_reasoning_fields
+from services.pending_decision_contract import (
+    pending_decision_tools, validate_pending_decision, observe_pending_rejection,
+)
 from services.managed_completion import select_managed_completion, observe_managed_completion, observe_model_failure, is_stopped_prose
 from services.completion_timing import CompletionTiming
+from services.router_metadata_observation import HEADER, RouterObservation, router_metadata_headers
 from services.managed_streaming import complete_with_partials
 from services.chat_diagnostics import ChatFailureStage, set_chat_failure_stage
 from services.agent_service import AgentService
@@ -407,7 +412,26 @@ class LLMService:
         )
         return ChatProcessingResult(session_id=session_id, answer=answer)
 
+    def _completion_headers(self, client, *, managed):
+        adapter = self.settings.managed_completion_adapter
+        if managed and adapter is not None and adapter.kind != 'openrouter':
+            return None
+        return router_metadata_headers(client, self._build_extra_headers(), managed=managed)
+
+    async def _managed_completion_create(self, client, **kwargs):
+        self.settings.managed_completion_adapter.validate_request(kwargs)
+        response = await client.chat.completions.create(**kwargs)
+        if not kwargs.get('stream') and (not getattr(response, 'choices', None)
+                or getattr(response.choices[0], 'finish_reason', None) is None):
+            raise ManagedExecutionError('INVALID_RESULT')
+        return response
+
     def _create_llm_client(self, agent_api_key, privacy_session_id, *, managed=False):
+        adapter = self.settings.managed_completion_adapter
+        if adapter is not None and adapter.kind == 'openai_compatible':
+            # A local/compatible endpoint must never receive a stored cloud key,
+            # including callers of the legacy, unmanaged API.
+            agent_api_key = self.settings.managed_completion_api_key.get_secret_value() or 'local-endpoint'
         if self.settings.privacy_filter_enabled:
             if managed:
                 try:
@@ -458,9 +482,10 @@ class LLMService:
         if runtime and runtime.business is not None:
             project = getattr(runtime.business, "prompt_context", None)
             if callable(project):
-                prompt_context = RuntimeCapabilityContext.model_validate(
-                    await runtime.operation(project())
-                )
+                with observe_managed_wait(runtime, 'BUSINESS_PROMPT_CONTEXT', step=1):
+                    prompt_context = RuntimeCapabilityContext.model_validate(
+                        await runtime.operation(project())
+                    )
         system_prompt = self.prompt_composer.compose(
             agent, chat_context, runtime_context=prompt_context,
         )
@@ -512,10 +537,13 @@ class LLMService:
                 # business controls can enter the managed registry.
                 openai_tools = runtime.business.openai_tools() if runtime.business else []
                 from services.voice_booking_tools import booking_tools
-                voice_booking_only = bool(
-                    voice_profile is not None and voice_profile.concise_speech
-                    and getattr(getattr(runtime.business, 'registration', None), 'adapter_id', None) == 'chotacrm')
-                openai_tools = booking_tools(openai_tools, enabled=voice_booking_only)
+                booking_schema_dedup = bool(
+                    getattr(getattr(runtime.business, 'registration', None), 'adapter_id', None) == 'chotacrm'
+                    and (managed_request.channel != 'VOICE'
+                         or voice_profile is not None and voice_profile.concise_speech))
+                # Direct booking inputs already carry the same canonical schemas.
+                # Keep generic proposals when they also support another action/bundle.
+                openai_tools = booking_tools(openai_tools, enabled=booking_schema_dedup)
                 tool_registry = {tool["function"]["name"]: None for tool in openai_tools}
             else:
                 for credentials_record in credentials_records:
@@ -578,19 +606,17 @@ class LLMService:
             if voice_profile is not None:
                 from services.voice_reply_style import replying_to_connection_check
                 presence_reply = replying_to_connection_check(managed_request)
-            if required_proposal_id is not None and presence_reply:
-                # Offer no CONFIRM choice for a bare answer to the connection
-                # check. The existing runtime still interprets UNRELATED and
-                # owns the pending proposal and all dispatch authority.
-                for tool in openai_tools:
-                    if tool['function']['name'] == 'business_decide_proposal':
-                        import copy
-                        tool['function']['parameters'] = copy.deepcopy(tool['function']['parameters'])
-                        tool['function']['parameters']['properties']['intent']['enum'] = ['UNRELATED']
+            if required_proposal_id is not None:
+                # The model can choose the customer's intent, but the only
+                # admissible target is the current runtime's pending proposal.
+                # The strict post-response ID check remains authoritative.
+                openai_tools = pending_decision_tools(
+                    openai_tools, required_proposal_id, presence_reply=presence_reply)
             if required_proposal_id is not None and "business_decide_proposal" not in tool_registry:
                 raise ManagedExecutionError("INVALID_RESULT")
             tool_choice = ({"type": "function", "function": {"name": "business_decide_proposal"}}
                            if required_proposal_id is not None else None)
+            pending_format_message = None
             if required_proposal_id is not None and managed_request.channel == 'VOICE':
                 # Some Voice providers fail even buffered named tool_choice.
                 # Offer only the required semantic tool. The strict decision
@@ -607,6 +633,7 @@ class LLMService:
                     for tool in openai_tools if tool["function"]["name"] in SCHEMA_VALIDATED_TOOLS}
             preparation_correction = None
             reuse_expectation = None
+            reuse_continuation_message = None
             reuse_continuation_used = False
             correction_budgets_used = set()
             seen_tool_ids = set()
@@ -617,6 +644,7 @@ class LLMService:
                 )
             voice_search_counts: dict[str, int] = {}
             retired_voice_tools: set[str] = set()
+            offering_choices = ()
             model_retry_used = False
             partial_attempted = False
 
@@ -642,9 +670,10 @@ class LLMService:
                                 and voice_profile is not None
                                 and not getattr(runtime, "tool_dispatch_attempted", False)
                             )
-                            gate = await runtime.operation(
-                                runtime.business.execution_guard(
-                                    allow_incomplete=True, reload=reload_gate))
+                            with observe_managed_wait(runtime, 'EXECUTION_GUARD', step=step_index + 1):
+                                gate = await runtime.operation(
+                                    runtime.business.execution_guard(
+                                        allow_incomplete=True, reload=reload_gate))
                             if gate is not None:
                                 if gate.halt_status:
                                     raise ManagedExecutionError(gate.error_code, processing_status=gate.halt_status)
@@ -665,39 +694,64 @@ class LLMService:
                         if step_index == 0:
                             emit_voice_timing(VoiceTiming(runtime.request.turn_id, 0, "PREPARE",
                                 round((model_started - getattr(runtime, "voice_started_at", model_started)) * 1000)))
+                    advertised_tools = (
+                        [tool for tool in openai_tools
+                         if tool['function']['name'] == preparation_correction]
+                        if runtime and preparation_correction is not None
+                        else [tool for tool in openai_tools
+                              if tool['function']['name'] == 'business_decide_proposal']
+                        if required_proposal_id is not None else openai_tools)
+                    if voice_profile is not None and offering_choices:
+                        from services.voice_booking_tools import booking_offering_tools
+                        advertised_tools = booking_offering_tools(advertised_tools, offering_choices)
+                        # Include added enum bytes in the actual request budget,
+                        # as well as the conservative canonical surface above.
+                        self._check_managed_envelope(agent, messages, advertised_tools,
+                            tool_choice=tool_choice, request=managed_request)
                     completion_kwargs = dict(
                         model=(self._managed_model(agent, request=managed_request) if runtime
                                else agent.model_name or self.settings.llm_default_model),
                         temperature=agent.temperature,
-                        max_tokens=self.settings.llm_max_tokens,
+                        max_tokens=(self._managed_max_tokens(agent, request=managed_request) if runtime
+                                    else self.settings.llm_max_tokens),
                         messages=messages,
-                        # A read correction is a single, already-bounded schema
-                        # repair. Some Voice routes reject forced tool_choice;
-                        # remove distracting tools for that one completion instead.
-                        # Dispatch still checks the same tool, schema and fresh ID.
-                        tools=([tool for tool in openai_tools
-                                if tool['function']['name'] == preparation_correction]
-                               if runtime and preparation_correction is not None
-                               else openai_tools) or None,
+                        # Narrow only this completion's advertised schemas. Keep
+                        # the canonical registry and conservative context budget
+                        # for ordinary continuations after the runtime decision.
+                        # Strict decision admission still rejects every other call.
+                        tools=advertised_tools or None,
                         parallel_tool_calls=self._managed_parallel_tool_calls(managed_request),
                         **({"tool_choice": tool_choice} if tool_choice is not None else {}),
                         **({"extra_body": model_extra_body} if model_extra_body else {}),
-                        extra_headers=self._build_extra_headers(),
+                        extra_headers=self._completion_headers(llm_client, managed=runtime is not None),
                     )
+                    model_attempt = 1
                     while True:
                         completion_timing = CompletionTiming() if runtime else None
+                        if (completion_timing is not None
+                                and (completion_kwargs.get('extra_headers') or {}).get(HEADER) == 'enabled'):
+                            completion_timing.router_observation = RouterObservation()
                         pending_response = complete_with_partials(
-                            llm_client.chat.completions.create, completion_kwargs,
+                            (lambda **kwargs: self._managed_completion_create(llm_client, **kwargs))
+                            if runtime and self.settings.managed_completion_adapter is not None
+                            else llm_client.chat.completions.create, completion_kwargs,
                             # Required continuations and pending decisions cannot
                             # publish unvalidated prose before runtime admission.
                             on_text=(tracked_partial if partial_hook is not None
                                      and reuse_expectation is None
-                                     and required_proposal_id is None else None),
+                                     and required_proposal_id is None
+                                     and not (runtime and runtime.business is not None
+                                         and (getattr(runtime.business, 'buffer_cancellation_continuation', False) is True
+                                              or getattr(runtime.business, 'buffer_preparation_refusal', False) is True))
+                                     else None),
                             timing=completion_timing,
+                            require_finish=runtime is not None and self.settings.managed_completion_adapter is not None,
                         )
                         try:
-                            response = (await runtime.operation(pending_response)
-                                        if runtime else await pending_response)
+                            with observe_managed_wait(runtime, 'MODEL_HTTP', step=step_index + 1,
+                                                      attempt=model_attempt):
+                                response = (await runtime.operation(pending_response)
+                                            if runtime else await pending_response)
                             break
                         except APIError as exc:
                             if runtime:
@@ -714,11 +768,16 @@ class LLMService:
                                 raise
                             model_retry_used = True
                             runtime.check()
-                            await runtime.operation(asyncio.sleep(delay))
+                            with observe_managed_wait(runtime, 'RETRY_WAIT', step=step_index + 1,
+                                                      attempt=model_attempt):
+                                await runtime.operation(asyncio.sleep(delay))
                             runtime.check()
+                            model_attempt += 1
                             if runtime.business is not None:
-                                gate = await runtime.operation(
-                                    runtime.business.execution_guard(allow_incomplete=True))
+                                with observe_managed_wait(runtime, 'EXECUTION_GUARD', step=step_index + 1,
+                                                          attempt=model_attempt):
+                                    gate = await runtime.operation(
+                                        runtime.business.execution_guard(allow_incomplete=True))
                                 if gate is not None:
                                     if gate.halt_status:
                                         raise ManagedExecutionError(gate.error_code,
@@ -829,7 +888,7 @@ class LLMService:
                         # only this tool. Discard their prose; request its format
                         # once more, without interpreting it as caller consent.
                         # The next loop rechecks deadline and execution authority.
-                        messages.append({'role': 'system', 'content': (
+                        pending_format_message = {'role': 'system', 'content': (
                             'A pending proposal still requires a semantic decision. '
                             'Return exactly one business_decide_proposal call, using '
                             'the current pending proposal_id and the actual selected '
@@ -838,27 +897,20 @@ class LLMService:
                             'a different question or unclear acceptance. Follow the '
                             'advertised intent schema. Prior assistant prose is not '
                             'customer consent or proof of any completed action. '
-                            'Do not return ordinary prose or claim success.')})
+                            'Accepting a proposed booking cancellation is CONFIRM; '
+                            'REJECT refuses that proposal and does not cancel the booking. '
+                            'Do not return ordinary prose or claim success.')}
+                        messages.append(pending_format_message)
                         self._check_managed_envelope(agent, messages, openai_tools,
                                                      tool_choice=tool_choice, request=managed_request)
                         continue
-                    if selected.branch != "TOOL_CALLS" or type(calls) is not list or len(calls) != 1:
-                        raise ManagedExecutionError("INVALID_RESULT")
-                    call = calls[0]
-                    function = getattr(call, "function", None)
-                    if (getattr(call, "type", None) != "function"
-                            or not isinstance(getattr(call, "id", None), str) or not call.id
-                            or getattr(function, "name", None) != "business_decide_proposal"):
-                        raise ManagedExecutionError("INVALID_RESULT")
-                    decision_args = parse_managed_tool_arguments(getattr(function, "arguments", None))
-                    if (set(decision_args) != {"proposal_id", "intent"}
-                            or decision_args["proposal_id"] != required_proposal_id
-                            or (presence_reply and decision_args['intent'] != 'UNRELATED')):
-                        raise ManagedExecutionError("INVALID_RESULT")
+                    validate_pending_decision(selected, required_proposal_id,
+                        presence_reply=presence_reply, runtime=runtime)
                 if (selected is not None and selected.branch != "TOOL_CALLS") or (
                         selected is None and not getattr(message, "tool_calls", None)):
                     if runtime and runtime.business is not None:
-                        gate = await runtime.operation(runtime.business.final_result_guard())
+                        with observe_managed_wait(runtime, 'FINAL_GUARD', step=step_index + 1):
+                            gate = await runtime.operation(runtime.business.final_result_guard())
                         if gate is not None:
                             if gate.halt_status:
                                 raise ManagedExecutionError(gate.error_code, processing_status=gate.halt_status)
@@ -924,7 +976,8 @@ class LLMService:
                                 or not isinstance(getattr(invalid_call, "id", None), str) or not invalid_call.id
                                 or runtime.tool_dispatch_attempted or runtime.business is None):
                             raise ManagedExecutionError("TOOL_SETUP_FAILED")
-                        gate = await runtime.operation(runtime.business.execution_guard(allow_incomplete=True))
+                        with observe_managed_wait(runtime, 'EXECUTION_GUARD', step=step_index + 1):
+                            gate = await runtime.operation(runtime.business.execution_guard(allow_incomplete=True))
                         if gate is not None and gate.halt_status:
                             raise ManagedExecutionError(gate.error_code, processing_status=gate.halt_status)
                         if gate is not None or runtime.business.collector.snapshot():
@@ -951,10 +1004,21 @@ class LLMService:
                         runtime.business._booking_workflow_started = True
                     seen_tool_ids.update(call.id for call in message.tool_calls
                         if isinstance(getattr(call, "id", None), str))
-                messages.append(self._assistant_message_to_dict(message, managed=runtime is not None))
+                try:
+                    assistant_message = self._assistant_message_to_dict(message, managed=runtime is not None)
+                except ManagedExecutionError:
+                    if required_proposal_id is not None:
+                        observe_pending_rejection(runtime, 'format', 'assistant_message')
+                    raise
+                messages.append(assistant_message)
                 if runtime:
-                    self._check_managed_envelope(agent, messages, openai_tools,
-                                                 tool_choice=tool_choice, request=managed_request)
+                    try:
+                        self._check_managed_envelope(agent, messages, openai_tools,
+                                                     tool_choice=tool_choice, request=managed_request)
+                    except ManagedExecutionError:
+                        if required_proposal_id is not None:
+                            observe_pending_rejection(runtime, 'schema', 'envelope')
+                        raise
 
                 set_chat_failure_stage(ChatFailureStage.TOOL_EXECUTION)
                 for tool_call in message.tool_calls:
@@ -993,6 +1057,17 @@ class LLMService:
                         required_proposal_id = None
                         preparation_correction = None
                         tool_choice = None
+                        if reuse_continuation_message is not None:
+                            # The exact continuation was validated and processed.
+                            # Its one-response constraint must not govern recovery
+                            # from a refused preparation or later guarded reads.
+                            messages = [m for m in messages if m is not reuse_continuation_message]
+                            reuse_continuation_message = None
+                        if pending_format_message is not None:
+                            # The runtime processed the reply. Remove only our
+                            # repair hint before continuing without this tool.
+                            messages = [m for m in messages if m is not pending_format_message]
+                            pending_format_message = None
                         if business_result.safe_draft is not None:
                             # Proposals are bounded frozen public fields. Model
                             # prose is never permission or a completion receipt.
@@ -1021,16 +1096,26 @@ class LLMService:
                             ensure_ascii=False, allow_nan=False)
                         messages.append({"role": "tool", "tool_call_id": tool_call.id,
                                          "name": func_name, "content": tool_result_text})
+                        if voice_profile is not None:
+                            from services.voice_booking_tools import catalog_offering_choices
+                            current_choices = catalog_offering_choices(func_name, business_result.tool_payload)
+                            if current_choices is not None:
+                                offering_choices = current_choices
                         if next_reuse is not None:
-                            messages.append({'role': 'system', 'content':
-                                customer_reuse_instruction(func_name, next_reuse)})
-                        if voice_profile is not None and func_name == "resource_search":
+                            reuse_continuation_message = {'role': 'system', 'content':
+                                customer_reuse_instruction(func_name, next_reuse)}
+                            messages.append(reuse_continuation_message)
+                        if voice_profile is not None and func_name in {"resource_search", "booking_search_options"}:
                             # Count the actual search, including its cursor, not
                             # the tool name: a broader query or next page is progress.
                             # Validate/normalize only AFTER the ordinary guarded read.
                             from business_capabilities.registry import normalize_arguments
-                            signature = json.dumps(normalize_arguments("resource.search", func_args),
-                                                   sort_keys=True, ensure_ascii=False)
+                            if func_name == 'booking_search_options':
+                                from services.booking_search_options import normalize_search_arguments
+                                search_arguments = normalize_search_arguments(func_args)
+                            else:
+                                search_arguments = normalize_arguments("resource.search", func_args)
+                            signature = json.dumps(search_arguments, sort_keys=True, ensure_ascii=False)
                             voice_search_counts[signature] = voice_search_counts.get(signature, 0) + 1
                             if voice_search_counts[signature] >= self.VOICE_SEARCH_REPEAT_LIMIT:
                                 # Keep both real results in context, but stop advertising
@@ -1052,7 +1137,7 @@ class LLMService:
                                 runtime.business.prompt_context())
                             prompt_context = RuntimeCapabilityContext.model_validate(refreshed_context)
                             openai_tools = [tool for tool in booking_tools(
-                                                runtime.business.openai_tools(), enabled=voice_booking_only)
+                                                runtime.business.openai_tools(), enabled=booking_schema_dedup)
                                             if tool["function"]["name"] not in retired_voice_tools]
                             tool_registry = {
                                 tool["function"]["name"]: None for tool in openai_tools
@@ -1092,7 +1177,7 @@ class LLMService:
                             # questions may use the ordinary guarded read tools.
                             # No second decision about it is available this turn.
                             openai_tools = [tool for tool in booking_tools(
-                                runtime.business.openai_tools(), enabled=voice_booking_only)
+                                runtime.business.openai_tools(), enabled=booking_schema_dedup)
                                 if tool['function']['name'] not in (
                                     retired_voice_tools | {'business_decide_proposal'})]
                             tool_registry = {tool['function']['name']: None for tool in openai_tools}
@@ -1208,8 +1293,13 @@ class LLMService:
 
     def _managed_voice_profile(self, agent, *, request=None):
         model = agent.model_name or self.settings.llm_default_model
-        return next((profile for profile in self.settings.managed_voice_latency_profiles
+        return next((profile for profile in [*self.settings.managed_voice_latency_profiles,
+                                            *self.settings.managed_voice_profiles]
                      if profile.matches(request, model)), None)
+
+    def _managed_max_tokens(self, agent, *, request=None):
+        profile = self._managed_voice_profile(agent, request=request)
+        return min(self.settings.llm_max_tokens, getattr(profile, 'max_output_tokens', self.settings.llm_max_tokens))
 
     def _managed_model(self, agent, *, request=None):
         profile = self._managed_voice_profile(agent, request=request)
@@ -1238,7 +1328,7 @@ class LLMService:
 
     def _managed_envelope(self, agent, messages, tools, *, tool_choice=None, request=None):
         envelope = {"model": self._managed_model(agent, request=request),
-                "temperature": agent.temperature, "max_tokens": self.settings.llm_max_tokens,
+                "temperature": agent.temperature, "max_tokens": self._managed_max_tokens(agent, request=request),
                 "messages": messages, "tools": tools or None,
                 "parallel_tool_calls": self._managed_parallel_tool_calls(request)}
         if tool_choice is not None:
@@ -1252,7 +1342,9 @@ class LLMService:
                                   ensure_ascii=False, allow_nan=False).encode("utf-8"))
         except (ValueError, UnicodeError, RecursionError, TypeError):
             raise ManagedExecutionError("INVALID_RESULT") from None
-        if size > self.settings.managed_ai_context_bytes:
+        profile = self._managed_voice_profile(agent, request=request)
+        if size > min(self.settings.managed_ai_context_bytes,
+                      getattr(profile, 'context_bytes', self.settings.managed_ai_context_bytes)):
             raise ManagedExecutionError("CONTEXT_LIMIT")
 
     def _budget_managed_messages(self, agent, messages, tools, selected_indices, communication, simple, *, tool_choice=None, request=None):

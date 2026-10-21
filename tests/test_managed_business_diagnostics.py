@@ -43,6 +43,8 @@ def test_business_diagnostic_rebuilds_only_closed_fields():
             refusal_category="NONE", lookup_source="MODEL", lookup_mode="IDENTITY_ONLY",
             lookup_result="SINGLE", proposal_present=False, operation_present=False,
             schema_rule="type", schema_field="cursor",
+            offering_ref_source="READ_THIS_TURN", resource_ref_source="WRONG_KIND_THIS_TURN",
+            customer_ref_source="NOT_OBSERVED_THIS_TURN",
         ))
     finally:
         managed_logging.reset(token)
@@ -62,10 +64,14 @@ def test_business_diagnostic_rebuilds_only_closed_fields():
     assert record.lookup_result == "SINGLE" and record.refusal_category == "NONE"
     assert record.proposal_present is False and record.operation_present is False
     assert record.schema_rule == "type" and record.schema_field == "cursor"
+    assert record.offering_ref_source == "READ_THIS_TURN"
+    assert record.resource_ref_source == "WRONG_KIND_THIS_TURN"
+    assert record.customer_ref_source == "NOT_OBSERVED_THIS_TURN"
     assert PRIVATE not in repr(record.__dict__)
 
 
-@pytest.mark.parametrize('malformed_field', ['stage', 'schema_rule', 'schema_field'])
+@pytest.mark.parametrize('malformed_field', ['stage', 'capability', 'schema_rule', 'schema_field',
+    'offering_ref_source', 'resource_ref_source', 'customer_ref_source'])
 def test_malformed_marked_diagnostic_collapses_to_generic_record(malformed_field):
     install_managed_log_boundary()
     logger = logging.getLogger("uvicorn.error")
@@ -84,10 +90,10 @@ def test_malformed_marked_diagnostic_collapses_to_generic_record(malformed_field
         logger.info(PRIVATE, extra={
             "_business_identity": _IDENTITY,
             "_business_diagnostic": ManagedBusinessDiagnostic(
-                turn_id=TURN_ID, capability="customer.find",
+                turn_id=TURN_ID,
                 refusal_category="NONE", lookup_source="MODEL", lookup_mode="IDENTITY_ONLY",
                 lookup_result="SINGLE", proposal_present=False, operation_present=False,
-                **{'stage': 'LOOKUP', malformed_field: PRIVATE},
+                **{'stage': 'LOOKUP', 'capability': 'customer.find', malformed_field: PRIVATE},
             ),
             "untrusted": PRIVATE,
         })

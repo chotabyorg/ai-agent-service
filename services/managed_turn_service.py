@@ -90,7 +90,8 @@ async def _prefetch_knowledge_base(service, agent, query, runtime):
     # scope; teardown cancels it through the same join as the model warm-up.
     profile = service._managed_voice_profile(agent, request=getattr(runtime, "request", None))
     overrides = (
-        {"max_chars_per_chunk": 500, "max_total_context_chars": 1200}
+        {"max_chars_per_chunk": getattr(profile, 'knowledge_chunk_chars', 500),
+         "max_total_context_chars": getattr(profile, 'knowledge_context_chars', 1200)}
         if profile is not None
         else {}
     )
@@ -167,11 +168,17 @@ async def execute_managed_owned(request, grant, runtime, db_provider, session_fa
             if not agent.is_active:
                 raise ManagedExecutionError("AGENT_INACTIVE")
             profile = service._managed_voice_profile(agent, request=request)
-            if profile is not None and profile.reuse_signing_key:
-                from services.voice_signing import voice_signing_scope
-                runtime.stack.enter_context(voice_signing_scope(runtime))
+            from core.voice_latency import VoiceRuntimeProfile
+            if isinstance(profile, VoiceRuntimeProfile):
+                runtime.deadline = min(runtime.deadline, anyio.current_time() + profile.execution_seconds)
+            if request.channel != 'VOICE' or (profile is not None and profile.reuse_signing_key):
+                from services.voice_signing import managed_signing_scope
+                runtime.stack.enter_context(managed_signing_scope(runtime))
             try:
-                key = service._get_agent_api_key(agent)
+                adapter = service.settings.managed_completion_adapter
+                key = (service.settings.managed_completion_api_key.get_secret_value() or 'local-endpoint'
+                    if adapter is not None and adapter.kind == 'openai_compatible'
+                    else service._get_agent_api_key(agent))
             except Exception:
                 raise ManagedExecutionError("AGENT_CONFIGURATION_ERROR") from None
             if not key:
@@ -189,7 +196,8 @@ async def execute_managed_owned(request, grant, runtime, db_provider, session_fa
             emit_text_checkpoint(runtime, "SETUP")
             if profile is not None and not idle_input:
                 client = _owned_client(service, key, request, runtime)
-                if isinstance(client, AsyncOpenAI):
+                if (isinstance(client, AsyncOpenAI)
+                        and service.settings.llm_base_url.rstrip('/') == 'https://openrouter.ai/api/v1'):
                     runtime.model_warmup = asyncio.create_task(_warm_model_connection(client))
                     runtime.stack.push_async_callback(_join_warmup, runtime.model_warmup)
                 runtime.knowledge_task = asyncio.create_task(

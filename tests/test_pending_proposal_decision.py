@@ -109,7 +109,7 @@ async def test_pending_reply_finalizes_confirmation_or_releases_choice(
         assert booking['offering_name'] in reply and booking['resource_name'] in reply
         local_start = datetime.fromisoformat(booking['start_at']).astimezone(ZoneInfo(booking['timezone']))
         assert local_start.strftime('%d.%m.%Y в %H:%M') in reply
-        assert booking['timezone'] in reply
+        assert 'по местному времени' in reply and booking['timezone'] not in reply
     else:
         assert reply == 'Ответ после решения runtime.'
         assert len(model.chat.completions.calls) == 2

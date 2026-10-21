@@ -522,6 +522,15 @@ Turn UUID, step, closed categories and optional integer token counts, never
 model content, reasoning, tool arguments or credentials. These diagnostics do
 not establish the cause of earlier failures or prove a successful business action.
 
+Managed wait observations separately mark the start and terminal state of each
+model HTTP attempt, execution guard, final guard and bounded retry sleep. Fields
+are limited to Turn UUID, step, attempt, closed stage/state, elapsed milliseconds
+and remaining deadline. Cancellation and timeout remain distinct from successful
+completion. A missing terminal observation after a process failure is unknown.
+These observations preserve existing cancellation scopes, deadlines, retry and
+Business authority; they contain no prompts, transcript, arguments, provider
+body, exception text or credentials. A failed logger cannot change execution.
+
 Managed Business writes also require the separately configured Conversation
 effect authority. Set `BUSINESS_CONVERSATION_URL` and
 `BUSINESS_CONVERSATION_TOKEN` together; the service authenticates those private

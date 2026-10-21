@@ -104,6 +104,15 @@ CRM and TTS and is not a production latency claim.
 
 ## Native verification
 
+When a Voice pending-decision response needs the existing one-shot prose repair,
+its code-owned format message is retained only until the runtime processes that
+decision. It is then removed by object identity before an ordinary answer can
+continue without the semantic decision tool. Customer messages remain verbatim,
+including text identical to the guidance. The first model request, repair text,
+retry bound, tool schemas and runtime authorization rules remain unchanged.
+This fixes contradictory follow-up guidance; it does not establish a latency
+improvement or add guidance to the first model request.
+
 Tests can use an explicitly disposable PostgreSQL database on localhost with a
 name beginning `test_ai_`. Set `TEST_DATABASE_URL` and
 `TEST_DATABASE_DISPOSABLE=yes`, then run `python -m pytest -q`. The native fixture
@@ -114,3 +123,84 @@ An initial six-request synthetic comparison (2026-10-15, invented salon, about
 seconds and scoped options 2.184/1.466/1.319 seconds. Requests alternated modes;
 the small sample and provider/cache variance do not prove a production SLA.
 No customer prompt, history, transcript or knowledge-base context was used.
+
+## Pending decision admission diagnostics
+
+For a current pending proposal, a copied model-facing decision schema advertises
+only that proposal ID. It does not preselect the customer's intent, rewrite model
+arguments or modify the canonical tool registry. A connection-check reply still
+offers only `UNRELATED`. Exact proposal matching, one-call admission, the existing
+prose-only repair bound, execution guards and later customer consent stay required.
+
+Rejected pending responses emit only closed field/rule categories through the
+existing managed Business log boundary. These distinguish call shape, target ID,
+argument parsing, assistant-message serialization and envelope validation before
+tool dispatch. They contain no proposal IDs, arguments, reasoning or conversation
+content; observation failures do not change execution results or error codes.
+
+## Customer reuse instruction lifetime
+
+An identity-only lookup can require exactly one explicit preparation call with
+the returned customer reference. Its code-owned system instruction is removed
+by object identity once that validated continuation has been processed, including
+when fresh preparation facts refuse the proposal. Later guarded recovery reads
+must not inherit the consumed instruction to repeat the same call. Customer text,
+tool results, exact-argument admission, the single continuation budget, separate
+consent and effect/UNKNOWN guards remain unchanged. This removes contradictory
+guidance; it does not establish why a provider returned `NOT_FOUND` or prove
+real-model recovery quality or a latency improvement.
+
+The historical five-call failure had `TOOL_CALLS` telemetry and `INVALID_RESULT`
+before any tool timing or effect attempt. Its raw response was not retained, so
+the particular failing field is unknown. This change does not prove that a wrong
+proposal ID caused that failure. Native regressions, full CI and new functional
+booking/cancellation acceptance remain required. Measure provider schema adherence,
+prompt cache coverage and latency; no speedup or full model-quality result follows
+from the schema change alone.
+# Proposal refusals and spoken truth
+
+A definitive provider refusal before proposal reservation does not establish a
+proposal. Subsequent advisory reads may recover the selection, but their success
+does not change that fact. The runtime retains a turn-local refusal flag, buffers
+subsequent model prose, and replaces a final `NO_PLAN` answer with an honest
+code-owned reply. A subsequently prepared durable proposal still uses the normal
+authoritative summary and later customer consent. Existing UNKNOWN, retained
+effects, authority, deadline, permit and replay rules take precedence unchanged.
+The flag grants no authority, performs no retry, changes no arguments or request
+fingerprints, and is independent of diagnostic logging. Synthetic HTTP regressions
+cover both channels, both preparation tools, three refusal categories, ordinary
+and streamed false confirmation, and the existing successful recovery cases.
+
+# Reference provenance observations
+
+Proposal diagnostics distinguish refs returned by successful, guarded catalog
+and resource searches or SINGLE customer lookup in the same turn, refs seen
+under another entity kind, and refs not observed in that turn. Only closed
+category strings enter the managed log boundary. The
+turn-local observer retains at most 96 SHA-256 digests per kind, never raw refs;
+overflow is reported as an observation limit. Customer evidence requires a
+SINGLE lookup result. An empty or failed read supplies no evidence.
+
+These categories are not authority or freshness proofs. A ref from an earlier
+turn can be valid without appearing in the current observation set. Conversely,
+an observed ref can later fail provider validation. The observer performs no
+lookup, repair, retry, model call, reservation or effect and never participates
+in admission or confirmation. It diagnoses future occurrences; it cannot
+identify the original reference behind historical r25 NOT_FOUND.
+
+
+### Direct preparation after a concrete appointment choice
+
+The shared platform prompt now states the direct-preparation rule already used
+in the Voice presentation layer. When the service, specialist, exact time and
+customer facts are present, prepare a proposal directly. Availability search
+remains appropriate for choosing time options. Preparation still performs fresh
+facts/conflict checks; the proposal still needs consent in a later customer turn.
+No tool, schema, authority, effect, retry or request-identity behavior changes.
+
+AI121 retained text evidence used four model completions, including a separate
+advisory availability call; their measured total was 14.066 seconds. This prompt
+change is a hypothesis for removing that advisory model round. It does not fix
+historical NOT_FOUND or the separate CUSTOMER_REUSE_REQUIRED continuation.
+Fewer model calls and real task completion require post-change product QA;
+scripted native regressions prove runtime safeguards, not model selection or speed.
