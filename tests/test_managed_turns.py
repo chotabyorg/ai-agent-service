@@ -232,6 +232,44 @@ class ResponseLostTransport(httpx.AsyncBaseTransport):
 
 
 @pytest.mark.integration
+@pytest.mark.parametrize("uncertainty", ["entry", "model-after-dispatch"])
+async def test_v3_latched_handoff_preserves_business_uncertainty_and_replay(
+        api_client, db_session, monkeypatch, model, uncertainty):
+    from services.business_repository import BusinessRepository, BusinessResultGate
+    from schemas.managed_turn import OperationReference
+    _, value, request = await setup_handoff_v3(api_client, db_session, monkeypatch)
+    if uncertainty == "entry":
+        async def unresolved_gate(*_args, **_kwargs):
+            return BusinessResultGate(scope_exists=True, plan=None,
+                                      scope_unresolved=True, disposition="UNKNOWN")
+        monkeypatch.setattr(BusinessRepository, "result_gate", unresolved_gate)
+    else:
+        async def handoff_after_dispatch(self, *_args, **kwargs):
+            runtime = kwargs["runtime"]
+            runtime.tool_dispatch_attempted = True
+            runtime.collector.observe_committed([OperationReference(
+                origin="AI_AGENT_SERVICE", operation_id="retained-unknown-test", outcome="UNKNOWN")])
+            await runtime.request_handoff("BUSINESS_UNCERTAIN", None)
+        monkeypatch.setattr(llm_module.LLMService, "_execute_core", handoff_after_dispatch)
+    response = await execute_v3(api_client, value)
+    assert response.status_code == 200
+    result = response.json()
+    assert result["result_kind"] == "PLATFORM_CONTROL_REQUEST"
+    assert result["processing_outcome"] == "UNKNOWN"
+    assert result["error_code"] == "TOOL_EXECUTION_UNKNOWN"
+    assert result["draft_text"] is None
+    assert result["control_request"]["reason"] == "BUSINESS_UNCERTAIN"
+    evidence = await api_client.post(
+        "/internal/v3/managed-turns/control-evidence", json=control_evidence_body(request),
+        headers={"X-Service-Token": TOKEN})
+    assert evidence.status_code == 200
+    assert evidence.json()["processing_outcome"] == "UNKNOWN"
+    replay = await execute_v3(api_client, value)
+    assert replay.status_code == 200 and replay.json() == result
+    assert len(model.chat.completions.calls) == 0
+
+
+@pytest.mark.integration
 async def test_v3_lost_response_recovers_latched_control_and_exact_replay_skips_model(
         api_client, db_session, monkeypatch, model):
     _, value, request = await setup_handoff_v3(api_client, db_session, monkeypatch)

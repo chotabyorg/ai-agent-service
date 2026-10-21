@@ -112,13 +112,13 @@ _join_knowledge = _join_warmup
 
 def _communication(message, *, managed_v3=False, delivery_by_id=None):
     if message.actor in {"AGENT", "HUMAN"}:
-        if managed_v3 and message.actor == "HUMAN":
+        if managed_v3 and message.actor == "HUMAN" and message.direction == "OUTBOUND":
             observation = (delivery_by_id or {}).get(str(message.id))
             # The v3 request validator requires an observation for every HUMAN
             # outbound message. Keep its exact status visible beside the text;
             # never imply provider acceptance means customer receipt.
             if observation is None:
-                raise ManagedExecutionError("INVALID_REQUEST")
+                raise ManagedExecutionError("INVALID_RESULT")
             attempt = observation.delivery_attempt_id
             truth = _delivery_truth(observation.status)
             content = (
@@ -132,10 +132,10 @@ def _communication(message, *, managed_v3=False, delivery_by_id=None):
             )
             return {"role": "assistant", "content": content}
         return {"role": "assistant", "content": message.text}
-    if managed_v3 and message.actor == "SYSTEM":
+    if managed_v3 and message.actor == "SYSTEM" and message.direction == "OUTBOUND":
         observation = (delivery_by_id or {}).get(str(message.id))
         if observation is None:
-            raise ManagedExecutionError("INVALID_REQUEST")
+            raise ManagedExecutionError("INVALID_RESULT")
         attempt = observation.delivery_attempt_id
         truth = _delivery_truth(observation.status)
         text = (
@@ -338,7 +338,9 @@ async def execute_managed_owned(request, grant, runtime, db_provider, session_fa
         except ManagedAgentNotFound:
             missing = True
         except ManagedControlRequested:
-            outcome = dict(status="NO_RESPONSE", draft_text=None, error_code=None)
+            uncertain = processing_status() == "UNKNOWN"
+            outcome = dict(status="UNKNOWN" if uncertain else "NO_RESPONSE", draft_text=None,
+                           error_code="TOOL_EXECUTION_UNKNOWN" if uncertain else None)
         except asyncio.CancelledError as exc:
             cancellation = exc
         except ManagedExecutionError as exc:
@@ -359,6 +361,8 @@ async def execute_managed_owned(request, grant, runtime, db_provider, session_fa
                     if runtime.control_request is not None:
                         retained_gate = await runtime.operation(retained_repository.result_gate(request, grant))
                         collector.observe_committed(retained_gate.references)
+                        if processing_status() == "UNKNOWN":
+                            final_guard = BusinessRuntime._halt(True)
                     elif runtime.business is not None:
                         await runtime.operation(runtime.business.collect_refs())
                         retained_gate = runtime.business.last_gate

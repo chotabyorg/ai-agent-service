@@ -240,10 +240,16 @@ class LLMService:
         call = self.agent_service.deactivate_agent(
             db_session, getattr(agent, "id"), getattr(agent, "user_id"), runtime=runtime,
         )
-        if runtime:
-            await runtime.operation(call)
-        else:
-            await call
+        from services.handoff_lifecycle import HandoffLifecycleConflict, HandoffLifecycleUnavailable
+        try:
+            if runtime:
+                await runtime.operation(call)
+            else:
+                await call
+        except (HandoffLifecycleConflict, HandoffLifecycleUnavailable):
+            logger.warning("Agent %s deactivation pending: lifecycle revoke unavailable",
+                           getattr(agent, "id", "?"))
+            return
         logger.warning("Agent %s deactivated: %s", getattr(agent, "id", "?"), reason)
 
     @staticmethod
@@ -942,9 +948,13 @@ class LLMService:
                         call_ids.add(call_id)
                         try:
                             arguments = parse_managed_tool_arguments(function.arguments)
-                            feedback = PreparationSchema(schema_by_name[name]).feedback(arguments)
-                        except ManagedExecutionError:
+                        except ManagedExecutionError as exc:
+                            if (exc.code == "TOOL_SETUP_FAILED" and name in PREPARATION_TOOLS
+                                    and len(calls) == 1):
+                                continue
                             raise ManagedExecutionError("INVALID_RESULT") from None
+                        try:
+                            feedback = PreparationSchema(schema_by_name[name]).feedback(arguments)
                         except Exception:
                             raise ManagedExecutionError("TOOL_SETUP_FAILED") from None
                         if feedback is not None and (name not in PREPARATION_TOOLS or len(calls) != 1):

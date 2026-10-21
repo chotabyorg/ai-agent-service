@@ -14,6 +14,7 @@ from services.credentials_cipher import decrypt_credentials, encrypt_credentials
 from services.prompt_builder import PromptBuilder
 from services.handoff_lifecycle import (
     HandoffLifecycleConflict,
+    HandoffLifecycleUnavailable,
     transition_agent_lifecycle,
     activate_agent,
 )
@@ -283,8 +284,16 @@ class AgentService:
             AgentTemplate.is_active.is_(True),
         ))).all())
         count = 0
+        failure = None
         for agent_id in agent_ids:
-            agent = await self.deactivate_agent(session, agent_id, user_id)
+            try:
+                agent = await self.deactivate_agent(session, agent_id, user_id)
+            except (HandoffLifecycleConflict, HandoffLifecycleUnavailable) as exc:
+                await session.rollback()
+                failure = failure or exc
+                continue
             if agent is not None:
                 count += 1
+        if failure is not None:
+            raise failure
         return count

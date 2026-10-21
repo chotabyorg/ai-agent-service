@@ -182,7 +182,7 @@ class Settings(BaseSettings):
         from core.managed_security import parse_handoff_scopes, valid_token
 
         raw_scopes = self.handoff_ai_enrolled_scopes.get_secret_value()
-        token = self.handoff_lifecycle_token.get_secret_value().strip()
+        token = self.handoff_lifecycle_token.get_secret_value()
         url = self.handoff_conversation_url
         try:
             scopes = parse_handoff_scopes(raw_scopes, self.managed_principals)

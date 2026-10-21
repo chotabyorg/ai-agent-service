@@ -28,8 +28,9 @@ RUNTIME = AI_ROOT / "tests/handoff_telegram_e2e/runtime_bootstrap.py"
 
 
 def _private_json(path: Path, value: dict) -> None:
-    path.write_text(json.dumps(value, ensure_ascii=False))
-    path.chmod(0o600)
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+        json.dump(value, handle, ensure_ascii=False)
 
 
 def _process_env(python: Path, pg_bin: Path) -> dict[str, str]:
@@ -281,8 +282,8 @@ def _spawn(base, name: str, kind: str, python: str, root: Path,
     env.update(base.envs.get(inherited, {}))
     env["HANDOFF_E2E_RUNTIME_CONFIG"] = str(runtime_config)
     log_path = base.root / f"handoff-{name}.log"
-    handle = log_path.open("wb")
-    os.chmod(log_path, 0o600)
+    descriptor = os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    handle = os.fdopen(descriptor, "wb")
     base.handles[name] = handle
     listener = base.listeners[name]
     base.processes[name] = subprocess.Popen(

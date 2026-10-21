@@ -23,6 +23,59 @@ LIFECYCLE_TOKEN = "handoff-lifecycle-test-token-0123456789"
 MANAGED_TOKEN = "managed-conversation-test-token-0123456789"
 
 
+@pytest.mark.parametrize("token", [" " + LIFECYCLE_TOKEN, LIFECYCLE_TOKEN + "\n"])
+def test_handoff_token_is_validated_exactly_as_sent(token):
+    settings = get_settings().model_copy(update={
+        "handoff_lifecycle_token": type(get_settings().handoff_lifecycle_token)(token),
+        "handoff_conversation_url": "http://conversation.invalid",
+    })
+    with pytest.raises(RuntimeError, match="Handoff lifecycle"):
+        settings.validate_handoff_lifecycle()
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("failure_type", [HandoffLifecycleConflict, HandoffLifecycleUnavailable])
+async def test_bulk_deactivation_attempts_every_agent_before_reporting_lifecycle_failure(
+        db_session, monkeypatch, failure_type):
+    account_id = uuid4()
+    ids = [uuid4() for _ in range(3)]
+    async with db_session() as session:
+        session.add_all([AgentTemplate(id=agent_id, user_id=account_id, name="bulk lifecycle",
+                                      is_active=True) for agent_id in ids])
+        await session.commit()
+    service = AgentService()
+    original = service.deactivate_agent
+    called = []
+
+    async def deactivate(session, agent_id, owner_id):
+        called.append(agent_id)
+        if len(called) == 1:
+            raise failure_type()
+        return await original(session, agent_id, owner_id)
+
+    monkeypatch.setattr(service, "deactivate_agent", deactivate)
+    async with db_session() as session:
+        with pytest.raises(failure_type):
+            await service.deactivate_all_agents(session, account_id)
+    assert set(called) == set(ids) and len(called) == 3
+    async with db_session() as session:
+        agents = [await session.get(AgentTemplate, agent_id) for agent_id in called]
+        assert agents[0].is_active
+        assert all(not agent.is_active for agent in agents[1:])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure_type", [HandoffLifecycleConflict, HandoffLifecycleUnavailable])
+async def test_key_error_deactivation_keeps_the_original_error_path(monkeypatch, failure_type):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+    from services.llm_service import LLMService
+    service = LLMService()
+    monkeypatch.setattr(service.agent_service, "deactivate_agent", AsyncMock(side_effect=failure_type()))
+    await service._deactivate_agent(SimpleNamespace(id=uuid4(), user_id=uuid4()), None, "key failed")
+    assert service.agent_service.deactivate_agent.await_count == 1
+
+
 def configure_handoff(monkeypatch, scope, agent_owner_id):
     settings = get_settings()
     principal = dict(
@@ -638,8 +691,8 @@ async def test_key_delete_retry_does_not_succeed_after_plain_deactivate_then_rea
 
     # A retry starts a new transition for the now-current generation and only
     # reports success after that generation is revoked and the key is cleared.
-    async def successful_revoke(*_args, **_kwargs):
-        revokes.append((3, 4))
+    async def successful_revoke(scopes, source_generation, target_generation, runtime=None):
+        revokes.append((source_generation, target_generation))
 
     monkeypatch.setattr(handoff_lifecycle, "_revoke_all", successful_revoke)
     retry = await api_client.delete(
@@ -647,7 +700,7 @@ async def test_key_delete_retry_does_not_succeed_after_plain_deactivate_then_rea
         headers={"x-user-id": str(account_id)},
     )
     assert retry.status_code == 204
-    assert revokes[-1] == (3, 4)
+    assert revokes == [(1, 2), (1, 2), (3, 4)]
     final_proof = await api_client.post(
         "/internal/v1/handoff/agent-proof", json=proof_body,
         headers={"X-Service-Token": LIFECYCLE_TOKEN},

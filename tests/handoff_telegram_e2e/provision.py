@@ -16,8 +16,9 @@ AI_ROOT = Path(__file__).resolve().parents[2]
 
 def _private_json(path: Path, value: dict) -> None:
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    path.write_text(json.dumps(value, ensure_ascii=False))
-    path.chmod(0o600)
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+        json.dump(value, handle, ensure_ascii=False)
 
 
 def _admin_input(path: Path) -> dict:
@@ -129,8 +130,8 @@ def drop(args) -> None:
             raise ValueError("Unexpected disposable database identity")
         if not re.fullmatch(rf"hte2e_{kind}_[a-f0-9]{{12}}", value["role"]):
             raise ValueError("Unexpected disposable role identity")
-        _psql(admin, pg_bin, f"DROP DATABASE {value['database']};\n"
-              f"DROP ROLE {value['role']};\n")
+        _psql(admin, pg_bin, f"DROP DATABASE IF EXISTS {value['database']};\n"
+              f"DROP ROLE IF EXISTS {value['role']};\n")
     path.unlink()
     print("Removed only this Handoff E2E disposable database family.")
 

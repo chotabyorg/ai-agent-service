@@ -71,6 +71,29 @@ def test_v3_roundtrip_keeps_exact_closed_conversation_wire_profile():
             ManagedTurnV3Request.model_validate({**value, name: supplied})
 
 
+@pytest.mark.parametrize("actor", ["HUMAN", "SYSTEM"])
+def test_inbound_platform_history_needs_no_delivery_observation(actor):
+    from schemas.managed_turn_v3 import ManagedMessageV3
+    from services.managed_turn_service import _communication
+    message = ManagedMessageV3(id=uuid4(), sequence=1, actor=actor, direction="INBOUND",
+                               content_type="TEXT", text="retained inbound event")
+    projected = _communication(message, managed_v3=True, delivery_by_id={})
+    assert message.text in projected["content"]
+    assert "delivery_status=" not in projected["content"]
+
+
+@pytest.mark.parametrize("actor", ["HUMAN", "SYSTEM"])
+def test_missing_outbound_delivery_observation_uses_closed_error_code(actor):
+    from schemas.managed_turn_v3 import ManagedMessageV3
+    from services.managed_turn_service import _communication
+    from services.managed_tools import ManagedExecutionError
+    message = ManagedMessageV3(id=uuid4(), sequence=1, actor=actor, direction="OUTBOUND",
+                               content_type="TEXT", text="outbound event")
+    with pytest.raises(ManagedExecutionError) as failure:
+        _communication(message, managed_v3=True, delivery_by_id={})
+    assert failure.value.code == "INVALID_RESULT"
+
+
 def test_v3_outbound_human_and_system_messages_require_one_latest_delivery_fact():
     message_id = str(UUID(int=5))
     for actor in ("HUMAN", "SYSTEM"):
