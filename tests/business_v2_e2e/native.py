@@ -288,7 +288,7 @@ def main():
                     assert client_number <= 254
                     self.website_sessions[thread] = await self.request("cs", "POST",
                         "/internal/v1/website/sessions", identity | dict(binding_generation=1,
-                            client_ip=f"192.0.2.{client_number}"), headers)
+                            client_ip=f"192.0.2.{client_number}"), headers, expected=201)
                 credential = self.website_sessions[thread]
                 body = identity | dict(binding_generation=1, session_id=credential["session_id"],
                     session_token=credential["session_token"], message_id=str(uuid4()), text=message)
