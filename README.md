@@ -158,7 +158,7 @@ python mcp_clients/servers/google_workspace/server.py
 
 ## Основной флоу `/v1/chat/completions`
 
-The chat endpoint keeps its existing JSON request and response. Trusted callers send `X-Service-Token` from the dedicated `CHAT_S2S_TOKEN` and the agent owner in `X-User-Id`; agent lookup is scoped by that owner before a session is created or an LLM/tool call begins. `CHAT_S2S_AUTH_REQUIRED=false` supports rolling out the headers to callers. Production must set it to `true` after the token is installed in KrakenD and every chat caller. This token is separate from `INTERNAL_API_TOKEN`, which continues to protect `/internal/v1/*` endpoints.
+The chat endpoint keeps its existing JSON request and response. Trusted callers send `X-Service-Token` from the dedicated `CHAT_S2S_TOKEN` and the agent owner in `X-User-Id`; agent lookup is scoped by that owner before a session is created or an LLM/tool call begins. `CHAT_S2S_AUTH_REQUIRED=false` supports rolling out the headers to callers. Production must set it to `true` after the token is installed in KrakenD and every chat caller. This token is separate from `INTERNAL_API_TOKEN` for internal management, and from the purpose-scoped ownership and managed execution credentials.
 
 1. Найти агента по `agent_id`.
 2. Проверить, что агент активен.
@@ -243,7 +243,9 @@ dedicated credentials before any scope is explicitly enrolled.
 | `MCP_SERVER_PATH` | `mcp_service/mcp_server.py` | Резервный путь для custom MCP server |
 | `MCP_BITRIX_PATH` | `mcp_clients/servers/bitrix_server.py` | Локальный путь к Bitrix MCP server |
 | `MCP_GOOGLE_PATH` | `mcp_service/google_server.py` | Резервный путь для Google MCP server |
-| `INTERNAL_API_TOKEN` | `""` | Токен для service-to-service вызовов `/internal/*` эндпоинтов. Проверяется через заголовок `X-Service-Token`. Пустое значение отключает доступ (fail-closed). |
+| `INTERNAL_API_TOKEN` | `""` | Legacy management token for count/deactivate-all; accepted by ownership-check only while its strict flag is false. Empty fails closed. |
+| `INTERNAL_AI_AUTH_PRINCIPALS` | `""` | Secret receiver registry for ownership-check principals, exact pair grants and current/previous credentials; see [P1a contract](docs/internal-ownership-auth.md). |
+| `INTERNAL_OWNERSHIP_AUTH_REQUIRED` | `false` | Receiver-first compatibility; true removes legacy management token from ownership-check and requires an active ownership principal. Do not enable before caller migration. |
 | `CHAT_S2S_TOKEN` | `""` | Separate credential for `/v1/chat/completions` callers; do not reuse `INTERNAL_API_TOKEN`. |
 | `CHAT_S2S_AUTH_REQUIRED` | `false` | Compatibility switch; set to `true` only after KrakenD and all chat callers have the dedicated token and owner header. |
 | `HANDOFF_AI_ENROLLED_SCOPES` | `[]` | Exact private Telegram Handoff cohort; empty keeps enrollment dark. |
@@ -592,7 +594,7 @@ Attempt rejection preserves UNKNOWN. Ordinary model prose cannot override a
 pending/incomplete/failed/uncertain selected plan or an earlier same-scope unknown
 operation; the final retained-scope observation preserves only this Turn's refs.
 
-Существующие legacy-эндпоинты под префиксом `/internal/v1`, кроме отдельно описанных managed-turns, предназначены для вызовов из других внутренних сервисов (например, `subscription-service` и `control-plane-service`) и **не проходят через API Gateway**. Каждый такой запрос должен содержать заголовок `X-Service-Token` со значением, равным `INTERNAL_API_TOKEN`. Сравнение выполняется через `secrets.compare_digest` для защиты от timing-атак. Если `INTERNAL_API_TOKEN` не задан на сервере — запрос отклоняется (fail-closed).
+Internal agent endpoints **не проходят через API Gateway** и требуют ровно один `X-Service-Token`. Count/deactivate-all используют существующий `INTERNAL_API_TOKEN` (пустой — fail-closed). Ownership-check дополнительно принимает отдельные receiver-authenticated principals с purpose `agent-ownership-check`, точными owner/agent grants или явным multi-tenant lookup scope и не более двух версий credential. В переходном режиме legacy token продолжает работать; `INTERNAL_OWNERSHIP_AUTH_REQUIRED=true` отключает его только для ownership-check. Узкий credential не разрешает count/deactivate-all. Полный [P1a контракт и prerequisites для P1b](docs/internal-ownership-auth.md) описывает формат, ротацию, отзыв и сохраняющийся риск legacy token. Отдельный managed контракт выше остаётся без изменений.
 
 - `GET /internal/v1/agents/count?user_id=<uuid>` — вернуть количество агентов пользователя.
   - Response `200`: `{ "total": int, "active": int }` — `total` считает всех агентов пользователя, `active` — только тех, у кого `is_active = true`.
@@ -601,7 +603,7 @@ operation; the final retained-scope observation preserves only this Turn's refs.
 - `POST /internal/v1/agents/ownership-check` — проверить пару владельца и агента по JSON-телу `{ "agent_id": "<uuid>", "owner_id": "<uuid>" }`.
   - Response `204` — агент принадлежит указанному владельцу; тело ответа пустое.
   - `404` — агент не существует или принадлежит другому владельцу; оба случая имеют одинаковый ответ.
-  - `401` — если заголовок `X-Service-Token` отсутствует или не совпадает.
+  - `401` — missing, malformed, ambiguous, revoked or wrong-purpose credential; strict mode also rejects the legacy management token.
   - `422` — если `agent_id` или `owner_id` не UUID.
 - `POST /internal/v1/agents/deactivate-all` — массово деактивировать всех агентов пользователя.
   - Request body: `{ "user_id": "<uuid>" }`.

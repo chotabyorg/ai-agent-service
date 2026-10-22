@@ -87,6 +87,8 @@ class Settings(BaseSettings):
                                                        allow_inf_nan=False)
 
     # Optional and fail-closed. No production registration is created by this code.
+    internal_ai_auth_principals: SecretStr = Field(default="", repr=False)
+    internal_ownership_auth_required: bool = False
     managed_ai_auth_principals: SecretStr = Field(default="", repr=False)
     managed_ai_execution_seconds: float = Field(default=90.0, ge=1, le=240, allow_inf_nan=False)
     managed_ai_context_bytes: int = Field(default=131072, ge=1024, le=1048576)
@@ -102,6 +104,7 @@ class Settings(BaseSettings):
     managed_completion_adapter: CompletionAdapterProfile | None = None
     managed_completion_api_key: SecretStr = SecretStr("")
     _managed_principals: tuple = PrivateAttr(default=())
+    _ownership_principals: tuple = PrivateAttr(default=())
     _handoff_scopes: tuple = PrivateAttr(default=())
 
     @model_validator(mode="after")
@@ -139,16 +142,39 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_managed_registry(self) -> "Settings":
-        from core.managed_security import parse_principals
+        from core.managed_security import parse_ownership_principals, parse_principals
 
         try:
-            self._managed_principals = parse_principals(
+            other_tokens = (
+                self.chat_s2s_token.get_secret_value(),
+                self.internal_api_token,
+            )
+            managed_principals = parse_principals(
                 self.managed_ai_auth_principals.get_secret_value(),
-                (self.chat_s2s_token.get_secret_value(), self.internal_api_token),
+                other_tokens,
+            )
+        except ValueError:
+            # Keep the existing managed-registry startup contract unchanged.
+            raise RuntimeError("Invalid managed AI authentication configuration") from None
+        managed_tokens = tuple(
+            principal.token.get_secret_value() for principal in managed_principals
+        )
+        try:
+            ownership_principals = parse_ownership_principals(
+                self.internal_ai_auth_principals.get_secret_value(),
+                (*other_tokens, *managed_tokens),
             )
         except ValueError:
             # RuntimeError avoids Pydantic's startup rendering of rejected env input.
-            raise RuntimeError("Invalid managed AI authentication configuration") from None
+            raise RuntimeError("Invalid internal ownership authentication configuration") from None
+        if self.internal_ownership_auth_required and not any(
+            not principal.revoked
+            and any(not credential.revoked for credential in principal.credentials())
+            for principal in ownership_principals
+        ):
+            raise RuntimeError("Invalid internal ownership authentication configuration") from None
+        self._managed_principals = managed_principals
+        self._ownership_principals = ownership_principals
         return self
 
     @model_validator(mode="after")
@@ -172,6 +198,11 @@ class Settings(BaseSettings):
             valid_url = False
         other_tokens = {self.internal_api_token, self.chat_s2s_token.get_secret_value()}
         other_tokens.update(principal.token.get_secret_value() for principal in self.managed_principals)
+        other_tokens.update(
+            credential.token.get_secret_value()
+            for principal in self.ownership_principals
+            for credential in principal.credentials()
+        )
         if (not valid_url or url != url.strip() or not valid_token(token)
                 or token in other_tokens):
             raise RuntimeError("Invalid Business Conversation authority configuration")
@@ -198,6 +229,11 @@ class Settings(BaseSettings):
             other_tokens = {self.internal_api_token, self.chat_s2s_token.get_secret_value(),
                             self.business_conversation_token.get_secret_value()}
             other_tokens.update(principal.token.get_secret_value() for principal in self.managed_principals)
+            other_tokens.update(
+                credential.token.get_secret_value()
+                for principal in self.ownership_principals
+                for credential in principal.credentials()
+            )
             if (bool(url) != bool(token) or (scopes and not (url and token))
                     or (url and (not valid_url or url != url.strip()))
                     or (token and (not valid_token(token) or token in other_tokens))):
@@ -212,6 +248,10 @@ class Settings(BaseSettings):
         return self._managed_principals
 
     @property
+    def ownership_principals(self) -> tuple:
+        return self._ownership_principals
+
+    @property
     def handoff_scopes(self) -> tuple:
         return self._handoff_scopes
 
@@ -220,9 +260,9 @@ class Settings(BaseSettings):
         """Fail startup if strict chat auth is enabled without its credential."""
         token = self.chat_s2s_token.get_secret_value().strip()
         if self.chat_s2s_auth_required and not token:
-            raise ValueError(
+            raise RuntimeError(
                 "CHAT_S2S_TOKEN must be configured when CHAT_S2S_AUTH_REQUIRED is enabled"
-            )
+            ) from None
         return self
 
     knowledge_base_enabled: bool = Field(default=False)

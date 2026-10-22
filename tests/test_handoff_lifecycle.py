@@ -747,3 +747,26 @@ async def test_activation_refreshes_agent_preloaded_before_key_removal(
         assert stale_agent.encrypted_openrouter_key is None
         assert stale_agent.is_active is False
         assert stale_agent.handoff_lifecycle_generation == 0
+
+
+@pytest.mark.parametrize("version", ["current", "previous"])
+def test_handoff_lifecycle_rejects_ownership_credential_reuse(version):
+    from pydantic import SecretStr
+    from core.managed_security import OwnershipPrincipal
+
+    current = "ownership-current-synthetic-token-0123456789"
+    previous = "ownership-previous-synthetic-token-0123456789"
+    principal = OwnershipPrincipal.model_validate(dict(
+        principal_id="handoff-isolation", caller="control-plane-service",
+        purpose="agent-ownership-check",
+        current=dict(version="v2", token=current),
+        previous=dict(version="v1", token=previous),
+    ))
+    settings = get_settings().model_copy(update={
+        "handoff_lifecycle_token": SecretStr(current if version == "current" else previous),
+        "handoff_conversation_url": "http://conversation.invalid",
+    })
+    # Private attributes are set directly, as in the production parsed registry.
+    settings._ownership_principals = (principal,)
+    with pytest.raises(RuntimeError, match="Handoff lifecycle"):
+        settings.validate_handoff_lifecycle()

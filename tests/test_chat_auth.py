@@ -3,14 +3,14 @@ from uuid import uuid4
 
 import pytest
 from fastapi import HTTPException
-from pydantic import SecretStr, ValidationError
+from pydantic import SecretStr
 
 import api.v1.chat as chat_route
 from core.config import Settings
 
 
 def test_strict_chat_auth_rejects_empty_token_without_exposing_it() -> None:
-    with pytest.raises(ValidationError) as exc_info:
+    with pytest.raises(RuntimeError) as exc_info:
         Settings(
             _env_file=None,
             chat_s2s_auth_required=True,
