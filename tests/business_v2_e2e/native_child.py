@@ -31,7 +31,13 @@ elif sys.argv[1] == "worker":
         database = Database(settings.database_url.get_secret_value())
         kind = TelegramWorker if config["channel"] == "TELEGRAM" else WebsiteWorker
         try:
-            progressed = await kind(database, settings, ManagedAIClient(settings)).run_once()
+            worker = kind(database, settings, ManagedAIClient(settings))
+            deadline = asyncio.get_running_loop().time() + 5
+            while True:
+                progressed = await worker.run_once()
+                if progressed or asyncio.get_running_loop().time() >= deadline:
+                    break
+                await asyncio.sleep(0.05)
             assert progressed, "NATIVE_WORKER_NO_PROGRESS"
         finally:
             await database.dispose()

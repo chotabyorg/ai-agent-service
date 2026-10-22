@@ -108,12 +108,19 @@ per input. It verifies retained managed contract version2 and never fabricates
 admission, Turn ownership, permits or delivery evidence. No Telegram API or hosted
 Widget is called; customer-facing delivery remains outside this Business matrix.
 
-`--managed-contract 3 --channel TELEGRAM` runs the same CRM matrix through the
+`--managed-contract 3 --channel TELEGRAM` or `--channel WEBSITE_WIDGET` runs the same CRM matrix through the
 enrolled v3 path. Enrollment uses a scope-checked synthetic Control Plane identity
 proof, the actual AI lifecycle proof and the actual Conversation grant API. It
 does not insert grants, Turns, permits or effects into application tables. The
-private configuration holds a generated fixture lifecycle token. Website v3 is
-rejected before starting resources until its channel contract is implemented.
+private configuration holds a generated fixture lifecycle token. Website v3
+requires the common provisioning implementation and its explicit cohort,
+capability binding and settling policy. Every synthetic visitor obtains a real
+server-issued session credential; admission uses that exact credential through
+the private Website port. There is no seeded grant or old-UUID promotion. The
+worker waits at most five seconds for due input and stops after one progress
+result. Separate synthetic client IPs identify distinct visitor fixtures under
+the real creation quotas. These are private loopback calls, not public Gateway,
+TLS, browser writer or live channel acceptance.
 This option checks Business parity; the separate four-service Handoff matrix
 checks real Control Plane enrollment, human control and Telegram transport.
 

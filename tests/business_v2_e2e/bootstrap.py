@@ -186,7 +186,7 @@ def model_app():
             # channel admission, Turn execution, permits and CRM effects stay real.
             body = await request.json()
             expected = dict(contract_version=1, owner_id=CONFIG['owner_id'],
-                integration_id=CONFIG['integration'], channel='TELEGRAM',
+                integration_id=CONFIG['integration'], channel=CONFIG.get('channel', 'TELEGRAM'),
                 agent_id=CONFIG['agent'], expected_binding_generation=1)
             if (request.headers.get('X-Inbox-Lifecycle-Token') != CONFIG['cp_lifecycle_token']
                     or set(body) != set(expected) | {'command_id'}
