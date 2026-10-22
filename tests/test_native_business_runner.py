@@ -83,8 +83,11 @@ def test_optimized_controller_is_rejected_before_setup():
 
 def test_python_launcher_keeps_real_venv_packages(tmp_path, monkeypatch):
     environment = tmp_path / "isolated-venv"
-    venv.EnvBuilder(with_pip=False).create(environment)
+    venv.EnvBuilder(with_pip=False, symlinks=sys.platform == "linux").create(environment)
     launcher = environment / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+    if sys.platform == "linux":
+        assert launcher.is_symlink()
+        assert not launcher.resolve().is_relative_to(environment.resolve())
     probe = subprocess.run([str(launcher), "-I", "-c",
         "import json,sys,sysconfig; print(json.dumps([sys.prefix,sysconfig.get_path('purelib')]))"],
         check=True, capture_output=True, text=True, timeout=20)
