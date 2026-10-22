@@ -89,6 +89,9 @@ class Settings(BaseSettings):
     # Optional and fail-closed. No production registration is created by this code.
     internal_ai_auth_principals: SecretStr = Field(default="", repr=False)
     internal_ownership_auth_required: bool = False
+    gateway_ai_auth_principals: SecretStr = Field(default="", repr=False)
+    # Explicit receiver-first transition; required is a separate rollout gate.
+    gateway_owner_auth_mode: str = "legacy"
     managed_ai_auth_principals: SecretStr = Field(default="", repr=False)
     managed_ai_execution_seconds: float = Field(default=90.0, ge=1, le=240, allow_inf_nan=False)
     managed_ai_context_bytes: int = Field(default=131072, ge=1024, le=1048576)
@@ -105,6 +108,7 @@ class Settings(BaseSettings):
     managed_completion_api_key: SecretStr = SecretStr("")
     _managed_principals: tuple = PrivateAttr(default=())
     _ownership_principals: tuple = PrivateAttr(default=())
+    _gateway_principals: tuple = PrivateAttr(default=())
     _handoff_scopes: tuple = PrivateAttr(default=())
 
     @model_validator(mode="after")
@@ -254,6 +258,41 @@ class Settings(BaseSettings):
     @property
     def handoff_scopes(self) -> tuple:
         return self._handoff_scopes
+
+    @model_validator(mode="after")
+    def validate_gateway_registry(self) -> "Settings":
+        from core.managed_security import parse_gateway_principals
+
+        if self.gateway_owner_auth_mode not in {"legacy", "required"}:
+            raise RuntimeError("Invalid gateway owner authentication configuration")
+        other_tokens = (
+            self.internal_api_token,
+            self.chat_s2s_token.get_secret_value(),
+            self.business_conversation_token.get_secret_value(),
+            self.handoff_lifecycle_token.get_secret_value(),
+            *(principal.token.get_secret_value() for principal in self.managed_principals),
+            *(credential.token.get_secret_value()
+              for principal in self.ownership_principals
+              for credential in principal.credentials()),
+        )
+        try:
+            principals = parse_gateway_principals(
+                self.gateway_ai_auth_principals.get_secret_value(), other_tokens,
+            )
+        except ValueError:
+            raise RuntimeError("Invalid gateway owner authentication configuration") from None
+        if self.gateway_owner_auth_mode == "required" and not any(
+            not principal.revoked
+            and any(not credential.revoked for credential in principal.credentials())
+            for principal in principals
+        ):
+            raise RuntimeError("Invalid gateway owner authentication configuration")
+        self._gateway_principals = principals
+        return self
+
+    @property
+    def gateway_principals(self) -> tuple:
+        return self._gateway_principals
 
     @model_validator(mode="after")
     def require_chat_s2s_token_when_auth_is_strict(self) -> "Settings":

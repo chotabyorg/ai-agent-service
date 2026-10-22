@@ -21,6 +21,10 @@ the existing WRITE_SAFE or WRITE_CONFIRM policy without a blanket extra confirma
 ## Что умеет сервис
 
 - CRUD для конфигураций AI-агентов.
+- Optional gateway workload admission for owner APIs; receiver-first transition
+  and strict rollout prerequisites: [P1c contract](docs/gateway-owner-auth.md).
+  [Validation results](docs/gateway-owner-validation.md) retain the baseline and
+  candidate suite failures and the independent security review.
 - Хранение tenant-specific credentials для внешних инструментов.
 - Память диалогов по `session_id` в Redis.
 - Обработка чата через `/v1/chat/completions`.
@@ -246,6 +250,8 @@ dedicated credentials before any scope is explicitly enrolled.
 | `INTERNAL_API_TOKEN` | `""` | Legacy management token for count/deactivate-all; accepted by ownership-check only while its strict flag is false. Empty fails closed. |
 | `INTERNAL_AI_AUTH_PRINCIPALS` | `""` | Secret receiver registry for ownership-check principals, exact pair grants and current/previous credentials; see [P1a contract](docs/internal-ownership-auth.md). |
 | `INTERNAL_OWNERSHIP_AUTH_REQUIRED` | `false` | Receiver-first compatibility; true removes legacy management token from ownership-check and requires an active ownership principal. Do not enable before caller migration. |
+| `GATEWAY_AI_AUTH_PRINCIPALS` | `""` | Secret per-receiver gateway principals with current/previous credentials. Fixed caller `chota-gateway`, purpose `gateway-owner-api`, audience `ai-agent-service`; see [P1c contract](docs/gateway-owner-auth.md). |
+| `GATEWAY_OWNER_AUTH_MODE` | `legacy` | `legacy` preserves header-only admission only when `X-Gateway-Token` is absent. `required` requires a gateway credential before any owner DB dependency. Present invalid/revoked tokens always fail. Separate rollout required. |
 | `CHAT_S2S_TOKEN` | `""` | Separate credential for `/v1/chat/completions` callers; do not reuse `INTERNAL_API_TOKEN`. |
 | `CHAT_S2S_AUTH_REQUIRED` | `false` | Compatibility switch; set to `true` only after KrakenD and all chat callers have the dedicated token and owner header. |
 | `HANDOFF_AI_ENROLLED_SCOPES` | `[]` | Exact private Telegram Handoff cohort; empty keeps enrollment dark. |
