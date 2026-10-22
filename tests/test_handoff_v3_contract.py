@@ -12,6 +12,7 @@ from schemas.handoff import (
 )
 from schemas.managed_turn import ManagedTurnRequest
 from schemas.managed_turn_v3 import (
+    ControlEvidenceRequest,
     DeliveryObservationFact,
     ManagedTurnV3Request,
 )
@@ -192,3 +193,32 @@ def test_lifecycle_uuid_is_canonical_and_ack_boolean_is_strict():
     assert AgentRevokeAcknowledgement.model_validate(ack_body).active is False
     with pytest.raises(ValidationError):
         AgentRevokeAcknowledgement.model_validate({**ack_body, "active": 0})
+
+
+@pytest.mark.parametrize("channel", ["TELEGRAM", "WEBSITE_WIDGET"])
+def test_text_channels_use_one_v3_identity_and_control_evidence_contract(channel):
+    request = ManagedTurnV3Request.model_validate(v3_payload(channel=channel))
+    fingerprint = managed_v3_request_fingerprint(request)
+    other = request.model_copy(update={"channel": (
+        "WEBSITE_WIDGET" if channel == "TELEGRAM" else "TELEGRAM")})
+    assert fingerprint != managed_v3_request_fingerprint(other)
+    proof = ControlEvidenceRequest(
+        contract_version=3, owner_id=request.owner_id, integration_id=request.integration_id,
+        channel=channel, agent_id=request.agent_id, conversation_id=request.conversation_id,
+        turn_id=request.turn_id, input_revision=request.input_revision,
+        authority_revision=request.authority_revision,
+        input_first_sequence=request.input_first_sequence,
+        input_last_sequence=request.input_last_sequence,
+        context_last_sequence=request.context_last_sequence,
+        request_fingerprint=fingerprint, original_dispatch_id=uuid4(),
+    )
+    assert proof.channel == channel
+    assert AgentProofRequest(contract_version=1, owner_id=request.owner_id,
+        integration_id=request.integration_id, channel=channel, agent_id=request.agent_id)
+
+
+@pytest.mark.parametrize("channel", ["VOICE", "INSTAGRAM", "WHATSAPP"])
+def test_unimplemented_channels_cannot_join_text_handoff_lifecycle(channel):
+    with pytest.raises(ValidationError):
+        AgentProofRequest(contract_version=1, owner_id="opaque-owner",
+                          integration_id=uuid4(), channel=channel, agent_id=uuid4())

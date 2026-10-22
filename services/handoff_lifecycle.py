@@ -1,4 +1,4 @@
-"""Fail-closed AI lifecycle supplier for explicitly enrolled Telegram scopes."""
+"""Fail-closed common AI lifecycle supplier for explicitly enrolled text scopes."""
 
 import hashlib
 import json
@@ -91,7 +91,8 @@ def _validated_scope_snapshot(raw, agent_id: UUID) -> list[dict]:
             for key in ("integration_id", "agent_id", "agent_owner_id"):
                 if not isinstance(value[key], str) or str(UUID(value[key])) != value[key]:
                     raise ValueError
-            if (value["channel"] != "TELEGRAM" or value["agent_id"] != str(agent_id)
+            if (value["channel"] not in {"TELEGRAM", "WEBSITE_WIDGET"}
+                    or value["agent_id"] != str(agent_id)
                     or not isinstance(value["owner_id"], str) or not value["owner_id"]):
                 raise ValueError
             key = (value["owner_id"], value["integration_id"], value["channel"], value["agent_id"])

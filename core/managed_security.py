@@ -79,7 +79,7 @@ def parse_principals(raw: str, other_tokens: tuple[str, ...]) -> tuple[ManagedPr
 
 
 def parse_handoff_scopes(raw: str, principals: tuple[ManagedPrincipal, ...]) -> tuple:
-    """Accept only explicit Telegram scopes backed by a trusted managed grant."""
+    """Accept explicit text Handoff scopes backed by an exact trusted managed grant."""
     if not raw:
         return ()
     try:

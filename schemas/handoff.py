@@ -1,4 +1,4 @@
-"""Strict internal contracts for AI-owned Telegram lifecycle participation."""
+"""Strict internal contracts for the common text-channel lifecycle supplier."""
 
 from typing import Annotated, Literal
 
@@ -11,12 +11,13 @@ Generation = Annotated[StrictInt, Field(ge=0, le=9223372036854775807)]
 TargetGeneration = Annotated[StrictInt, Field(ge=1, le=9223372036854775807)]
 Digest = Annotated[str, Field(strict=True, pattern=r"^[0-9a-f]{64}$")]
 ContractVersion1 = Annotated[StrictInt, Field(ge=1, le=1)]
+HandoffChannel = Literal["TELEGRAM", "WEBSITE_WIDGET"]
 
 
 class HandoffScope(ManagedValue):
     owner_id: str
     integration_id: CanonicalUUID
-    channel: Literal["TELEGRAM"]
+    channel: HandoffChannel
     agent_id: CanonicalUUID
 
     _owner = field_validator("owner_id")(validate_owner)
@@ -58,7 +59,7 @@ class AgentRevokeAcknowledgement(ManagedValue):
     command_id: CanonicalUUID
     owner_id: str
     integration_id: CanonicalUUID
-    channel: Literal["TELEGRAM"]
+    channel: HandoffChannel
     agent_id: CanonicalUUID
     agent_owner_id: CanonicalUUID
     source_agent_lifecycle_generation: Generation

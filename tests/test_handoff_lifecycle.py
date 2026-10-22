@@ -152,11 +152,12 @@ class FakeConversationClient:
 
 
 @pytest.mark.integration
+@pytest.mark.parametrize("channel", ["TELEGRAM", "WEBSITE_WIDGET"])
 async def test_proof_records_scope_and_config_removal_cannot_skip_revoke(
-        api_client, db_session, monkeypatch):
+        api_client, db_session, monkeypatch, channel):
     account_id = uuid4()
     scope = HandoffScope(owner_id="opaque-telegram-owner", integration_id=uuid4(),
-                         channel="TELEGRAM", agent_id=uuid4())
+                         channel=channel, agent_id=uuid4())
     configure_handoff(monkeypatch, scope, account_id)
     FakeConversationClient.calls = []
     async with db_session() as session:
@@ -197,7 +198,7 @@ async def test_proof_records_scope_and_config_removal_cannot_skip_revoke(
         assert agent.handoff_lifecycle_scope_snapshot == [{
             "owner_id": scope.owner_id,
             "integration_id": str(scope.integration_id),
-            "channel": "TELEGRAM",
+            "channel": scope.channel,
             "agent_id": str(scope.agent_id),
             "agent_owner_id": str(account_id),
         }]
@@ -233,12 +234,13 @@ async def test_proof_records_scope_and_config_removal_cannot_skip_revoke(
 
 
 @pytest.mark.integration
+@pytest.mark.parametrize("channel", ["TELEGRAM", "WEBSITE_WIDGET"])
 async def test_reactivation_cannot_rebind_proven_scope_to_replacement_account(
-        api_client, db_session, monkeypatch):
+        api_client, db_session, monkeypatch, channel):
     original_account_id = uuid4()
     replacement_account_id = uuid4()
     scope = HandoffScope(owner_id="opaque-rebind-owner", integration_id=uuid4(),
-                         channel="TELEGRAM", agent_id=uuid4())
+                         channel=channel, agent_id=uuid4())
     configure_handoff(monkeypatch, scope, original_account_id)
     FakeConversationClient.calls = []
     async with db_session() as session:
@@ -292,7 +294,7 @@ async def test_reactivation_cannot_rebind_proven_scope_to_replacement_account(
         assert reactivated.handoff_lifecycle_scope_snapshot == [{
             "owner_id": scope.owner_id,
             "integration_id": str(scope.integration_id),
-            "channel": "TELEGRAM",
+            "channel": scope.channel,
             "agent_id": str(scope.agent_id),
             "agent_owner_id": str(original_account_id),
         }]
@@ -331,18 +333,19 @@ async def test_reactivation_cannot_rebind_proven_scope_to_replacement_account(
         assert unchanged.handoff_lifecycle_scope_snapshot == [{
             "owner_id": scope.owner_id,
             "integration_id": str(scope.integration_id),
-            "channel": "TELEGRAM",
+            "channel": scope.channel,
             "agent_id": str(scope.agent_id),
             "agent_owner_id": str(original_account_id),
         }]
 
 
 @pytest.mark.integration
+@pytest.mark.parametrize("channel", ["TELEGRAM", "WEBSITE_WIDGET"])
 async def test_proof_uses_dedicated_token_and_denies_inactive_or_pending_agent(
-        api_client, db_session, monkeypatch):
+        api_client, db_session, monkeypatch, channel):
     account_id = uuid4()
     scope = HandoffScope(owner_id="opaque-proof-owner", integration_id=uuid4(),
-                         channel="TELEGRAM", agent_id=uuid4())
+                         channel=channel, agent_id=uuid4())
     configure_handoff(monkeypatch, scope, account_id)
     async with db_session() as session:
         session.add(AgentTemplate(
@@ -366,11 +369,12 @@ async def test_proof_uses_dedicated_token_and_denies_inactive_or_pending_agent(
 
 
 @pytest.mark.integration
+@pytest.mark.parametrize("channel", ["TELEGRAM", "WEBSITE_WIDGET"])
 async def test_pending_lifecycle_releases_agent_lock_before_revoke_and_blocks_proof(
-        api_client, db_session, monkeypatch):
+        api_client, db_session, monkeypatch, channel):
     account_id = uuid4()
     scope = HandoffScope(owner_id="opaque-lock-owner", integration_id=uuid4(),
-                         channel="TELEGRAM", agent_id=uuid4())
+                         channel=channel, agent_id=uuid4())
     configure_handoff(monkeypatch, scope, account_id)
     async with db_session() as session:
         agent = AgentTemplate(

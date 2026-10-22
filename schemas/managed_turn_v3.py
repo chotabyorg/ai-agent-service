@@ -17,6 +17,7 @@ from schemas.managed_turn import (
     validate_text,
 )
 from schemas.strict_values import CanonicalUUID
+from schemas.handoff import HandoffChannel
 
 HandoffReason = Literal[
     "CUSTOMER_REQUEST", "AGENT_LIMIT", "BUSINESS_UNCERTAIN",
@@ -211,7 +212,7 @@ class ControlEvidenceRequest(ManagedValue):
     contract_version: ContractVersion3
     owner_id: str
     integration_id: CanonicalUUID
-    channel: Literal["TELEGRAM"]
+    channel: HandoffChannel
     agent_id: CanonicalUUID
     conversation_id: CanonicalUUID
     turn_id: CanonicalUUID
