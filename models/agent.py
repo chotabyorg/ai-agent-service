@@ -1,13 +1,16 @@
 """Agent-related ORM models."""
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import UUID, uuid4
 
-from sqlalchemy import Boolean, Float, ForeignKey, String, Text, text
+from sqlalchemy import BigInteger, Boolean, Float, ForeignKey, String, Text, text
 from sqlalchemy.dialects.postgresql import JSONB, UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from db.database import Base
+
+if TYPE_CHECKING:
+    from models.session import ConversationSession
 
 
 class AgentTemplate(Base):
@@ -33,6 +36,14 @@ class AgentTemplate(Base):
         String(50), nullable=False, default="Europe/Minsk", server_default=text("'Europe/Minsk'")
     )
     encrypted_openrouter_key: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    handoff_lifecycle_generation: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, default=0, server_default=text("0")
+    )
+    handoff_lifecycle_state: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="STABLE", server_default=text("'STABLE'")
+    )
+    handoff_lifecycle_source_generation: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    handoff_lifecycle_scope_snapshot: Mapped[list[dict] | None] = mapped_column(JSONB, nullable=True)
 
     credentials: Mapped[list["AgentCredentials"]] = relationship(
         back_populates="agent",

@@ -140,8 +140,37 @@ opaque ASCII1..128,outcome:SUCCEEDED|FAILED|UNKNOWN|null}` values; it is not a l
 
 Each wire projection is immutable: request fingerprints include its version and
 exact Messages and remain fenced by the existing Business retained Turn context.
-v1 fingerprint bytes and retained evidence are unchanged; a v1 and v2 projection
-of the same Turn are not equivalent. No old Turn/evidence migration is performed.
+For the two stream extension fields, AI uses the request's validated
+`model_fields_set`: if both are absent, the canonical request omits both; if
+either is present, it includes the complete pair and pins a missing counterpart
+to `false` or `2000`. `contract_version` remains explicit in either digest,
+including when wire v1 omits it. Conversation's JSON-envelope digest and the
+Business ledger's namespace-newline-JSON digest keep their distinct envelopes.
+
+On existing `BusinessTurnContext` rows only, a request that omits both stream
+fields may also match the old AI digest that included `false/2000`; all remaining
+request fields must still match exactly. Explicit extension settings never use
+that fallback. Sidecar DTO hashes continue to cover their exact serialized shape
+and do not use the Business ledger fallback.
+
+Roll this reader out first. Current Conversation already writes the explicit
+`false/2000` text profile and `true/2000` Voice-v2 profile; AI accepts those
+profiles and the historical omitted-field shape. Conversation can then deploy its
+reader to restore omitted historical bodies from retained hashes. New AI Business
+contexts store the canonical profile hash. This is a source-only compatibility
+change: no old Turn, Business context or evidence row is migrated or rewritten. A
+v1 and v2 projection of the same Turn remain distinct.
+
+Rollback must retain an AI reader compatible with omission-profile Business
+contexts. The prior reader only computes the defaulted digest and can reject a
+new omission-profile context during eligibility/recovery. Reverting the
+Conversation writer does not make those retained AI rows readable by the old AI
+binary. Stop new enrollment/writes if needed, preserve the compatible AI reader
+and reconcile retained operations through their original identities. Never
+rewrite hashes, delete contexts or retry UNKNOWN effects to permit a downgrade.
+An older AI reader is not an accepted rollback target without separate proof for
+every retained profile it may encounter.
+
 `OperationReference` and the read-only `ManagedEvidenceRequest`/Result remain v1
 with their existing fields, limits and scope. The evidence endpoint may read refs
 for a v2 execution through the existing v1 identity request.
@@ -379,3 +408,35 @@ through the real ledger; raw MCP resource regressions use direct component seams
 No real channel, provider, deployment or GitOps state changes. Full relevant
 legacy/managed/business suites, additive migration/drift/import/package/Python3.11
 build and independent paired-process verification are separate required gates.
+
+## Retained effect acquisition across profile upgrades
+
+A historical omitted-field Turn may already have an immutable RESERVED operation
+whose effect request contains the old defaulted managed digest. Same-Turn
+continuation recognizes only the current digest or that finite historical default
+profile when both extension fields were omitted. Explicit settings and every
+semantic identity field remain significant.
+
+Continuation reconstructs the original complete permit request and checks its
+stored request/command fingerprints. It never substitutes a new canonical digest
+in retained authority. Conversation must still grant or replay that exact request;
+a denial records no dispatch, and a lost permit response retries only the same
+request identity. Bound permits retain their ID. Ordinary UNKNOWN recovery stays
+read-only. The existing explicit native replay path retains the original request
+profile too; it still requires the approved provider guarantee, exact command and
+permit tuple, current authority/facts and any bounded replay horizon. It creates
+no replacement permit or provider idempotency key. Newly created acquisitions
+always use the current canonical digest.
+
+## Reproducible compatibility pair
+
+The `Managed compatibility pair` workflow runs the exact AI PR head against the
+explicit Conversation commit in its workflow. Each service has its own pinned
+Python environment. Native PostgreSQL 16 hosts three fresh disposable databases;
+the existing Goal5 network guards restrict provider seams to owned loopback peers.
+The job runs the Business/permit bridge, the four current/historical wire-profile
+HTTP cases, and the full companion Conversation suite. Cleanup is part of PASS.
+Only `summary.json` with source/tree identities, outcomes, counts and report hashes
+is uploaded. Private fixture credentials, process logs and payloads stay on the
+ephemeral runner. This gate does not send Telegram, Widget, telephony or CRM traffic
+to a hosted service and does not establish production acceptance.

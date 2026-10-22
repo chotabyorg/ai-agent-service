@@ -18,10 +18,15 @@ if (ROOT / '.env').exists():
     raise RuntimeError('Disposable harness forbids runtime .env')
 sys.path.insert(0, str(ROOT))
 # Guard before application settings, SDK, or provider imports.
-spec = importlib.util.spec_from_file_location('e2e_network', Path(CONFIG['roots']['ai']) / 'tests/goal3_business_cross_service/network.py')
+guard_file = ('tests/goal5_business_bridge/network.py' if CONFIG.get('native_runtime')
+              else 'tests/goal3_business_cross_service/network.py')
+spec = importlib.util.spec_from_file_location('e2e_network', Path(CONFIG['roots']['ai']) / guard_file)
 network = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(network)
-network.install_guard(CONFIG['allowlist'])
+if CONFIG.get('native_runtime'):
+    network.install_guard(CONFIG['allowlist'], allow_bound_loopback=True)
+else:
+    network.install_guard(CONFIG['allowlist'])
 network.self_check()
 STATE = Path(CONFIG['state'])
 
@@ -78,7 +83,8 @@ class Observe:
             buffered.append(message)
         await self.app(scope, read, collect)
         body = b''.join(chunks)
-        if SERVICE == 'ai' and scope['path'] == '/internal/v1/managed-turns/execute':
+        if SERVICE == 'ai' and scope['path'] in {
+                '/internal/v1/managed-turns/execute', '/internal/v3/managed-turns/execute'}:
             record('projections.jsonl', json.loads(body))
         if SERVICE == 'crm':
             status = next((m['status'] for m in buffered if m['type'] == 'http.response.start'), 0)
@@ -92,6 +98,15 @@ class Observe:
                 except Exception:
                     pass
             record('crm-http.jsonl', event)
+            if scope['path'] == '/internal/agent/v1/execute/customer.find' and status == 200:
+                response_body = b''.join(m.get('body', b'') for m in buffered
+                                         if m['type'] == 'http.response.body')
+                payload = json.loads(response_body)
+                data = payload.get('data') or {}
+                record('customer-lookup-results.jsonl', {
+                    'status': payload.get('status'), 'match': data.get('match'),
+                    'candidate_count': len(data.get('candidates') or []),
+                })
             if (status == 200 and scope['method'] == 'POST'
                     and scope['path'] in {
                         '/internal/agent/v1/execute/booking.create',
@@ -164,6 +179,23 @@ def model_app():
     async def script(request: Request):
         queue[:] = await request.json()
         return {'queued': len(queue)}
+    if CONFIG.get('managed_contract') == 3:
+        @app.post('/internal/v1/handoff/integration-proof')
+        async def integration_proof(request: Request):
+            # Only the CP identity proof is synthetic; AI proof, grant enrollment,
+            # channel admission, Turn execution, permits and CRM effects stay real.
+            body = await request.json()
+            expected = dict(contract_version=1, owner_id=CONFIG['owner_id'],
+                integration_id=CONFIG['integration'], channel=CONFIG.get('channel', 'TELEGRAM'),
+                agent_id=CONFIG['agent'], expected_binding_generation=1)
+            if (request.headers.get('X-Inbox-Lifecycle-Token') != CONFIG['cp_lifecycle_token']
+                    or set(body) != set(expected) | {'command_id'}
+                    or any(body.get(key) != value for key, value in expected.items())):
+                return JSONResponse(status_code=404, content={'detail': 'synthetic scope denied'})
+            UUID(body['command_id'])
+            return {key: body[key] for key in ('contract_version', 'owner_id',
+                'integration_id', 'channel', 'agent_id')} | {
+                    'account_id': CONFIG['owner'], 'binding_generation': 1}
     @app.post('/v1/chat/completions')
     async def complete(request: Request):
         body = await request.json()
@@ -222,13 +254,15 @@ if SERVICE == 'recover':
     from core.config import get_settings
     from db.database import AsyncSessionLocal
     from schemas.managed_turn import ManagedTurnRequest
+    from schemas.managed_turn_v3 import ManagedTurnV3Request
     from business_capabilities.registration import create_business_registry
     from services.business_runtime import BusinessRuntime
     async def recover():
         request = next(json.loads(line) for line in (STATE / 'projections.jsonl').read_text().splitlines()
                        if json.loads(line)['turn_id'] == sys.argv[2])
         settings = get_settings()
-        runtime = await open_business_runtime(ManagedTurnRequest.model_validate(request),
+        request_model = ManagedTurnV3Request if request.get('contract_version') == 3 else ManagedTurnRequest
+        runtime = await open_business_runtime(request_model.model_validate(request),
             settings.managed_principals[0].grants[0], AsyncSessionLocal,
             create_business_registry(settings, AsyncSessionLocal))
         plan = await runtime.repository.selected_plan(runtime.request, runtime.grant)
@@ -257,6 +291,7 @@ else:
                 db.add(AgentTemplate(id=UUID(CONFIG['agent']), user_id=UUID(CONFIG['owner']),
                     name='Synthetic Beauty', system_prompt='Вы администратор салона. Отвечайте кратко по-русски.',
                     model_name='synthetic', llm_provider='openrouter', temperature=0, is_active=True,
+                    handoff_lifecycle_generation=1 if CONFIG.get('managed_contract') == 3 else 0,
                     timezone='Europe/Minsk', encrypted_openrouter_key=EncryptionService().encrypt('synthetic-model-key')))
                 await db.commit()
     async def seed_and_close():
@@ -285,7 +320,7 @@ if 'fds' in CONFIG:
 else:
     listener = socket.socket()
     listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    listener.bind(('0.0.0.0', CONFIG['ports'][SERVICE]))
+    listener.bind(('127.0.0.1' if CONFIG.get('native_runtime') else '0.0.0.0', CONFIG['ports'][SERVICE]))
     listener.listen(128)
 uvicorn.Server(uvicorn.Config(Observe(app), host='127.0.0.1', port=CONFIG['ports'][SERVICE],
     access_log=False, log_level='warning', timeout_graceful_shutdown=3)).run(sockets=[listener])
