@@ -22,6 +22,7 @@ MANAGED_SECRET_ENV_KEYS = frozenset({
     "internal_ai_auth_principals",
     "gateway_ai_auth_principals",
     "gateway_ai_owner_token",
+    "subscription_check_token",
     # Names used only by the disposable pinned-gateway runtime proof.
     "owner_ai_token",
     "owner_cp_token",

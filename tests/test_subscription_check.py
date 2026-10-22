@@ -8,6 +8,7 @@ from sqlalchemy import select
 import main
 from models.agent import AgentTemplate
 from services.encryption_service import EncryptionService
+from services.subscription_client import SubscriptionCheckUnavailable
 
 
 def build_agent_payload() -> dict[str, object]:
@@ -115,20 +116,18 @@ async def test_activate_agent_limit_reached_returns_402(
 
 
 # ------------------------------------------------------------------
-# 4. Subscription-service unavailable → fail-open (agent activated)
-#    The real SubscriptionClient.check catches all exceptions and
-#    returns {"allowed": True}. We simulate that resolved value.
+# 4. Subscription-service unavailable → fail-closed (agent remains inactive)
 # ------------------------------------------------------------------
 @pytest.mark.integration
-async def test_activate_agent_subscription_service_failopen(
+async def test_activate_agent_subscription_service_unavailable_fails_closed(
     api_client_no_raise, db_session, enable_subscription_check
 ) -> None:
     owner_id = uuid4()
     agent_id = await _create_agent_with_key(api_client_no_raise, db_session, owner_id)
 
-    # Simulates what SubscriptionClient.check returns when the remote
-    # service is down (the try/except in the real client returns this).
-    enable_subscription_check.check.return_value = {"allowed": True}
+    enable_subscription_check.check.side_effect = SubscriptionCheckUnavailable(
+        "subscription check unavailable"
+    )
 
     resp = await api_client_no_raise.put(
         f"/v1/agents/{agent_id}",
@@ -136,8 +135,113 @@ async def test_activate_agent_subscription_service_failopen(
         headers=build_headers(owner_id),
     )
 
-    assert resp.status_code == 200
-    assert resp.json()["is_active"] is True
+    assert resp.status_code == 503
+    assert resp.json()["detail"] == "Subscription check unavailable"
+    async with db_session() as session:
+        agent = await session.get(AgentTemplate, UUID(agent_id))
+        assert agent is not None and agent.is_active is False
+
+
+@pytest.mark.integration
+async def test_enabled_subscription_check_with_missing_client_returns_503(
+    api_client_no_raise, db_session, monkeypatch
+) -> None:
+    from types import SimpleNamespace
+    import api.dependencies as dependencies
+
+    monkeypatch.setattr(
+        dependencies,
+        "get_settings",
+        lambda: SimpleNamespace(subscription_check_enabled=True),
+    )
+    main.app.state.subscription_client = None
+    owner_id = uuid4()
+    agent_id = await _create_agent_with_key(api_client_no_raise, db_session, owner_id)
+
+    response = await api_client_no_raise.put(
+        f"/v1/agents/{agent_id}",
+        json={"is_active": True},
+        headers=build_headers(owner_id),
+    )
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == "Subscription check unavailable"
+    async with db_session() as session:
+        agent = await session.get(AgentTemplate, UUID(agent_id))
+        assert agent is not None and agent.is_active is False
+
+
+@pytest.mark.integration
+async def test_create_active_agent_checks_subscription_without_key_requirement(
+    api_client_no_raise, enable_subscription_check
+) -> None:
+    owner_id = uuid4()
+    payload = build_agent_payload()
+    payload["is_active"] = True
+
+    response = await api_client_no_raise.post(
+        "/v1/agents/",
+        json=payload,
+        headers=build_headers(owner_id),
+    )
+
+    assert response.status_code == 201
+    assert response.json()["is_active"] is True
+    assert response.json()["has_openrouter_key"] is False
+    enable_subscription_check.check.assert_awaited_once_with(str(owner_id))
+
+
+@pytest.mark.integration
+async def test_create_active_agent_denial_does_not_insert_agent(
+    api_client_no_raise, db_session, enable_subscription_check
+) -> None:
+    owner_id = uuid4()
+    payload = build_agent_payload()
+    payload["is_active"] = True
+    enable_subscription_check.check.return_value = {
+        "allowed": False,
+        "reason": "no_subscription",
+    }
+
+    response = await api_client_no_raise.post(
+        "/v1/agents/",
+        json=payload,
+        headers=build_headers(owner_id),
+    )
+
+    assert response.status_code == 402
+    assert response.json()["detail"] == "no_subscription"
+    async with db_session() as session:
+        agents = await session.execute(
+            select(AgentTemplate).where(AgentTemplate.user_id == owner_id)
+        )
+        assert agents.scalars().all() == []
+
+
+@pytest.mark.integration
+async def test_create_active_agent_unavailable_does_not_insert_agent(
+    api_client_no_raise, db_session, enable_subscription_check
+) -> None:
+    owner_id = uuid4()
+    payload = build_agent_payload()
+    payload["is_active"] = True
+    enable_subscription_check.check.side_effect = SubscriptionCheckUnavailable(
+        "subscription check unavailable"
+    )
+
+    response = await api_client_no_raise.post(
+        "/v1/agents/",
+        json=payload,
+        headers=build_headers(owner_id),
+    )
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == "Subscription check unavailable"
+    async with db_session() as session:
+        agents = await session.execute(
+            select(AgentTemplate).where(AgentTemplate.user_id == owner_id)
+        )
+        assert agents.scalars().all() == []
 
 
 # ------------------------------------------------------------------

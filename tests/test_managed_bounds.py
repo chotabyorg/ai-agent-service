@@ -110,6 +110,7 @@ def test_new_managed_secret_env_denylist_and_mapped_credentials(monkeypatch, tmp
         "Managed_AI_AUTH_Principals",
     )
     managed_token = "managed-secret-sentinel-" + "x" * 32
+    subscription_token = "subscription-secret-sentinel-" + "x" * 32
     registry = json.dumps([{
         "principal_id": "synthetic-managed-env-test",
         "token": managed_token,
@@ -129,6 +130,7 @@ def test_new_managed_secret_env_denylist_and_mapped_credentials(monkeypatch, tmp
     for key in secret_keys:
         monkeypatch.delenv(key, raising=False)
     for key in (
+        "SUBSCRIPTION_CHECK_TOKEN",
         "INTERNAL_AI_AUTH_PRINCIPALS",
         "internal_ai_auth_principals",
         "Internal_AI_Auth_Principals",
@@ -143,6 +145,7 @@ def test_new_managed_secret_env_denylist_and_mapped_credentials(monkeypatch, tmp
 
     get_settings.cache_clear()
     try:
+        monkeypatch.setenv("SUBSCRIPTION_CHECK_TOKEN", subscription_token)
         if cache_state == "warm":
             cached_settings = get_settings()
             assert cached_settings.managed_principals == ()
@@ -165,13 +168,17 @@ def test_new_managed_secret_env_denylist_and_mapped_credentials(monkeypatch, tmp
         assert child_env is not None
         assert all(key.lower() not in MANAGED_SECRET_ENV_KEYS for key in child_env)
         assert all(key not in child_env for key in secret_keys)
+        assert "SUBSCRIPTION_CHECK_TOKEN" not in child_env
         assert registry not in child_env.values()
         assert managed_token not in child_env.values()
+        assert subscription_token not in child_env.values()
         assert child_env["B24_WEBHOOK_URL"] == "synthetic-tool-credential"
 
         for mapping, env_key in (
             ("env_mapping", "managed_ai_auth_principals"),
             ("optional_env_mapping", "mAnAgEd_AI_AUTH_PrInCiPaLs"),
+            ("env_mapping", "SUBSCRIPTION_CHECK_TOKEN"),
+            ("optional_env_mapping", "sUbScRiPtIoN_cHeCk_ToKeN"),
         ):
             config = {"script_path": "none", "env_mapping": {}}
             config[mapping] = {"webhook_url": env_key}

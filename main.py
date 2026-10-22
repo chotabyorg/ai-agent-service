@@ -29,9 +29,10 @@ settings = get_settings()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_redis()
-    if settings.subscription_check_enabled and settings.subscription_service_url:
+    if settings.subscription_check_enabled:
         app.state.subscription_client = SubscriptionClient(
-            settings.subscription_service_url
+            settings.subscription_service_url,
+            subscription_check_token=settings.subscription_check_token,
         )
     else:
         app.state.subscription_client = None

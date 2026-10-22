@@ -11,7 +11,10 @@ from core.config import get_settings
 from core.managed_security import OwnershipPrincipal, valid_token
 from db.database import get_db_session
 from schemas.internal import AgentOwnershipCheckRequest
-from services.subscription_client import SubscriptionClient
+from services.subscription_client import (
+    SubscriptionCheckUnavailable,
+    SubscriptionClient,
+)
 
 
 async def get_db() -> AsyncGenerator[AsyncSession, None]:
@@ -30,6 +33,54 @@ def get_subscription_client(request: Request) -> SubscriptionClient | None:
 SubscriptionClientDep = Annotated[
     SubscriptionClient | None, Depends(get_subscription_client)
 ]
+
+
+async def require_agent_activation_subscription(
+    user_id: str,
+    subscription_client: SubscriptionClient | None,
+) -> None:
+    """Require an affirmative subscription decision before agent activation."""
+
+    if subscription_client is None:
+        if get_settings().subscription_check_enabled:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Subscription check unavailable",
+            )
+        return
+
+    try:
+        result = await subscription_client.check(user_id)
+    except SubscriptionCheckUnavailable:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Subscription check unavailable",
+        ) from None
+    except Exception:
+        # Unexpected client errors must remain fail-closed and must not expose
+        # upstream response data or credentials through the API response.
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Subscription check unavailable",
+        ) from None
+
+    if type(result) is not dict or type(result.get("allowed")) is not bool:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Subscription check unavailable",
+        )
+    if result["allowed"]:
+        return
+
+    reason = result.get("reason")
+    if not isinstance(reason, str) or reason not in {
+        "no_subscription", "subscription_expired", "agent_limit_reached"
+    }:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Subscription check unavailable",
+        )
+    raise HTTPException(status_code=402, detail=reason)
 
 
 def verify_service_token(request: Request) -> None:
