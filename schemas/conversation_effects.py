@@ -11,7 +11,17 @@ from uuid import UUID
 from pydantic import Field, StrictBool, StrictInt, field_validator
 
 from core.managed_security import EXECUTION_NAMESPACE
-from schemas.managed_turn import Channel, ManagedTurnRequest, ManagedValue, validate_owner
+from schemas.managed_turn import (
+    Channel,
+    ManagedTurnRequest,
+    ManagedValue,
+    DEFAULT_MAX_PARTIAL_CHARS,
+    DEFAULT_STREAM_PARTIALS,
+    STREAM_EXTENSION_FIELDS,
+    canonical_managed_request_fields,
+    managed_request_fields_with_extensions,
+    validate_owner,
+)
 
 Digest = Annotated[str, Field(strict=True, pattern=r"^[0-9a-f]{64}$")]
 Revision = Annotated[StrictInt, Field(ge=0, le=9223372036854775807)]
@@ -106,16 +116,37 @@ def sidecar_fingerprint(request: ManagedValue) -> str:
 
 
 def managed_request_fingerprint(request: ManagedTurnRequest) -> str:
-    """Match Conversation's prepare_request hash without changing the frozen DTO."""
+    """Match Conversation's selected canonical managed request profile."""
+    return _managed_fields_fingerprint(canonical_managed_request_fields(request))
+
+
+def _managed_fields_fingerprint(fields: dict) -> str:
     identity = json.dumps(
         {"execution_namespace": EXECUTION_NAMESPACE,
-         "request": request.model_dump(mode="json")},
+         "request": fields},
         sort_keys=True,
         separators=(",", ":"),
         ensure_ascii=False,
         allow_nan=False,
     ).encode("utf-8")
     return hashlib.sha256(identity).hexdigest()
+
+
+def retained_managed_fingerprint_matches(stored: str | None, request: ManagedTurnRequest) -> bool:
+    """Recognize a retained acquisition, never change a fresh sidecar request.
+
+    Only omitted-both-field requests may match the historical defaulted profile.
+    The repository must still validate the complete original permit-request tuple;
+    Conversation independently decides whether that exact request has authority.
+    """
+    if stored == managed_request_fingerprint(request):
+        return True
+    if any(name in request.model_fields_set for name in STREAM_EXTENSION_FIELDS):
+        return False
+    return stored == _managed_fields_fingerprint(managed_request_fields_with_extensions(
+        request, stream_partials=DEFAULT_STREAM_PARTIALS,
+        max_partial_chars=DEFAULT_MAX_PARTIAL_CHARS,
+    ))
 
 
 def frozen_command_fingerprint(command) -> str:

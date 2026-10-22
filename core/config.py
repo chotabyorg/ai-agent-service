@@ -78,6 +78,14 @@ class Settings(BaseSettings):
     business_conversation_timeout_seconds: float = Field(default=3.0, ge=0.2, le=10.0,
                                                           allow_inf_nan=False)
 
+    # Handoff remains dark unless an exact Telegram scope is explicitly listed.
+    # The lifecycle credential is a dedicated Conversation-only principal.
+    handoff_ai_enrolled_scopes: SecretStr = Field(default="", repr=False)
+    handoff_conversation_url: str = ""
+    handoff_lifecycle_token: SecretStr = Field(default="", repr=False)
+    handoff_lifecycle_timeout_seconds: float = Field(default=3.0, ge=0.2, le=10.0,
+                                                       allow_inf_nan=False)
+
     # Optional and fail-closed. No production registration is created by this code.
     internal_ai_auth_principals: SecretStr = Field(default="", repr=False)
     internal_ownership_auth_required: bool = False
@@ -101,6 +109,7 @@ class Settings(BaseSettings):
     _managed_principals: tuple = PrivateAttr(default=())
     _ownership_principals: tuple = PrivateAttr(default=())
     _gateway_principals: tuple = PrivateAttr(default=())
+    _handoff_scopes: tuple = PrivateAttr(default=())
 
     @model_validator(mode="after")
     def validate_managed_reasoning_transport(self) -> "Settings":
@@ -203,6 +212,41 @@ class Settings(BaseSettings):
             raise RuntimeError("Invalid Business Conversation authority configuration")
         return self
 
+    @model_validator(mode="after")
+    def validate_handoff_lifecycle(self) -> "Settings":
+        from core.managed_security import parse_handoff_scopes, valid_token
+
+        raw_scopes = self.handoff_ai_enrolled_scopes.get_secret_value()
+        token = self.handoff_lifecycle_token.get_secret_value()
+        url = self.handoff_conversation_url
+        try:
+            scopes = parse_handoff_scopes(raw_scopes, self.managed_principals)
+            parsed = urlsplit(url) if url else None
+            if parsed is not None:
+                _ = parsed.port
+                valid_url = (parsed.scheme in {"http", "https"} and bool(parsed.hostname)
+                             and parsed.username is None and parsed.password is None
+                             and parsed.path in {"", "/"} and not parsed.query and not parsed.fragment
+                             and "?" not in url and "#" not in url)
+            else:
+                valid_url = False
+            other_tokens = {self.internal_api_token, self.chat_s2s_token.get_secret_value(),
+                            self.business_conversation_token.get_secret_value()}
+            other_tokens.update(principal.token.get_secret_value() for principal in self.managed_principals)
+            other_tokens.update(
+                credential.token.get_secret_value()
+                for principal in self.ownership_principals
+                for credential in principal.credentials()
+            )
+            if (bool(url) != bool(token) or (scopes and not (url and token))
+                    or (url and (not valid_url or url != url.strip()))
+                    or (token and (not valid_token(token) or token in other_tokens))):
+                raise ValueError
+            self._handoff_scopes = scopes
+        except Exception:
+            raise RuntimeError("Invalid Handoff lifecycle configuration") from None
+        return self
+
     @property
     def managed_principals(self) -> tuple:
         return self._managed_principals
@@ -210,6 +254,10 @@ class Settings(BaseSettings):
     @property
     def ownership_principals(self) -> tuple:
         return self._ownership_principals
+
+    @property
+    def handoff_scopes(self) -> tuple:
+        return self._handoff_scopes
 
     @model_validator(mode="after")
     def validate_gateway_registry(self) -> "Settings":
@@ -221,6 +269,7 @@ class Settings(BaseSettings):
             self.internal_api_token,
             self.chat_s2s_token.get_secret_value(),
             self.business_conversation_token.get_secret_value(),
+            self.handoff_lifecycle_token.get_secret_value(),
             *(principal.token.get_secret_value() for principal in self.managed_principals),
             *(credential.token.get_secret_value()
               for principal in self.ownership_principals

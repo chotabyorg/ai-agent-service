@@ -179,6 +179,31 @@ The chat endpoint keeps its existing JSON request and response. Trusted callers 
 8. Если модель вернула `tool_calls`, выполнить их через `MCPManager.call_tool()` и сделать следующий виток цикла.
 9. Когда модель возвращает обычный текст, сохранить новый `user/assistant` turn в Redis и вернуть ответ клиенту.
 
+## Private managed Handoff Telegram
+
+Conversation can opt an exact Telegram integration into the additive private
+`POST /internal/v3/managed-turns/execute` contract. The v3 request carries the
+closed message, authority, delivery, and prior-operation snapshot; v1/v2 DTOs,
+hashes, and routes remain unchanged. A dedicated platform tool can return a
+typed `HUMAN_HANDOFF` control request. AI persists that control before returning
+it, makes it terminal for the retained Turn, and exposes
+`POST /internal/v3/managed-turns/control-evidence` for recovery. A running
+request without a control is never replayed into another model call.
+
+Only exact scopes listed in `HANDOFF_AI_ENROLLED_SCOPES` may use v3 or the
+private `POST /internal/v1/handoff/agent-proof` route. Every enrolled scope must
+match an explicit managed-principal grant and its trusted account UUID. The
+proof route uses the separate `HANDOFF_LIFECYCLE_TOKEN`. Agent deactivation,
+deletion, and OpenRouter-key deletion revoke every durably proven scope before
+changing active state; if Conversation cannot confirm the exact revoke, the
+mutation remains pending and fails closed. Re-activation advances the AI
+lifecycle generation and never recreates a grant automatically. Empty cohort
+configuration leaves Handoff dark.
+
+Apply the Alembic migration before starting an image that serves v3 or lifecycle
+proofs. Conversation and the gateway must use matching private contracts and
+dedicated credentials before any scope is explicitly enrolled.
+
 ## Переменные окружения
 
 Ниже перечислены настройки из `core/config.py`.
@@ -229,6 +254,10 @@ The chat endpoint keeps its existing JSON request and response. Trusted callers 
 | `GATEWAY_OWNER_AUTH_MODE` | `legacy` | `legacy` preserves header-only admission only when `X-Gateway-Token` is absent. `required` requires a gateway credential before any owner DB dependency. Present invalid/revoked tokens always fail. Separate rollout required. |
 | `CHAT_S2S_TOKEN` | `""` | Separate credential for `/v1/chat/completions` callers; do not reuse `INTERNAL_API_TOKEN`. |
 | `CHAT_S2S_AUTH_REQUIRED` | `false` | Compatibility switch; set to `true` only after KrakenD and all chat callers have the dedicated token and owner header. |
+| `HANDOFF_AI_ENROLLED_SCOPES` | `[]` | Exact private Telegram Handoff cohort; empty keeps enrollment dark. |
+| `HANDOFF_CONVERSATION_URL` | `""` | Base URL for lifecycle revoke calls to Conversation. |
+| `HANDOFF_LIFECYCLE_TOKEN` | `""` | Dedicated credential for AI ownership proofs and Conversation revoke calls. |
+| `HANDOFF_LIFECYCLE_TIMEOUT_SECONDS` | `3` | Timeout for exact Handoff lifecycle acknowledgements. |
 
 ### Минимальный `.env` пример
 
@@ -512,6 +541,12 @@ with a4096-byte strict JSON cap, without model/provider/recovery work. Conversat
 keeps only opaque refs, with an explicit manual pre-terminal crash-F recovery;
 already-terminal empty refs cannot be enriched by current APIs. Existing chat
 callers stay on `/v1/chat/completions`. No real provider/channel/deployment is enabled.
+The managed reader resolves both historical omitted-field fingerprints and the
+explicit profiles already emitted by current Conversation (`false/2000` for text
+and `true/2000` for Voice v2), without migrating rows. Roll out this AI reader
+first; the Conversation reader can then restore omitted historical bodies from
+their retained hashes. See the [managed-turn contract](docs/managed-turns.md) for
+the exact compatibility and Business-context fallback rules.
 
 Managed final completions require visible text after the existing thinking-tag
 removal; empty, missing, non-string or cleaned-empty model output returns the

@@ -28,6 +28,7 @@ from tests.test_business_runtime import actions, setup_business
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 HEAD = "g5_20261015_01"
+CURRENT_HEAD = "handoff_20261015_01"
 PREVIOUS = "luna_20261012_01"
 
 
@@ -133,7 +134,7 @@ async def _head_database(url: str):
     return engine, factory
 
 
-def _migrate_to_head(url: str) -> None:
+def _migrate_to_goal5_runtime(url: str) -> None:
     previous = _set_postgres_env(url)
     try:
         async def verify_database() -> None:
@@ -155,6 +156,45 @@ def _migrate_to_head(url: str) -> None:
                 await connection.close()
 
         asyncio.run(verify_database())
+        # Keep this test's barrier choreography on the Goal5 migration under
+        # test. The newer Handoff migration intentionally acquires a separate
+        # Agent row lock first, which would make this test observe the wrong
+        # lock queue and would test a different downgrade.
+        command.upgrade(_config(), HEAD)
+
+        async def install_current_agent_runtime_columns() -> None:
+            engine = create_async_engine(url, poolclass=NullPool)
+            try:
+                async with engine.begin() as connection:
+                    # The application ORM now includes Handoff lifecycle state.
+                    # Add that inert runtime projection to this Goal5-only test
+                    # schema without advancing Alembic, so current ORM reads
+                    # work while the real Goal5 downgrade remains the first
+                    # schema transition in the lock race.
+                    await connection.execute(text(
+                        "ALTER TABLE agent_templates "
+                        "ADD COLUMN handoff_lifecycle_generation BIGINT NOT NULL DEFAULT 0, "
+                        "ADD COLUMN handoff_lifecycle_state VARCHAR(32) NOT NULL DEFAULT 'STABLE', "
+                        "ADD COLUMN handoff_lifecycle_source_generation BIGINT NULL, "
+                        "ADD COLUMN handoff_lifecycle_scope_snapshot JSONB NULL"
+                    ))
+                    await connection.execute(text(
+                        "UPDATE agent_templates SET handoff_lifecycle_generation=1 WHERE is_active IS TRUE"
+                    ))
+                    version = await connection.scalar(text("SELECT version_num FROM alembic_version"))
+                    if version != HEAD:
+                        raise AssertionError("Goal5 race fixture must remain at the Goal5 Alembic revision")
+            finally:
+                await engine.dispose()
+
+        asyncio.run(install_current_agent_runtime_columns())
+    finally:
+        _restore_postgres_env(previous)
+
+
+def _migrate_to_current_head(url: str) -> None:
+    previous = _set_postgres_env(url)
+    try:
         command.upgrade(_config(), "head")
     finally:
         _restore_postgres_env(previous)
@@ -165,7 +205,7 @@ def test_runtime_acquisition_commit_before_downgrade_lock_makes_downgrade_refuse
 ):
     """Pause after the real runtime UPDATE; Alembic must see it after the row commits."""
     url = isolated_utf8_migration_postgres
-    _migrate_to_head(url)
+    _migrate_to_goal5_runtime(url)
     previous = _set_postgres_env(url)
 
     async def scenario() -> None:
@@ -263,7 +303,7 @@ def test_downgrade_lock_queued_before_runtime_prevents_post_drop_acquisition_com
 ):
     """An actual Alembic lock queued first must precede a later runtime writer."""
     url = isolated_utf8_migration_postgres
-    _migrate_to_head(url)
+    _migrate_to_goal5_runtime(url)
     previous = _set_postgres_env(url)
 
     async def scenario() -> None:
@@ -367,9 +407,8 @@ def test_downgrade_lock_queued_before_runtime_prevents_post_drop_acquisition_com
 def test_populated_request_or_permit_refuses_downgrade(isolated_utf8_migration_postgres, state):
     """Both durable request-only and permit-granted evidence block schema loss."""
     url = isolated_utf8_migration_postgres
-    _migrate_to_head(url)
+    _migrate_to_goal5_runtime(url)
     previous = _set_postgres_env(url)
-
     async def seed_and_check() -> None:
         engine, factory = await _head_database(url)
         try:
@@ -414,5 +453,88 @@ def test_populated_request_or_permit_refuses_downgrade(isolated_utf8_migration_p
                 await engine.dispose()
 
         asyncio.run(verify())
+    finally:
+        _restore_postgres_env(previous)
+
+
+@pytest.mark.parametrize("state", ["REQUESTED", "GRANTED"])
+def test_current_head_downgrade_refusal_rolls_back_handoff_and_goal5_schema(
+    isolated_utf8_migration_postgres, state,
+):
+    """A Goal5 refusal below Handoff must roll back every newer migration too."""
+    url = isolated_utf8_migration_postgres
+    _migrate_to_current_head(url)
+    previous = _set_postgres_env(url)
+    runtime_agent_id = None
+
+    async def seed_and_check() -> None:
+        nonlocal runtime_agent_id
+        engine, factory = await _head_database(url)
+        try:
+            runtime, _, _, _ = await setup_business(factory)
+            runtime_agent_id = runtime.request.agent_id
+            plan = await runtime.freeze_plan(actions("12:00"))
+            operation = plan.operations[0]
+            if state == "REQUESTED":
+                decision = await runtime.repository.prepare_effect_acquisition(
+                    runtime.request,
+                    runtime.grant,
+                    plan.id,
+                    operation.id,
+                    runtime.registration,
+                    runtime.facts_resolver(actions("12:00")),
+                )
+                assert decision.reason == "REQUESTED"
+                assert decision.request is not None and decision.permit_id is None
+            else:
+                request = await prepare_effect_permit(runtime, plan, operation)
+                assert request is not None
+
+            retained = await runtime.repository.selected_plan(runtime.request, runtime.grant)
+            assert retained is not None
+            assert retained.operations[0].effect_request_turn_id == runtime.request.turn_id
+            assert (retained.operations[0].effect_permit_id is not None) is (state == "GRANTED")
+        finally:
+            await engine.dispose()
+
+    async def verify_rollback() -> None:
+        engine, _ = await _head_database(url)
+        try:
+            async with engine.connect() as connection:
+                assert await connection.scalar(text("SELECT version_num FROM alembic_version")) == CURRENT_HEAD
+                operation_columns = set((await connection.execute(text(
+                    "SELECT column_name FROM information_schema.columns WHERE table_name='business_operations'"
+                ))).scalars())
+                agent_columns = set((await connection.execute(text(
+                    "SELECT column_name FROM information_schema.columns WHERE table_name='agent_templates'"
+                ))).scalars())
+                assert {"effect_request_turn_id", "effect_permit_id"} <= operation_columns
+                assert {"handoff_lifecycle_generation", "handoff_lifecycle_state",
+                        "handoff_lifecycle_scope_snapshot"} <= agent_columns
+                assert await connection.scalar(text(
+                    "SELECT to_regclass('public.managed_execution_receipts')"
+                )) == "managed_execution_receipts"
+                retained = (await connection.execute(text(
+                    "SELECT effect_request_turn_id,effect_permit_id,status FROM business_operations"
+                ))).one()
+                lifecycle = (await connection.execute(text(
+                    "SELECT handoff_lifecycle_generation,handoff_lifecycle_state,"
+                    "handoff_lifecycle_source_generation,handoff_lifecycle_scope_snapshot "
+                    "FROM agent_templates WHERE id=:agent_id"
+                ), {"agent_id": runtime_agent_id})).one()
+            assert retained.effect_request_turn_id is not None
+            assert (retained.effect_permit_id is not None) is (state == "GRANTED")
+            assert retained.status == "RESERVED"
+            assert lifecycle == (0, "STABLE", None, None)
+        finally:
+            await engine.dispose()
+
+    try:
+        asyncio.run(seed_and_check())
+        # The full downgrade first attempts to remove Handoff's newer schema,
+        # then Goal5 refuses because the operation retains acquisition evidence.
+        with pytest.raises(RuntimeError, match="Refusing downgrade while business effect acquisition evidence exists"):
+            command.downgrade(_config(), PREVIOUS)
+        asyncio.run(verify_rollback())
     finally:
         _restore_postgres_env(previous)

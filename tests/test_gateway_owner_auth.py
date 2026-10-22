@@ -270,6 +270,9 @@ async def test_public_and_separate_auth_contracts_are_not_owner_gated(admission)
         ("POST", "/internal/v1/agents/ownership-check"),
         ("POST", "/internal/v1/managed-turns/execute"),
         ("POST", "/internal/v1/managed-turns/evidence"),
+        ("POST", "/internal/v1/handoff/agent-proof"),
+        ("POST", "/internal/v3/managed-turns/execute"),
+        ("POST", "/internal/v3/managed-turns/control-evidence"),
         ("POST", "/v1/chat/completions"),
     }
     assert admission.calls.db == 0
@@ -389,3 +392,11 @@ async def test_authenticated_owner_crud_keeps_tenant_and_admin_rules(api_client,
     assert delete.status_code == 403
     assert spoof.status_code == 401
     assert admin.status_code == 204
+
+
+@pytest.mark.parametrize("version", ["current", "previous"])
+def test_gateway_credential_cannot_reuse_handoff_lifecycle_token(version):
+    reused = TOKEN if version == "current" else PREVIOUS
+    with pytest.raises(RuntimeError, match="gateway owner authentication"):
+        configured(handoff_conversation_url="http://conversation.invalid",
+                   handoff_lifecycle_token=reused)

@@ -14,7 +14,9 @@ from schemas.conversation_effects import (
     ExternalEffectPermitRequest,
     ExternalEffectPermitResult,
     sidecar_fingerprint,
+    managed_request_fingerprint,
 )
+from schemas.managed_turn import ManagedTurnRequest
 from services.conversation_effects import (
     DefinitiveEffectDenial,
     EffectPortUnavailable,
@@ -32,6 +34,33 @@ def _fixture():
 def _port(handler):
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler), trust_env=False)
     return HttpConversationEffectPort("http://conversation.test", SecretStr("service-token-test"), client), client
+
+
+def test_managed_identity_uses_pre_stream_or_complete_extension_shape():
+    from uuid import UUID
+
+    value = dict(
+        conversation_id=str(UUID(int=1)), turn_id=str(UUID(int=2)),
+        owner_id="Exact Café owner", integration_id=str(UUID(int=3)),
+        agent_id=str(UUID(int=4)), channel="WEBSITE_WIDGET", input_revision=1,
+        authority_revision=0, input_first_sequence=1, input_last_sequence=1,
+        context_last_sequence=1,
+        messages=[dict(id=str(UUID(int=5)), sequence=1, actor="CUSTOMER",
+                       direction="INBOUND", content_type="TEXT", text="Café 🌍")],
+        selected_input_message_ids=[str(UUID(int=5))],
+    )
+    pre_stream = ManagedTurnRequest.model_validate(value)
+    assert not {"stream_partials", "max_partial_chars"} & pre_stream.model_fields_set
+    assert pre_stream.stream_partials is False and pre_stream.max_partial_chars == 2000
+    assert managed_request_fingerprint(pre_stream) == \
+        "a4f8bf8a3cf30a658d96e9cd6579f9ba35136fbd81bbd622fdab78cbfe51f326"
+    extension = ManagedTurnRequest.model_validate({**value, "stream_partials": False})
+    assert managed_request_fingerprint(extension) == \
+        "ab2fb9275e1b6325b131b6b36a59f47bbcbc8a7d17a4493b76199ea584c50204"
+    custom = ManagedTurnRequest.model_validate({**value, "max_partial_chars": 501})
+    assert managed_request_fingerprint(custom) not in {
+        managed_request_fingerprint(pre_stream), managed_request_fingerprint(extension)
+    }
 
 
 @pytest.mark.parametrize("contract_version", [True, 1.0, "1", 2])

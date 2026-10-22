@@ -12,7 +12,7 @@ from schemas.business import (AttemptRejected, BusinessAction, BusinessSafetyErr
                               ProvenSucceeded, StillUnknown, SucceededReceipt, fingerprint)
 from schemas.conversation_effects import (ExternalEffectEligibilityRequest,
     ExternalEffectEligibilityResult, ExternalEffectPermitRequest, ExternalEffectPermitResult,
-    managed_request_fingerprint, sidecar_fingerprint)
+    managed_request_fingerprint, retained_managed_fingerprint_matches, sidecar_fingerprint)
 from schemas.managed_turn import OperationReference
 from services.business_registry import BusinessRegistry
 from services.business_repository import BusinessRepository
@@ -260,9 +260,9 @@ class BusinessRuntime:
         if (gate.selection_kind not in {"OWN", "CONFIRM"} or gate.plan is None
                 or gate.request_conflict):
             return False
-        current_digest = managed_request_fingerprint(self.request)
         return any(op.status == "RESERVED" and op.effect_request_turn_id == self.request.turn_id
-                   and op.effect_request_fingerprint and op.effect_managed_request_fingerprint == current_digest
+                   and op.effect_request_fingerprint and retained_managed_fingerprint_matches(
+                       op.effect_managed_request_fingerprint, self.request)
                    for op in gate.plan.operations)
 
     async def _normal_guard(self, gate, *, allow_incomplete=False, final_answer=False):
@@ -1186,13 +1186,21 @@ class BusinessRuntime:
             raise BusinessSafetyError("OPERATION_DENIED")
         actions = [BusinessAction(capability=op.command.capability, arguments=op.command.arguments) for op in plan.operations]
         from schemas.conversation_effects import frozen_command_fingerprint
+        managed_digest = managed_request_fingerprint(self.request)
+        if (operation.effect_request_turn_id == self.request.turn_id
+                and retained_managed_fingerprint_matches(
+                    operation.effect_managed_request_fingerprint, self.request)):
+            # Native UNKNOWN recovery reuses the already granted request tuple.
+            # claim_dispatch still checks its complete digest, command, authority,
+            # current facts and the provider's explicit native replay guarantee.
+            managed_digest = operation.effect_managed_request_fingerprint
         operation_request = ExternalEffectPermitRequest(
             contract_version=1, conversation_id=self.request.conversation_id,
             turn_id=self.request.turn_id, origin_turn_id=plan.origin_turn_id,
             owner_id=self.request.owner_id, integration_id=self.request.integration_id,
             channel=self.request.channel, agent_id=self.request.agent_id,
             authority_revision=self.request.authority_revision,
-            managed_request_fingerprint=managed_request_fingerprint(self.request),
+            managed_request_fingerprint=managed_digest,
             operation_namespace="main-chota.ai-business.v1", operation_id=operation.id,
             operation_fingerprint=frozen_command_fingerprint(operation.command),
         )

@@ -17,6 +17,7 @@ from schemas.internal import (
     DeactivateAllResponse,
 )
 from services.agent_service import AgentService
+from services.handoff_lifecycle import HandoffLifecycleConflict, HandoffLifecycleUnavailable
 
 
 router = APIRouter(
@@ -73,5 +74,10 @@ async def internal_deactivate_all_agents(
     db: DbSession,
 ) -> DeactivateAllResponse:
     """Deactivate all active agents for a user. Returns the number updated."""
-    deactivated = await agent_service.deactivate_all_agents(db, payload.user_id)
+    try:
+        deactivated = await agent_service.deactivate_all_agents(db, payload.user_id)
+    except HandoffLifecycleConflict:
+        raise HTTPException(status_code=409, detail="Agent lifecycle change conflicts with pending state") from None
+    except HandoffLifecycleUnavailable:
+        raise HTTPException(status_code=503, detail="Handoff grant revocation is unavailable") from None
     return DeactivateAllResponse(deactivated=deactivated)

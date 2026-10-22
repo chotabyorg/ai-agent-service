@@ -21,7 +21,6 @@ from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from sqlalchemy.engine import make_url
-import docker
 
 ROOT = Path(__file__).resolve().parents[2]
 ROOTS = {'ai': ROOT,
@@ -402,13 +401,21 @@ class Harness:
             person=await self.request('crm','POST',w+'/customers',{'name':name},self.owner_headers,201)
             await self.request('crm','POST',w+'/customers/'+person['id']+'/identities',
                 {'type':'PHONE','value':'+375299870088'},self.owner_headers,201)
+        model_before=len((self.state/'model-requests.jsonl').read_text().splitlines())
+        customers_before=await self.count('customers'); bookings_before=await self.count('bookings')
         ambiguous=await self.turn('Мой номер +375299870088. Когда запись?',[
-            tool('customer_find',{'identity':{'kind':'PHONE','value':'+375299870088'}}),
-            {'answer':'Подскажите, пожалуйста, ваше имя?'}])
-        last_model=json.loads((self.state/'model-requests.jsonl').read_text().splitlines()[-1])
-        payload=json.loads(next(m['content'] for m in reversed(last_model['messages']) if m['role']=='tool'))
-        self.check('H_ambiguous_identity',payload['status']=='AMBIGUOUS' and payload['data']['candidates']==[]
-            and ambiguous.get('draft_text')=='Подскажите, пожалуйста, ваше имя?')
+            tool('customer_find',{'identity':{'kind':'PHONE','value':'+375299870088'}})])
+        lookup=json.loads((self.state/'customer-lookup-results.jsonl').read_text().splitlines()[-1])
+        later_model=(self.state/'model-requests.jsonl').read_text().splitlines()[model_before:]
+        # Current runtime returns a code-owned safe clarification before giving
+        # an ambiguous identity result to another model iteration.
+        self.check('H_ambiguous_identity',lookup['status']=='AMBIGUOUS'
+            and lookup['match']=='AMBIGUOUS' and lookup['candidate_count']==0
+            and len(later_model)==1
+            and all(message['role']!='tool' for message in json.loads(later_model[0])['messages'])
+            and ambiguous.get('draft_text')=='По этому контакту найдено несколько клиентов. Уточните, пожалуйста, другой контакт.'
+            and ambiguous['operation_refs']==[]
+            and await self.count('customers')==customers_before and await self.count('bookings')==bookings_before)
         # WRITE_SAFE customer creation also traverses actual managed ledger/provider.
         before=await self.count('customers')
         safe_thread=str(uuid4())
@@ -513,6 +520,8 @@ class Harness:
 
 
 async def main():
+    import docker
+
     state=Path(tempfile.mkdtemp(prefix='business-v2-e2e-'))
     state.chmod(0o700)
     print('Private evidence: '+str(state),flush=True)

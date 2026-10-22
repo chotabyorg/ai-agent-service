@@ -4,7 +4,7 @@ from collections.abc import Sequence
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import func, select, update
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.config import get_settings
@@ -12,6 +12,16 @@ from models.agent import AgentCredentials, AgentTemplate
 from schemas.agent import AgentCreate, AgentCredentialsCreate, AgentUpdate
 from services.credentials_cipher import decrypt_credentials, encrypt_credentials
 from services.prompt_builder import PromptBuilder
+from services.handoff_lifecycle import (
+    HandoffLifecycleConflict,
+    HandoffLifecycleUnavailable,
+    transition_agent_lifecycle,
+    activate_agent,
+)
+
+
+class AgentActivationUnavailable(Exception):
+    """The agent cannot be activated without a current OpenRouter key."""
 
 
 class AgentService:
@@ -29,10 +39,12 @@ class AgentService:
         data = payload.model_dump()
         if payload.prompt_config:
             data.setdefault("system_prompt", "")
-            agent = AgentTemplate(user_id=user_id, **data)
+            agent = AgentTemplate(user_id=user_id, handoff_lifecycle_generation=1 if payload.is_active else 0,
+                                  **data)
             agent.system_prompt = self.prompt_builder.build_static(agent)
         else:
-            agent = AgentTemplate(user_id=user_id, **data)
+            agent = AgentTemplate(user_id=user_id, handoff_lifecycle_generation=1 if payload.is_active else 0,
+                                  **data)
         session.add(agent)
         await session.commit()
         await session.refresh(agent)
@@ -72,11 +84,30 @@ class AgentService:
         agent_id: UUID,
         payload: AgentUpdate,
     ) -> AgentTemplate | None:
-        agent = await self.get_agent_by_id(session, agent_id, user_id=user_id)
+        agent = await session.scalar(select(AgentTemplate).where(
+            AgentTemplate.id == agent_id,
+            AgentTemplate.user_id == user_id,
+        ).with_for_update().execution_options(populate_existing=True))
         if agent is None:
             return None
 
         updates = payload.model_dump(exclude_unset=True)
+        requested_active = updates.pop("is_active", None) if "is_active" in updates else None
+        has_active_update = "is_active" in payload.model_fields_set and payload.is_active is not None
+        if (agent.handoff_lifecycle_state != "STABLE"
+                and not (has_active_update and requested_active is False)):
+            raise HandoffLifecycleConflict
+        if has_active_update and requested_active is True and not agent.encrypted_openrouter_key:
+            raise AgentActivationUnavailable
+        if has_active_update and requested_active is False:
+            agent = await transition_agent_lifecycle(
+                session, agent_id, action="DEACTIVATE", owner_id=user_id)
+            if agent is None:
+                return None
+        elif has_active_update and requested_active is True and not agent.is_active:
+            agent = await activate_agent(session, agent_id, user_id)
+            if agent is None:
+                return None
         for field_name, value in updates.items():
             setattr(agent, field_name, value)
 
@@ -86,6 +117,25 @@ class AgentService:
         await session.commit()
         await session.refresh(agent)
         return agent
+
+    async def deactivate_agent(self, session: AsyncSession, agent_id: UUID,
+                               owner_id: UUID, *, runtime=None) -> AgentTemplate | None:
+        result = await transition_agent_lifecycle(
+            session, agent_id, action="DEACTIVATE", owner_id=owner_id, runtime=runtime)
+        return result if isinstance(result, AgentTemplate) else None
+
+    async def remove_openrouter_key(
+        self, session: AsyncSession, agent_id: UUID, owner_id: UUID,
+    ) -> AgentTemplate | None:
+        """Revoke enrolled grants, then clear the key with deactivation in one commit."""
+        result = await transition_agent_lifecycle(
+            session,
+            agent_id,
+            action="DEACTIVATE",
+            owner_id=owner_id,
+            clear_openrouter_key=True,
+        )
+        return result if isinstance(result, AgentTemplate) else None
 
     async def update_prompt_config(
         self,
@@ -153,14 +203,16 @@ class AgentService:
         user_role: str | None = None,
     ) -> bool | None:
         """Delete agent. Returns None if not found, False if forbidden, True on success."""
-        agent = await session.get(AgentTemplate, agent_id)
+        agent = await session.scalar(select(AgentTemplate).where(
+            AgentTemplate.id == agent_id,
+        ).with_for_update().execution_options(populate_existing=True))
         if agent is None:
             return None
         if agent.user_id != user_id and user_role != "admin":
             return False
-        await session.delete(agent)
-        await session.commit()
-        return True
+        result = await transition_agent_lifecycle(
+            session, agent_id, action="DELETE", owner_id=agent.user_id)
+        return bool(result)
 
     async def list_credentials(
         self,
@@ -227,14 +279,21 @@ class AgentService:
         user_id: UUID,
     ) -> int:
         """Deactivate all active agents for a user. Returns the number updated."""
-        stmt = (
-            update(AgentTemplate)
-            .where(
-                AgentTemplate.user_id == user_id,
-                AgentTemplate.is_active.is_(True),
-            )
-            .values(is_active=False)
-        )
-        result = await session.execute(stmt)
-        await session.commit()
-        return int(result.rowcount or 0)
+        agent_ids = list((await session.scalars(select(AgentTemplate.id).where(
+            AgentTemplate.user_id == user_id,
+            AgentTemplate.is_active.is_(True),
+        ))).all())
+        count = 0
+        failure = None
+        for agent_id in agent_ids:
+            try:
+                agent = await self.deactivate_agent(session, agent_id, user_id)
+            except (HandoffLifecycleConflict, HandoffLifecycleUnavailable) as exc:
+                await session.rollback()
+                failure = failure or exc
+                continue
+            if agent is not None:
+                count += 1
+        if failure is not None:
+            raise failure
+        return count
