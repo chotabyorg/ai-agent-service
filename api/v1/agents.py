@@ -7,7 +7,11 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
 from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from api.dependencies import SubscriptionClientDep, get_db
+from api.dependencies import (
+    SubscriptionClientDep,
+    get_db,
+    require_agent_activation_subscription,
+)
 from schemas.agent import (
     AgentCreate,
     AgentCredentialsCreate,
@@ -59,7 +63,14 @@ UserRoleHeader = Annotated[str | None, Header(alias="x-user-role")]
 
 
 @router.post("/", response_model=AgentResponse, status_code=status.HTTP_201_CREATED)
-async def create_agent(payload: AgentCreate, db: DbSession, user_id: UserIdHeader) -> AgentResponse:
+async def create_agent(
+    payload: AgentCreate,
+    db: DbSession,
+    user_id: UserIdHeader,
+    subscription_client: SubscriptionClientDep = None,
+) -> AgentResponse:
+    if payload.is_active is True:
+        await require_agent_activation_subscription(str(user_id), subscription_client)
     agent = await agent_service.create_agent(db, user_id, payload)
     return _build_agent_response(agent)
 
@@ -91,13 +102,7 @@ async def update_agent(
 ) -> AgentResponse:
     if payload.is_active is True:
         # 1. Subscription check (before OpenRouter key check)
-        if subscription_client is not None:
-            check_result = await subscription_client.check(str(user_id))
-            if not check_result.get("allowed"):
-                raise HTTPException(
-                    status_code=402,
-                    detail=check_result.get("reason", "subscription_required"),
-                )
+        await require_agent_activation_subscription(str(user_id), subscription_client)
 
         # 2. OpenRouter key check
         agent_check = await agent_service.get_agent_by_id(db, agent_id, user_id=user_id)

@@ -258,6 +258,12 @@ dedicated credentials before any scope is explicitly enrolled.
 | `HANDOFF_CONVERSATION_URL` | `""` | Base URL for lifecycle revoke calls to Conversation. |
 | `HANDOFF_LIFECYCLE_TOKEN` | `""` | Dedicated credential for AI ownership proofs and Conversation revoke calls. |
 | `HANDOFF_LIFECYCLE_TIMEOUT_SECONDS` | `3` | Timeout for exact Handoff lifecycle acknowledgements. |
+| `SUBSCRIPTION_CHECK_ENABLED` | `false` | Enable subscription checks before creating or updating an active agent. If enabled, a missing URL/client or an unavailable/malformed decision blocks activation with 503. |
+| `SUBSCRIPTION_SERVICE_URL` | `""` | Base URL for subscription-service; required when checks are enabled. |
+| `SUBSCRIPTION_CHECK_AUTH_MODE` | `legacy` | `legacy` allows the coordinated migration caller to omit the dedicated credential; `required` requires it when checks are enabled. |
+| `SUBSCRIPTION_CHECK_TOKEN` | `""` | Dedicated credential sent as `X-Subscription-Check-Token`; never reuse internal, chat, Business, Handoff or managed-principal tokens. |
+
+See [the subscription-check contract](docs/subscription-check.md) for the rollout and response rules.
 
 ### Минимальный `.env` пример
 

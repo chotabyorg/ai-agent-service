@@ -312,6 +312,8 @@ class Settings(BaseSettings):
 
     subscription_service_url: str = Field(default="")
     subscription_check_enabled: bool = Field(default=False)
+    subscription_check_token: SecretStr = Field(default="", repr=False)
+    subscription_check_auth_mode: str = "legacy"
 
     mcp_services: dict = Field(default={
         "bitrix": {
@@ -351,6 +353,71 @@ class Settings(BaseSettings):
     @property
     def redis_enabled(self) -> bool:
         return bool(self.redis_host)
+
+    @model_validator(mode="after")
+    def validate_subscription_check_configuration(self) -> "Settings":
+        """Keep subscription-check routing and its credential independently scoped."""
+        token = self.subscription_check_token.get_secret_value()
+        url = self.subscription_service_url
+
+        valid_url = False
+        if url:
+            try:
+                parsed = urlsplit(url)
+                _ = parsed.port  # Reject malformed and out-of-range explicit ports.
+                valid_url = (
+                    parsed.scheme in {"http", "https"}
+                    and bool(parsed.hostname)
+                    and parsed.username is None
+                    and parsed.password is None
+                    and parsed.path in {"", "/"}
+                    and not parsed.query
+                    and not parsed.fragment
+                    and "?" not in url
+                    and "#" not in url
+                    and url == url.strip()
+                )
+            except ValueError:
+                valid_url = False
+
+        other_tokens: set[str] = set()
+        # Include future ownership/gateway credentials by their *_token field
+        # names, so adding one does not silently permit credential reuse here.
+        for name in type(self).model_fields:
+            if not name.endswith("_token") or name == "subscription_check_token":
+                continue
+            value = getattr(self, name, None)
+            if isinstance(value, SecretStr):
+                value = value.get_secret_value()
+            if isinstance(value, str) and value:
+                other_tokens.add(value)
+        for principal in getattr(self, "managed_principals", ()):
+            managed_token = getattr(principal, "token", None)
+            if isinstance(managed_token, SecretStr):
+                other_tokens.add(managed_token.get_secret_value())
+        for principal_name in ("ownership_principals", "gateway_principals"):
+            for principal in getattr(self, principal_name, ()):
+                credentials = getattr(principal, "credentials", None)
+                if not callable(credentials):
+                    continue
+                for credential in credentials():
+                    credential_token = getattr(credential, "token", None)
+                    if isinstance(credential_token, SecretStr):
+                        other_tokens.add(credential_token.get_secret_value())
+
+        from core.managed_security import valid_token
+
+        if (
+            (self.subscription_check_enabled and (not url or not valid_url))
+            or self.subscription_check_auth_mode not in {"legacy", "required"}
+            or (token and not valid_token(token))
+            or (self.subscription_check_enabled
+                and self.subscription_check_auth_mode == "required"
+                and not token)
+            or (token and token in other_tokens)
+        ):
+            raise RuntimeError("Invalid subscription check configuration")
+        return self
 
 
 @lru_cache
