@@ -87,6 +87,11 @@ def base_env():
         "PYTHONUTF8": "1", "PYTHONUNBUFFERED": "1", "PYTHONDONTWRITEBYTECODE": "1"}
 
 
+def python_executable(path: Path) -> Path:
+    """Keep the venv launcher path: resolving its symlink loses venv packages."""
+    return Path(os.path.abspath(path))
+
+
 def main():
     if not __debug__:
         raise SystemExit("Run the native acceptance runner without python -O")
@@ -103,7 +108,7 @@ def main():
     parser.add_argument("--managed-contract", choices=(2, 3), type=int, default=2)
     args = parser.parse_args()
     roots = {"ai": ROOT, "cs": args.cs_root.resolve(), "crm": args.crm_root.resolve()}
-    pythons = {name: getattr(args, name + "_python").resolve() for name in roots}
+    pythons = {name: python_executable(getattr(args, name + "_python")) for name in roots}
     state = args.output.resolve()
     state.mkdir(mode=0o700, parents=True, exist_ok=False)
     sources = {}

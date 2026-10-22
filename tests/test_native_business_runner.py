@@ -1,7 +1,10 @@
 """Failure-path evidence for the disposable native acceptance controller."""
 from pathlib import Path
+import json
+import os
 import subprocess
 import sys
+import venv
 from unittest.mock import AsyncMock, Mock
 
 import pytest
@@ -9,6 +12,7 @@ import pytest
 from tests.business_v2_e2e.native import (
     close_resources,
     git,
+    python_executable,
     require_server_major,
     validate_pg18_binaries,
 )
@@ -75,3 +79,24 @@ def test_optimized_controller_is_rejected_before_setup():
         capture_output=True, text=True, timeout=15)
     assert result.returncode != 0
     assert "without python -O" in result.stderr
+
+
+def test_python_launcher_keeps_real_venv_packages(tmp_path, monkeypatch):
+    environment = tmp_path / "isolated-venv"
+    venv.EnvBuilder(with_pip=False, symlinks=sys.platform == "linux").create(environment)
+    launcher = environment / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+    if sys.platform == "linux":
+        assert launcher.is_symlink()
+        assert not launcher.resolve().is_relative_to(environment.resolve())
+    probe = subprocess.run([str(launcher), "-I", "-c",
+        "import json,sys,sysconfig; print(json.dumps([sys.prefix,sysconfig.get_path('purelib')]))"],
+        check=True, capture_output=True, text=True, timeout=20)
+    prefix, packages = json.loads(probe.stdout)
+    Path(packages, "native_venv_probe.py").write_text("VALUE = 'venv-only'\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    executable = python_executable(launcher.relative_to(tmp_path))
+    result = subprocess.run([str(executable), "-I", "-c",
+        "import json,sys,native_venv_probe; print(json.dumps([sys.prefix,native_venv_probe.VALUE]))"],
+        check=True, capture_output=True, text=True, timeout=20)
+    assert executable.is_absolute()
+    assert json.loads(result.stdout) == [prefix, "venv-only"]
