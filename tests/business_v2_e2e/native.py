@@ -102,8 +102,6 @@ def main():
     parser.add_argument("--channel", choices=("TELEGRAM", "WEBSITE_WIDGET"), default="TELEGRAM")
     parser.add_argument("--managed-contract", choices=(2, 3), type=int, default=2)
     args = parser.parse_args()
-    if args.managed_contract == 3 and args.channel != "TELEGRAM":
-        parser.error("Managed v3 enrollment currently supports TELEGRAM only")
     roots = {"ai": ROOT, "cs": args.cs_root.resolve(), "crm": args.crm_root.resolve()}
     pythons = {name: getattr(args, name + "_python").resolve() for name in roots}
     state = args.output.resolve()
@@ -176,6 +174,7 @@ def main():
             self.grant.update(channel=args.channel, provider_namespace=(
                 "main-chota.telegram.v1" if args.channel == "TELEGRAM" else "main-chota.website-widget.v1"))
             self.threads = {}
+            self.website_sessions = {}
             self.message_number = 0
             self.tokens.update(cp_lifecycle=secrets.token_urlsafe(36),
                 ai_lifecycle=secrets.token_urlsafe(36))
@@ -226,15 +225,24 @@ def main():
                     TELEGRAM_WORKER_ENABLED="true", TELEGRAM_WORKER_PRINCIPAL_ID="synthetic-worker")
             else:
                 cs_env.update(WEBSITE_BINDINGS=json.dumps([dict(owner_id=self.grant["owner_id"],
-                    integration_id=self.ids["integration"], agent_id=self.ids["agent"])]),
+                    integration_id=self.ids["integration"], agent_id=self.ids["agent"],
+                    **({"capability_generation": 1} if args.managed_contract == 3 else {}))]),
                     WEBSITE_WORKER_ENABLED="true", WEBSITE_WORKER_PRINCIPAL_ID="synthetic-worker")
+                if args.managed_contract == 3:
+                    cs_env.update(WEBSITE_SESSION_CAPABILITIES_ENABLED="true",
+                        WEBSITE_HANDOFF_INTEGRATION_IDS=json.dumps([self.ids["integration"]]),
+                        TURN_SETTLING_POLICIES=json.dumps([dict(channel="WEBSITE_WIDGET",
+                            integration_id=self.ids["integration"], version="native-business-v3",
+                            quiet_window_ms=100, max_wait_ms=1000)]))
             if args.managed_contract == 3:
                 ai_env.update(HANDOFF_AI_ENROLLED_SCOPES=json.dumps([{
                     key: grant[key] for key in ("owner_id", "integration_id", "channel", "agent_id")}]),
                     HANDOFF_CONVERSATION_URL=self.url("cs"),
                     HANDOFF_LIFECYCLE_TOKEN=self.tokens["ai_lifecycle"])
-                cs_env.update(TELEGRAM_HANDOFF_INTEGRATION_IDS=json.dumps([self.ids["integration"]]),
-                    USER_SERVICE_BASE_URL=self.url("model"), HANDOFF_CP_BASE_URL=self.url("model"),
+                if args.channel == "TELEGRAM":
+                    cs_env["TELEGRAM_HANDOFF_INTEGRATION_IDS"] = json.dumps([self.ids["integration"]])
+                cs_env.update(USER_SERVICE_BASE_URL=self.url("model"),
+                    HANDOFF_CP_BASE_URL=self.url("model"),
                     HANDOFF_AI_BASE_URL=self.url("ai"), INBOX_LIFECYCLE_TOKEN=self.tokens["cp_lifecycle"],
                     HANDOFF_LIFECYCLE_TOKEN=self.tokens["ai_lifecycle"])
             crm_env = dict(DATABASE_URL=db_url("crm"), USER_SERVICE_URL=self.url("model"),
@@ -272,6 +280,19 @@ def main():
                 body = identity | dict(text=message, desired_route="MANAGED", update_id=self.message_number,
                     message_id=self.message_number, chat_id=chat, sender_id=chat)
                 route, table = "telegram", "telegram_admissions"
+            elif args.managed_contract == 3:
+                if thread not in self.website_sessions:
+                    # Separate synthetic visitors share the integration quota.
+                    # Use actual issuance/admission; never seed a retained grant.
+                    client_number = len(self.website_sessions) + 1
+                    assert client_number <= 254
+                    self.website_sessions[thread] = await self.request("cs", "POST",
+                        "/internal/v1/website/sessions", identity | dict(binding_generation=1,
+                            client_ip=f"192.0.2.{client_number}"), headers, expected=201)
+                credential = self.website_sessions[thread]
+                body = identity | dict(binding_generation=1, session_id=credential["session_id"],
+                    session_token=credential["session_token"], message_id=str(uuid4()), text=message)
+                route, table = "website/sessions", "website_admissions"
             else:
                 identity.update(session_id=thread, message_id=str(uuid4()))
                 body = identity | dict(text=message, desired_route="MANAGED")
