@@ -31,9 +31,22 @@ class _NoResponseCookies(DefaultCookiePolicy):
 class ChotaCRMClient:
     supported_capabilities = frozenset(REGISTRY)
 
-    def __init__(self, settings, *, transport: httpx.AsyncBaseTransport | None = None):
+    def __init__(self, settings, *, transport: httpx.AsyncBaseTransport | None = None,
+                 share_signing_material=False):
         self.settings = settings
         self.transport = transport
+        self._share_signing_material = share_signing_material
+        # One entry owned by this application client, not a token/authority cache.
+        # Rotation evicts the old entry before validation, including on failure.
+        self._signing_material = None
+
+    def _shared_key(self, pem):
+        if self._signing_material is not None and self._signing_material[0] == pem:
+            return self._signing_material[1]
+        self._signing_material = None
+        key = self._validated_key(pem)
+        self._signing_material = (pem, key)
+        return key
 
     @staticmethod
     def _validated_key(pem):
@@ -46,10 +59,12 @@ class ChotaCRMClient:
         pem = self.settings.business_crm_private_key.get_secret_value()
         kid = self.settings.business_crm_key_id
         if not pem or not kid:
+            self._signing_material = None
             raise BusinessRuntimeError('PROVIDER_UNAVAILABLE')
         try:
             from services.voice_signing import signing_key
-            key = signing_key(execution, pem, self._validated_key)
+            key = signing_key(execution, pem, self._validated_key,
+                shared_load=self._shared_key if self._share_signing_material else None)
             now = int(time.time())
             header = _b64(json.dumps({'alg': 'RS256', 'typ': 'JWT', 'kid': kid}, separators=(',', ':')).encode())
             payload = _b64(json.dumps({'iss': 'ai-agent-service', 'aud': 'chota-crm-agent', 'iat': now,

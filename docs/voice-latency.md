@@ -69,6 +69,16 @@ Business guards, HTTP ownership and result freshness remain unchanged. No token,
 grant, tool result or availability is cached. Text channels retain their prior
 path.
 
+The application-owned CRM adapter also retains at most one validated PEM/key
+pair across enabled managed signing scopes. This avoids parsing the same RSA
+key at the start of each concurrent Turn. The ordinary per-Turn entry still
+clears on completion or cancellation; only derived immutable key material may
+outlive it. Changing the PEM evicts the application entry before validating its
+replacement. Invalid or absent credentials fail closed. This cache belongs to
+that adapter client, and is not shared with configuration/browser clients.
+Requests without their own enabled signing scope cannot use it. No task, pool,
+authority result or signed assertion is retained by this optimization.
+
 On the live host, three synthetic comparisons of four signatures measured
 522–539 ms without reuse and 128–155 ms with reuse (including the first parse).
 These measurements send no CRM requests and do not establish end-to-end latency.
