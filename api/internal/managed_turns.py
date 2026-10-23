@@ -4,6 +4,8 @@ import asyncio
 import json
 import re
 
+import anyio
+
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
@@ -80,6 +82,17 @@ def _sse_event(payload):
     return ("data: " + json.dumps(payload, ensure_ascii=False) + "\n\n").encode("utf-8")
 
 
+class _ManagedStreamingResponse(StreamingResponse):
+    async def __call__(self, scope, receive, send):
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            # A disconnect during send leaves the generator suspended at yield,
+            # outside its cancellation handler. Explicitly close and join it.
+            with anyio.CancelScope(shield=True):
+                await self.body_iterator.aclose()
+
+
 async def _stream_managed_turn(value, grant, runtime, provider, factory, registry):
     """Forward sentence-aligned partials, then the authoritative final result.
 
@@ -116,17 +129,28 @@ async def _stream_managed_turn(value, grant, runtime, provider, factory, registr
             yield _sse_event({"partial_text": pending.get_nowait(), "partial_final": False})
         result = task.result()
     except asyncio.CancelledError:
-        task.cancel()
-        runtime.signal_cancel()
-        try:
-            task.result()
-        except BaseException:
-            pass
         raise
     except ManagedAgentNotFound:
         result = None
     except Exception:
         result = None
+    finally:
+        if not task.done():
+            runtime.signal_cancel()
+        # StreamingResponse cancels its AnyIO scope on disconnect. Shield the
+        # join from level cancellation; never task.cancel the owner. Retrieve
+        # already-failed owners too when a disconnect interrupted a partial.
+        with anyio.CancelScope(shield=True):
+            try:
+                await join_owner(task, runtime)
+            except asyncio.CancelledError:
+                # join_owner also raises when only the owner was cancelled.
+                # Preserve caller cancellation after joining, but do not replace
+                # a send failure/GeneratorExit with owner-only cancellation.
+                if asyncio.current_task().cancelling():
+                    raise
+            except BaseException:
+                pass
     if result is None:
         result = ManagedTurnResult(
             contract_version=value.contract_version,
@@ -165,7 +189,7 @@ async def execute_managed_turn(request: Request):
     factory = _business_dependency(request, get_business_session_factory)
     registry = _business_dependency(request, get_business_registry)
     if value.stream_partials:
-        return StreamingResponse(
+        return _ManagedStreamingResponse(
             _stream_managed_turn(value, grant, runtime, provider, factory, registry),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
