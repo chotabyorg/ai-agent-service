@@ -85,7 +85,7 @@ async def test_close_observes_owner_error_when_already_done(monkeypatch):
 
     monkeypatch.setattr(mod, "execute_managed_owned", execute)
     stream = mod._stream_managed_turn(request, None, runtime, None, None, None)
-    await anext(stream)
+    await stream.__anext__()
     release.set()
     await failed.wait()
     assert owners[0].done()
@@ -127,7 +127,7 @@ async def test_repeated_parent_cancel_waits_for_same_owner_cleanup(
 
     monkeypatch.setattr(mod, "execute_managed_owned", execute)
     stream = mod._stream_managed_turn(value(), None, runtime, None, None, None)
-    reader = asyncio.create_task(anext(stream))
+    reader = asyncio.create_task(stream.__anext__())
     await started.wait()
     reader.cancel()
     await closing.wait()
@@ -173,7 +173,7 @@ async def test_real_owned_runtime_joins_and_cleanup_deadline_stays_bounded(
 
     monkeypatch.setattr(BusinessRepository, "result_gate", gate)
     stream = mod._stream_managed_turn(request, None, runtime, None, None, None)
-    reader = asyncio.create_task(anext(stream))
+    reader = asyncio.create_task(stream.__anext__())
     await asyncio.wait_for(started.wait(), 5)
     reader.cancel()
     await asyncio.wait_for(closing.wait(), 5)
@@ -219,7 +219,7 @@ async def test_new_parent_cancel_during_aclose_is_not_swallowed(monkeypatch):
 
     monkeypatch.setattr(mod, "execute_managed_owned", execute)
     stream = mod._stream_managed_turn(value(), None, runtime, None, None, None)
-    await anext(stream)
+    await stream.__anext__()
     closer = asyncio.create_task(stream.aclose())
     try:
         await asyncio.wait_for(closing.wait(), 5)
