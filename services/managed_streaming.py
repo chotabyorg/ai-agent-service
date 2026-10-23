@@ -150,6 +150,12 @@ def _merge_tool_call(target: dict[str, Any], part: Any) -> None:
         slot["type"] = call_type
     function = _get(part, "function")
     name, arguments = _get(function, "name"), _get(function, "arguments")
+    if arguments is not None and not isinstance(arguments, str):
+        # Dropping a malformed continuation could make a complete prefix look
+        # like an authorized tool call with different arguments.
+        from services.managed_tools import ManagedExecutionError
+
+        raise ManagedExecutionError("INVALID_RESULT")
     if isinstance(name, str) and name:
         slot["name"] = name
     if isinstance(arguments, str):

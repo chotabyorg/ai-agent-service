@@ -1,7 +1,9 @@
 """Streaming completion assembly: partials, fallback, bounds, no persistence."""
 
-import pytest
+import json
 from types import SimpleNamespace
+
+import pytest
 
 from services.managed_completion import select_managed_completion
 from services.managed_streaming import (
@@ -11,6 +13,7 @@ from services.managed_streaming import (
     stream_completion,
 )
 from tests.fakes import build_llm_response
+from services.managed_tools import ManagedExecutionError
 
 
 def chunk(*, text=None, tool_calls=None, finish=None):
@@ -132,6 +135,66 @@ async def test_tool_delta_stops_partials_but_keeps_full_result():
     assert selected.branch == "TOOL_CALLS"
     calls = result.choices[0].message.tool_calls
     assert len(calls) == 1 and calls[0].id == "call_1"
+    assert calls[0].function.arguments == '{"q":"x"}'
+
+
+@pytest.mark.parametrize("arguments", [{"q": "replacement"}, ["replacement"], 7, True])
+@pytest.mark.parametrize("transport", ["dict", "namespace", "sse"])
+async def test_malformed_tool_argument_delta_cannot_be_discarded(arguments, transport):
+    # A complete prefix must not become an executable call after dropping an
+    # invalid continuation supplied by the provider.
+    events = [
+        {"choices": [{"delta": {"tool_calls": [{
+            "index": 0, "id": "call_1", "type": "function",
+            "function": {"name": "lookup", "arguments": "{}"},
+        }]}}]},
+        {"choices": [{"delta": {"tool_calls": [{
+            "index": 0, "function": {"arguments": arguments},
+        }]}}]},
+        {"choices": [{"delta": {}, "finish_reason": "tool_calls"}]},
+    ]
+
+    def namespace(value):
+        if isinstance(value, dict):
+            return SimpleNamespace(**{key: namespace(item) for key, item in value.items()})
+        if isinstance(value, list):
+            return [namespace(item) for item in value]
+        return value
+
+    async def create(**kwargs):
+        async def generate():
+            for event in events:
+                if transport == "sse":
+                    yield "data: " + json.dumps(event)
+                elif transport == "namespace":
+                    yield namespace(event)
+                else:
+                    yield event
+        return generate()
+
+    with pytest.raises(ManagedExecutionError, match="INVALID_RESULT"):
+        await collect(create)
+
+
+async def test_empty_and_absent_tool_argument_deltas_preserve_fragments():
+    async def create(**kwargs):
+        async def generate():
+            for function in (
+                {"name": "lookup", "arguments": '{"q":'},
+                {}, {"arguments": None}, {"arguments": ""},
+                {"arguments": '"x"}'},
+            ):
+                yield chunk(tool_calls=[{
+                    "index": 0, "id": "call_1", "type": "function", "function": function,
+                }])
+            yield chunk(finish="tool_calls")
+        return generate()
+
+    result, partials = await collect(create)
+    assert partials == []
+    calls = result.choices[0].message.tool_calls
+    assert len(calls) == 1
+    assert calls[0].function.name == "lookup"
     assert calls[0].function.arguments == '{"q":"x"}'
 
 
